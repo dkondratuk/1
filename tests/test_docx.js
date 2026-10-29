@@ -1,0 +1,11 @@
+require('../app/core.js'); const C=globalThis.Core; const {DOMParser}=require('@xmldom/xmldom'); const fs=require('fs');
+const styles=C.docxStyles(fs.readFileSync('samples/x/word/styles.xml','utf8'),DOMParser);
+const lines=C.docxParagraphs(fs.readFileSync('samples/x/word/document.xml','utf8'),DOMParser,styles);
+const p={chars:{},locs:{},episodes:[],rules:{}};
+const fin=C.finalizeImport(C.classifyLines(lines),p); const blocks=fin.blocks, rep=fin.report; const sp={cast:{}};
+console.log(blocks.slice(0,40).map(b=>b.t+': '+b.x.slice(0,70)).join('\n'));
+console.log('cast scenes',Object.keys(sp.cast).length, 'newChars',rep.newChars.join(','), '\nlocs',Object.keys(p.locs).join(' | '));
+const ep={blocks,sceneMeta:fin.sceneMeta}; console.log('guessed',rep.guessed,'untyped',rep.untyped,'castScenes',rep.castScenes);
+const st=C.analyzeEpisode(ep,p); console.log('pages',st.pages.toFixed(2),'scenes',st.scenes.length);
+st.scenes.forEach(s=>console.log(s.n,C.formatHeading(s.h),'|',s.h.guessed?'GUESS':'',C.fmtPages(s.pages),s.cast.join(',')));
+const types={}; blocks.forEach(b=>types[b.t]=(types[b.t]||0)+1); console.log(types);

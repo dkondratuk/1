@@ -1,0 +1,92 @@
+<title>Драфт</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="styles.css">
+
+<header class="topbar" id="topbar">
+  <div class="brand" title="Драфт — сценарный редактор">Драфт</div>
+  <div class="crumbs">
+    <select id="projectSelect" aria-label="Проект"></select>
+    <span class="crumb-sep">/</span>
+    <span id="epTitle" class="ep-title">—</span>
+  </div>
+  <div class="tb-group">
+    <label class="sr" for="elemSelect">Элемент</label>
+    <select id="elemSelect" title="Тип элемента (Ctrl+1…6)">
+      <option value="scene">Сцена · Ctrl+1</option>
+      <option value="action">Описание · Ctrl+2</option>
+      <option value="character">Персонаж · Ctrl+3</option>
+      <option value="paren">Ремарка · Ctrl+4</option>
+      <option value="dialogue">Реплика · Ctrl+5</option>
+      <option value="transition">Переход · Ctrl+6</option>
+    </select>
+    <button class="btn" id="btnComment" title="Комментарий к выделенному (Ctrl+Alt+M)">Комментарий</button>
+    <button class="btn" id="btnDraft" title="Сохранить драфт серии">Сохранить драфт</button>
+    <button class="btn" id="btnHistory" title="Откат по времени: автоснимки каждые 15 минут и перед крупными изменениями">История</button>
+    <button class="btn" id="btnImport">Загрузить сценарий</button>
+    <div class="menu-wrap">
+      <button class="btn" id="btnExport" aria-haspopup="true">Экспорт</button>
+      <div class="menu" id="exportMenu" hidden>
+        <button data-exp="pdf">PDF в формате Final Draft</button>
+        <button data-exp="fdx">Final Draft (.fdx)</button>
+        <button data-exp="docx">Word для FilmToolz (.docx)</button>
+        <button data-exp="fountain">Fountain / текст</button>
+        <button data-exp="bible">Библия персонажей (.html)</button>
+        <hr>
+        <button data-exp="project">Файл проекта (.json)</button>
+        <button data-exp="openproject">Открыть файл проекта…</button>
+      </div>
+    </div>
+    <button class="btn ghost" id="btnSeason">Сезон</button>
+    <button class="btn ghost" id="btnSettings">Настройки</button>
+    <button class="btn ghost icon" id="btnFocus" title="Режим фокуса">◐</button>
+  </div>
+</header>
+
+<div class="layout" id="layout">
+  <aside class="left" id="leftPanel">
+    <div class="tabs" role="tablist">
+      <button class="tab active" data-ltab="episodes">Серии</button>
+      <button class="tab" data-ltab="scenes">Сцены</button>
+    </div>
+    <section class="lpane" id="pane-episodes"></section>
+    <section class="lpane" id="pane-scenes" hidden></section>
+  </aside>
+
+  <main class="center" id="center">
+    <div class="ruler" id="ruler"><span id="pageInfo">—</span><span id="roleInfo"></span></div>
+    <div class="desk" id="desk">
+      <div class="page-wrap" id="pageWrap"><div class="page" id="page">
+        <div class="editor" id="editor" spellcheck="true" lang="ru" contenteditable="true" aria-label="Текст сценария"></div>
+        <div class="cmarks" id="cmarks"></div>
+      </div></div>
+    </div>
+  </main>
+
+  <aside class="right" id="rightPanel">
+    <div class="tabs" role="tablist">
+      <button class="tab active" data-rtab="stats">Время</button>
+      <button class="tab" data-rtab="rules">Параметры</button>
+      <button class="tab" data-rtab="comments">Замечания</button>
+      <button class="tab" data-rtab="bible">Персонажи</button>
+      <button class="tab" data-rtab="objects">Объекты</button>
+    </div>
+    <section class="rpane" id="pane-stats"></section>
+    <section class="rpane" id="pane-rules" hidden></section>
+    <section class="rpane" id="pane-comments" hidden></section>
+    <section class="rpane" id="pane-bible" hidden></section>
+    <section class="rpane" id="pane-objects" hidden></section>
+  </aside>
+</div>
+
+<div class="ac" id="ac" hidden></div>
+<div class="toast" id="toast" hidden></div>
+<div class="modal-back" id="modalBack" hidden>
+  <div class="modal" id="modal" role="dialog" aria-modal="true"></div>
+</div>
+<input type="file" id="fileInput" hidden accept=".fdx,.docx,.pdf,.txt,.fountain,.json">
+
+<script src="fonts.js"></script>
+<script src="core.js"></script>
+<script src="app.js"></script>
