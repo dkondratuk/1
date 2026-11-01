@@ -100,7 +100,7 @@
   // ---------- downloads (artifact viewer capability or a plain link) ----------
   let dlP = null;
   if (window.claude && typeof window.claude.use === 'function') dlP = window.claude.use('downloads').catch(() => null);
-  const DL_OK = ['txt', 'json', 'md', 'docx', 'pdf', 'html', 'zip', 'csv'];
+  const DL_OK = ['txt', 'json', 'md', 'docx', 'pdf', 'html', 'zip', 'csv', 'xlsx'];
   async function saveFile(name, data, mime) {
     const ext = name.split('.').pop().toLowerCase();
     const dl = dlP ? await dlP : null;
@@ -112,14 +112,15 @@
         payload = await z.generateAsync({ type: 'blob' }); fname = name.replace(/\.[^.]+$/, '') + '.zip';
         toast('Файл ' + name + ' упакован в .zip — так его можно сохранить из браузера.');
       }
-      try { await dl.save({ filename: fname, data: payload }); }
-      catch (e) { if (e && e.code !== 'declined') toast('Не удалось сохранить файл: ' + (e.message || e.code)); }
-      return;
+      // the result says whether the file was saved: the sides log records only copies that really went out
+      try { await dl.save({ filename: fname, data: payload }); return true; }
+      catch (e) { if (e && e.code !== 'declined') toast('Не удалось сохранить файл: ' + (e.message || e.code)); return false; }
     }
     const blob = data instanceof Blob ? data : new Blob([data], { type: mime || 'application/octet-stream' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click();
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+    return true;
   }
   const LIBS = {
     jszip: ['https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js', () => window.JSZip],
@@ -365,7 +366,13 @@
     const text = (e.clipboardData || window.clipboardData).getData('text/plain');
     if (!text) return;
     pushUndo();
-    if (!/\n/.test(text.trim())) { document.execCommand('insertText', false, text.replace(/\s+/g, ' ')); return; }
+    if (!/\n/.test(text.trim())) {
+      const ins = text.replace(/\s+/g, ' ');
+      document.execCommand('insertText', false, ins);
+      const el1 = curBlockEl();
+      if (clipTags && el1) { recompute(); adoptClipTags(text, [el1.dataset.id], caretOffset(el1) - ins.length, ins); }
+      return;
+    }
     if (text.length > 2000) { recompute(); histAdd(S.ep, 'перед вставкой текста', true); }
     const fin = C.finalizeImport(C.importText(text), P());
     const blocks = fin.blocks, rep = fin.report;
@@ -383,7 +390,35 @@
     const last = blocks[blocks.length - 1]; if (last) setCaret(last.id, last.x.length);
     if (rep.newChars.length || rep.newLocs.length) toast('Вставлено ' + blocks.length + ' элементов. Новые персонажи: ' + rep.newChars.length + ', объекты: ' + rep.newLocs.length);
     recompute();
+    adoptClipTags(text, blocks.map((b) => b.id));
   });
+  // breakdown tags travel with cut text, as in Final Draft: Ctrl+X remembers the tags inside the selection, and the paste of
+  // that same text gives them back to the pasted words (until then they wait under «Текст удалён»). A copy leaves them be
+  let clipTags = null;
+  const clipKey = (t) => String(t || '').replace(/\s+/g, ' ').trim();
+  ed.addEventListener('cut', () => {
+    clipTags = null;
+    const sel = window.getSelection();
+    if (!sel.rangeCount || sel.isCollapsed || !(S.ep.tags || []).length) return;
+    const r = sel.getRangeAt(0);
+    const ids = tagSpots().filter((x) => { const q = rangeIn(x.el, x.i, x.i + x.t.quote.length); return q && r.compareBoundaryPoints(Range.START_TO_START, q) <= 0 && r.compareBoundaryPoints(Range.END_TO_END, q) >= 0; }).map((x) => x.t.id);
+    if (ids.length) clipTags = { text: clipKey(sel.toString()), ids };
+  });
+  ed.addEventListener('copy', () => { clipTags = null; });
+  // after the paste is in S.ep.blocks: a remembered tag that lost its words takes them back in the pasted elements
+  function adoptClipTags(text, ids, hint, ins) {
+    const c = clipTags;
+    if (!c || clipKey(text) !== c.text) return;
+    clipTags = null;
+    let n = 0;
+    for (const t of S.ep.tags || []) {
+      if (!t.lost || !c.ids.includes(t.id)) continue;
+      const b = ids.map((id) => S.ep.blocks.find((x) => x.id === id)).find((x) => x && x.x.indexOf(t.quote) >= 0);
+      if (!b) continue;
+      t.blockId = b.id; t.at = C.quoteAt(b.x, t.quote, hint != null && ins ? hint + Math.max(0, ins.indexOf(t.quote)) : 0); delete t.lost; n++;
+    }
+    if (n) recompute();
+  }
   document.addEventListener('selectionchange', () => {
     const el = curBlockEl();
     $$('.b.cur', ed).forEach((x) => x !== el && x.classList.remove('cur'));
@@ -561,15 +596,15 @@
         pg.appendChild(m);
       }
     }
-    // revision marks: an asterisk in the right margin of every line of a revised element, in its revision's colour
+    // draft marks: an asterisk in the right margin of every line changed in a later draft; the current draft's marks stand out
     pg.querySelectorAll(':scope > .revmark').forEach((m) => m.remove());
     const revs = S.st.revs;
     if (revs && revMarksOn()) els.forEach((el, i) => {
       const lv = revs[i]; if (!lv) return;
       const lh = parseFloat(getComputedStyle(el).lineHeight) || 16, L = S.st.lay.info[i].L;
       const m = document.createElement('div');
-      m.className = 'revmark'; m.setAttribute('aria-hidden', 'true'); m.dataset.level = lv; m.title = C.revName(lv) + ' ревизия';
-      m.textContent = Array(L).fill('*').join('\n'); m.style.color = C.revColor(lv);
+      m.className = 'revmark'; m.setAttribute('aria-hidden', 'true'); m.dataset.level = lv; m.title = 'Изменено в «' + C.revName(lv) + '»';
+      m.textContent = Array(L).fill('*').join('\n'); if (lv !== (S.ep.revLevel || 0)) m.classList.add('old');
       m.style.top = (el.offsetTop + el.offsetHeight - L * lh) + 'px'; m.style.lineHeight = lh + 'px';
       pg.appendChild(m);
     });
@@ -581,8 +616,8 @@
       (st.lines && st.lines.length ? ' · ' + st.lines.map((l) => l.name + ' ' + (l.share * 100).toFixed(0) + '%').join(' / ') : '');
     $('#roleInfo').textContent = roleName(S.me.role) + ': ' + S.me.name + (S.ep.lock ? ' · номера сцен залочены' : '');
     const lv = S.ep.revLevel || 0, ri = $('#revInfo');
-    ri.hidden = !lv && !S.ep.pageLock;
-    ri.innerHTML = (lv ? '<i style="background:' + C.revColor(lv) + '"></i>' + esc(C.revName(lv)) + ' ревизия' : '') + (S.ep.pageLock ? (lv ? ' · ' : '') + 'страницы залочены' : '');
+    ri.hidden = false;
+    ri.textContent = C.revName(lv) + (S.ep.pageLock ? ' · страницы залочены' : '');
   }
 
   // ---------- left: episodes ----------
@@ -670,7 +705,7 @@
     for (const e of P().episodes) {
       const m = document.querySelector('[data-meta="' + e.id + '"]'); if (!m) continue;
       const st = e === S.ep && S.st ? S.st : (e._st || (e._st = C.analyzeEpisode(e, P())));
-      m.textContent = st.pages.toFixed(1) + ' стр · ' + C.fmtTime(st.minutes) + ' · ' + st.scenes.length + ' сц' + (e.drafts && e.drafts.length ? ' · драфт ' + e.drafts.length : '');
+      m.textContent = st.pages.toFixed(1) + ' стр · ' + C.fmtTime(st.minutes) + ' · ' + st.scenes.length + ' сц' + (e.revLevel ? ' · ' + C.revName(e.revLevel) : '');
     }
   }
   function renderTitle() { $('#epTitle').textContent = 'Сезон ' + S.ep.season + ', серия ' + S.ep.number + (S.ep.title ? ' — ' + S.ep.title : ''); }
@@ -696,7 +731,7 @@
       '<div class="row"><button class="btn small" id="renum">Перенумеровать по порядку' + (nc.proposal[0].includes('-') ? ' (' + esc(nc.proposal[0]) + '…)' : '') + '</button><span class="small muted">отменить: Ctrl+Z</span></div></div>' : '');
     pane.innerHTML = numHTML + S.st.scenes.map((s) => '<div class="sc' + (s.id === S.curScene ? ' active' : '') + (s.sec < r.shortSceneSec ? ' short' : '') + (s.omitted ? ' omitted' : '') + '" data-id="' + s.id + '"><span class="num">' + esc(s.num) + '</span><span class="hd">' + esc(s.heading || '(без заголовка)') + '</span>' +
       '<span class="meta"><span class="mono">' + C.fmtPages(s.pages) + ' · ' + C.fmtTime(s.min) + '</span>' + (s.pav ? '<span class="chip pav">павильон</span>' : '') + (s.night ? '<span class="chip night">ночь</span>' : '') +
-      s.tags.map((t) => '<span class="chip tag">' + esc(C.TAGS[t]) + '</span>').join('') + (s.cast.length ? '<span>' + s.cast.length + ' арт.</span>' : '') + (s.day ? '<span>д.' + esc(s.day) + '</span>' : '') + (S.ep.pageLock ? '<span title="Страница (лок страниц)">с. ' + esc(s.page) + '</span>' : '') + (s.line ? '<span class="chip" style="border-color:' + lineColor(s.line) + ';color:' + lineColor(s.line) + '" title="' + (s.lineAuto ? 'авто: ' + esc(s.lineAuto) : 'задано вручную') + '">' + esc(s.line) + (s.lineAuto ? ' ·' : '') + '</span>' : '') + '</span>' +
+      s.tags.map((t) => '<span class="chip tag">' + esc(C.TAGS[t]) + '</span>').join('') + (s.bdTags || []).map((t) => '<span class="chip tag bdt" title="Из разбивки">' + esc(C.TAGS[t]) + '</span>').join('') + (s.cast.length ? '<span>' + s.cast.length + ' арт.</span>' : '') + (s.day ? '<span>д.' + esc(s.day) + '</span>' : '') + (S.ep.pageLock ? '<span title="Страница (лок страниц)">с. ' + esc(s.page) + '</span>' : '') + (s.line ? '<span class="chip" style="border-color:' + lineColor(s.line) + ';color:' + lineColor(s.line) + '" title="' + (s.lineAuto ? 'авто: ' + esc(s.lineAuto) : 'задано вручную') + '">' + esc(s.line) + (s.lineAuto ? ' ·' : '') + '</span>' : '') + '</span>' +
       (s.synopsis ? '<span class="syn">' + esc(s.synopsis) + '</span>' : '') + '</div>').join('') +
       (insp ? inspectorHTML(insp) : '<p class="note">Нажмите на сцену, чтобы перейти к ней, добавить синопсис, сценарный день и производственные метки.</p>');
     $$('.sc', pane).forEach((x) => x.onclick = () => { S.curScene = x.dataset.id; jumpTo(x.dataset.id); renderScenes(); });
@@ -741,7 +776,7 @@
       };
     });
   }
-  // ---------- production revisions and locked pages (Final Draft: Production → Revisions, Lock Pages) ----------
+  // ---------- production drafts and locked pages (Final Draft: Production → Revisions, Lock Pages; named by number) ----------
   const fmtDay = (t) => new Date(t).toLocaleDateString('ru-RU');
   function showRevisions() {
     recompute();
@@ -749,18 +784,17 @@
     const may = canLock() && !TAB.stale, next = C.revName(lv + 1);
     const marked = (S.st.revs || []).filter((x) => x === lv && lv).length;
     const pl = ep.pageLock, aPages = S.st.lay.labels.filter((l) => /[A-Z]$/.test(l)).length;
-    const sw = (lvl) => '<i class="revsw" style="background:' + C.revColor(lvl) + '"></i>';
-    modal('<h2>Ревизии · серия ' + ep.number + '</h2>' +
-      '<p class="note">' + (lv ? 'Текущая ревизия — <b>' + esc(C.revName(lv)) + '</b>. Всё, что меняется в тексте, помечается звёздочкой на правом поле; пометки прошлых ревизий остаются в своём цвете. В PDF на изменённых страницах — шапка с названием ревизии и датой.' : 'Текст — белый оригинал, пометок нет. Когда сценарий ушёл в производство, начните ревизию: дальнейшие правки будут помечаться звёздочкой на полях, как в Final Draft.') + '</p>' +
-      (list.length ? '<div class="tbl-wrap"><table class="t"><thead><tr><th>Ревизия</th><th>Начата</th><th>Кто</th><th class="n">Помечено</th></tr></thead><tbody>' +
-        list.map((r) => '<tr><td>' + sw(r.level) + esc(r.name || C.revName(r.level)) + (r.level === lv ? ' <span class="chip">текущая</span>' : '') + '</td><td class="mono small">' + fmtDay(r.date) + '</td><td class="small">' + esc(r.by || '') + '</td><td class="n">' + (S.st.revs || []).filter((x) => x === r.level).length + '</td></tr>').join('') +
-        '<tr><td>' + sw(0) + 'Белая</td><td colspan="3" class="small muted">оригинал</td></tr></tbody></table></div>' : '') +
-      '<div class="row">' + (may ? '<button class="btn primary" id="rvStart">' + sw(lv + 1) + 'Начать ревизию «' + esc(next) + '»</button>' : '<span class="small muted">Начать ревизию может продюсер или редактор.</span>') + '</div>' +
+    modal('<h2>Драфты · серия ' + ep.number + '</h2>' +
+      '<p class="note">Сейчас — <b>' + esc(C.revName(lv)) + '</b>. ' + (lv ? 'Всё, что меняется в тексте по сравнению с «' + esc(C.revName(lv - 1)) + '», помечается звёздочкой на правом поле; пометки прошлых драфтов остаются серыми. В PDF на изменённых страницах — шапка «' + esc(C.revName(lv)) + '» с датой.' : 'Пометок пока нет. Когда текст разослан группе, начните следующий драфт: дальнейшие правки будут помечаться звёздочкой на полях, а текущий текст сохранится в списке драфтов.') + '</p>' +
+      (list.length ? '<div class="tbl-wrap"><table class="t"><thead><tr><th>Драфт</th><th>Начат</th><th>Кто</th><th class="n">Помечено</th></tr></thead><tbody>' +
+        list.map((r) => '<tr><td>' + esc(C.revName(r.level)) + (r.level === lv ? ' <span class="chip">текущий</span>' : '') + '</td><td class="mono small">' + fmtDay(r.date) + '</td><td class="small">' + esc(r.by || '') + '</td><td class="n">' + (S.st.revs || []).filter((x) => x === r.level).length + '</td></tr>').join('') +
+        '<tr><td>' + esc(C.revName(0)) + '</td><td colspan="3" class="small muted">исходный текст</td></tr></tbody></table></div>' : '') +
+      '<div class="row">' + (may ? '<button class="btn primary" id="rvStart">Начать «' + esc(next) + '»</button>' : '<span class="small muted">Начать новый драфт может продюсер или редактор.</span>') + '</div>' +
       '<label class="row"><input type="checkbox" id="rvMarks"' + (revMarksOn() ? ' checked' : '') + '> Показывать пометки на экране</label>' +
-      (lv ? '<p class="note">Помечено элементов в текущей ревизии: ' + marked + '. В окне PDF можно напечатать только изменённые страницы.</p>' : '') +
+      (lv ? '<p class="note">Помечено элементов в «' + esc(C.revName(lv)) + '»: ' + marked + '. В окне PDF можно напечатать только изменённые страницы.</p>' : '') +
       '<div class="h">Лок страниц</div>' +
       (pl ? '<div class="rule ok"><div class="top"><span class="dot"></span><span class="title">Страницы залочены</span><span class="val">' + fmtDate(pl.at) + '</span></div><div class="note">' + esc(pl.by || '') + '. Номера страниц не сдвигаются: текст, который не помещается, уходит на A-страницы (12A, 12B), а укоротившаяся страница остаётся короткой. A-страниц сейчас: ' + aPages + '.</div>' + (may ? '<div class="row"><button class="btn small ghost" id="rvUnlock">Снять лок страниц…</button></div>' : '') + '</div>'
-        : '<div class="rule"><div class="top"><span class="dot"></span><span class="title">Страницы не залочены</span></div><div class="note">Перед рассылкой ревизий группе залочьте страницы: тогда исправленная страница 12 заменяет прежнюю 12, не сдвигая остальные.</div>' + (may ? '<div class="row"><button class="btn small" id="rvLock">Залочить страницы</button></div>' : '') + '</div>') +
+        : '<div class="rule"><div class="top"><span class="dot"></span><span class="title">Страницы не залочены</span></div><div class="note">Перед рассылкой нового драфта группе залочьте страницы: тогда исправленная страница 12 заменяет прежнюю 12, не сдвигая остальные.</div>' + (may ? '<div class="row"><button class="btn small" id="rvLock">Залочить страницы</button></div>' : '') + '</div>') +
       '<div class="actions"><button class="btn" id="rvClose">Закрыть</button></div>', (m) => {
       $('#rvClose', m).onclick = closeModal;
       $('#rvMarks', m).onchange = (e) => { ls.set('draft.revMarks', e.target.checked); decorateEditor(); };
@@ -770,15 +804,18 @@
     });
   }
   function startRevision() {
-    if (readOnly('Новая ревизия')) return;
-    if (!canLock()) return needProducer('Начать ревизию');
+    if (readOnly('Новый драфт')) return;
+    if (!canLock()) return needProducer('Начать новый драфт');
     recompute();
-    histAdd(S.ep, 'перед началом ревизии', true);
+    histAdd(S.ep, 'перед началом драфта ' + ((S.ep.revLevel || 0) + 2), true);
+    // the finished draft is kept as it was sent out, under its number, in the episode's drafts
+    const done = C.revName(S.ep.revLevel || 0), kept = keepDraft(S.ep, done, S.ep, true);
     pushUndo();
     const r = C.newRevision(S.ep.revLevel || 0, S.ep.blocks, S.me.name + ' (' + roleName(S.me.role) + ')');
     S.ep.revisions = (S.ep.revisions || []).concat([r]); S.ep.revLevel = r.level;
     recompute();
-    toast(r.name + ' ревизия начата: правки помечаются звёздочкой на полях. Отменить: Ctrl+Z');
+    renderEpisodes();
+    toast('Начат «' + C.revName(r.level) + '»: правки помечаются звёздочкой на полях.' + (kept ? ' «' + done + '» сохранён в списке драфтов.' : '') + ' Отменить: Ctrl+Z');
   }
   function lockPages() {
     if (readOnly('Лок страниц')) return;
@@ -841,7 +878,7 @@
   }
   function inspectorHTML(s) {
     const lock = !!S.ep.lock;
-    if (S.me.role === 'reader') return '<div class="inspector"><b>Сцена ' + esc(s.num) + (s.omitted ? ' · удалена' : '') + '</b>' + (s.synopsis ? '<p class="small">' + esc(s.synopsis) + '</p>' : '') + (s.day ? '<div class="small muted">Сценарный день: ' + esc(s.day) + '</div>' : '') + '<div class="small muted">В сцене: ' + (s.cast.length ? s.cast.map(esc).join(', ') : '—') + '</div></div>';
+    if (S.me.role === 'reader') return '<div class="inspector"><b>Сцена ' + esc(s.num) + (s.omitted ? ' · удалена' : '') + '</b>' + (s.synopsis ? '<p class="small">' + esc(s.synopsis) + '</p>' : '') + (s.day ? '<div class="small muted">Сценарный день: ' + esc(s.day) + '</div>' : '') + '<div class="small muted">В сцене: ' + (s.cast.length ? s.cast.map(esc).join(', ') : '—') + '</div>' + bdSceneHTML(s) + '</div>';
     const ed2 = canEdit();
     return '<div class="inspector"><div class="row between"><b>Сцена ' + esc(s.num) + (s.omitted ? ' · удалена' : '') + '</b><span class="row">' + (lock ? (s.omitted ? '<button class="btn small" id="scRestore">Вернуть сцену</button>' : '<button class="btn small ghost danger" id="scOmit" title="Текст убирается, а номер остаётся в сценарии как «УДАЛЕНА»">Удалить сцену</button>') : '') + (ed2 ? '<button class="btn small" id="scUp" title="Переместить выше">↑</button><button class="btn small" id="scDown" title="Переместить ниже">↓</button>' : '') + '</span></div>' +
       '<label class="small muted">Синопсис<textarea id="scSyn" rows="2">' + esc(s.synopsis) + '</textarea></label>' +
@@ -850,7 +887,7 @@
       ((P().lines || []).length ? '<label class="small muted">Линия <select id="scLine">' + lineOptions(s) + '</select></label>' : '') +
       '<div class="tags">' + Object.entries(C.TAGS).map(([k, v]) => '<label><input type="checkbox" data-tag="' + k + '"' + (s.tags.includes(k) ? ' checked' : '') + '>' + esc(v) + '</label>').join('') + '</div>' +
       '<label class="small muted">Персонажи без реплик (через запятую)<input type="text" id="scExtras" value="' + esc(((S.ep.sceneMeta[s.id] || {}).extras || []).join(', ')) + '"></label>' +
-      '<div class="small muted">В сцене: ' + (s.cast.length ? s.cast.map(esc).join(', ') : '—') + '</div></div>';
+      '<div class="small muted">В сцене: ' + (s.cast.length ? s.cast.map(esc).join(', ') : '—') + '</div>' + bdSceneHTML(s) + '</div>';
   }
   function bindInspector(s) {
     if (S.me.role === 'reader') return;
@@ -894,7 +931,7 @@
     $$('.rpane').forEach((p) => { p.hidden = p.id !== 'pane-' + S.rtab; });
     const pane = $('#pane-' + S.rtab);
     if (pane.contains(document.activeElement) && document.activeElement.matches('input, textarea, select')) return;
-    ({ stats: renderStats, rules: renderRules, comments: renderCommentList, bible: renderBible, objects: renderObjects })[S.rtab](pane);
+    ({ stats: renderStats, rules: renderRules, comments: renderCommentList, bible: renderBible, objects: renderObjects, breakdown: renderBreakdown })[S.rtab](pane);
   }
   const lineColor = (name) => { const l = (P().lines || []).find((x) => x.name === name); return l ? l.color : 'var(--muted)'; };
   const lineOptions = (s) => {
@@ -1098,6 +1135,168 @@
   const blockIndex = (id) => { const i = S.ep.blocks.findIndex((b) => b.id === id); return i < 0 ? 1e9 : i; };
   $('#btnComment').onclick = startComment;
 
+  // ---------- script breakdown (tagging) ----------
+  // Like Final Draft's Tagger: select text, pick a category; the tag is anchored to the quote as a comment is.
+  // Writers, editors and producers tag (a producer cannot type text, but tags it); a reader only looks.
+  const bdOn = () => ls.get('draft.bdMarks', false) === true;
+  const bdPop = document.createElement('div'); bdPop.className = 'bdpop'; bdPop.id = 'bdPop'; bdPop.hidden = true; bdPop.setAttribute('role', 'dialog');
+  document.body.appendChild(bdPop);
+  // the category last under focus, for Enter in the note (there is no onfocusin property to assign in Chromium)
+  bdPop.addEventListener('focusin', (e) => { if (e.target.dataset && e.target.dataset.bdcat) bdPop.lastCat = e.target.dataset.bdcat; });
+  // one highlight per category, coloured from Core.BREAKDOWN
+  const bdStyle = document.createElement('style');
+  bdStyle.textContent = C.BREAKDOWN.map((c) => '::highlight(bd-' + c.id + ') { background-color: ' + c.color + '2e; text-decoration: underline 2px ' + c.color + '; text-underline-offset: 2px; }').join('\n');
+  document.head.appendChild(bdStyle);
+  function closeBdPop() { if (bdPop.hidden) return; bdPop.hidden = true; bdPop.innerHTML = ''; if (bdPop.ret) { const r = bdPop.ret; bdPop.ret = null; ed.focus({ preventScroll: true }); const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r); } }
+  function placeBdPop(rect) {
+    bdPop.hidden = false;
+    const top = rect.bottom + 6 + bdPop.offsetHeight > innerHeight - 8 ? rect.top - bdPop.offsetHeight - 6 : rect.bottom + 6;
+    bdPop.style.top = Math.max(8, top) + 'px';
+    bdPop.style.left = Math.max(8, Math.min(rect.left, innerWidth - bdPop.offsetWidth - 8)) + 'px';
+  }
+  const bdSw = (cat) => '<i class="bdsw" style="background:' + C.BD[cat].color + '"></i>';
+  function startTag() {
+    if (readOnly('Разметка разбивки')) return;
+    const sel = window.getSelection();
+    const el = curBlockEl();
+    if (!el || sel.isCollapsed) { toast('Выделите в тексте то, что нужно для съёмки: предмет, костюм, машину…'); return; }
+    // one element per tag, like a comment: a selection that runs on is clipped to the element where it starts
+    const r0 = sel.getRangeAt(0).cloneRange();
+    if (!el.contains(r0.startContainer)) r0.setStart(el, 0);
+    if (!el.contains(r0.endContainer)) r0.setEnd(el, el.childNodes.length);
+    // the quote is the text exactly as it stands (a double space or a no-break space included, a line break as readBlocks
+    // has it), or it would never be found in the element again
+    const raw = r0.toString().replace(/\n/g, ' '), quote = raw.trim().slice(0, 120);
+    if (!quote) { toast('Выделите в тексте то, что нужно для съёмки.'); return; }
+    const pre = document.createRange(); pre.selectNodeContents(el); pre.setEnd(r0.startContainer, r0.startOffset);
+    const at = pre.toString().length + (raw.length - raw.replace(/^\s+/, '').length);
+    const blockId = el.dataset.id;
+    bdPop.ret = sel.getRangeAt(0).cloneRange();
+    bdPop.innerHTML = '<div class="bdq">«' + esc(quote) + '»</div>' +
+      '<div class="bdcats">' + C.BREAKDOWN.map((c, i) => '<button type="button" data-bdcat="' + c.id + '">' + bdSw(c.id) + '<span>' + esc(c.name) + '</span>' + (i < 9 ? '<kbd>' + (i + 1) + '</kbd>' : '') + '</button>').join('') + '</div>' +
+      '<input type="text" id="bdNote" placeholder="Примечание (необязательно)">' +
+      '<div class="small muted">Цифра 1–9 или щелчок — категория · Esc — отмена</div>';
+    const pick = (cat) => {
+      if (readOnly('Разметка разбивки')) return;
+      pushUndo();
+      const t = { id: C.uid(), blockId, quote, cat, note: $('#bdNote', bdPop).value.trim(), at, by: S.me.name, date: Date.now() };
+      (S.ep.tags = S.ep.tags || []).push(t);
+      closeBdPop();
+      // the marks show what was just tagged, so the view turns on with the first tag
+      if (!bdOn()) { ls.set('draft.bdMarks', true); syncViewMenu(); }
+      recompute();
+      toast(C.BD[cat].name + ': «' + quote + '». Убрать — щелчок по пометке или Ctrl+Z');
+    };
+    $$('[data-bdcat]', bdPop).forEach((b) => { b.onclick = () => pick(b.dataset.bdcat); });
+    bdPop.onkeydown = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeBdPop(); return; }
+      const inNote = e.target.id === 'bdNote';
+      if (!inNote && /^[1-9]$/.test(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); pick(C.BREAKDOWN[+e.key - 1].id); return; }
+      // Enter in the note keeps the category under focus before it, or asks for one
+      if (inNote && e.key === 'Enter') { e.preventDefault(); const f = bdPop.lastCat; if (f) pick(f); else $('[data-bdcat]', bdPop).focus(); return; }
+      const bs = $$('[data-bdcat]', bdPop), i = bs.indexOf(document.activeElement);
+      if (/^Arrow/.test(e.key) && !inNote && i >= 0) { e.preventDefault(); const d = { ArrowDown: 2, ArrowUp: -2, ArrowRight: 1, ArrowLeft: -1 }[e.key]; bs[(i + d + bs.length) % bs.length].focus(); }
+    };
+    bdPop.lastCat = null;
+    placeBdPop(r0.getBoundingClientRect());
+    $('[data-bdcat]', bdPop).focus();
+  }
+  // where each tag sits on screen now: [{ t, el, i }]
+  function tagSpots() {
+    const out = [];
+    for (const t of S.ep.tags || []) {
+      if (t.lost || !C.BD[t.cat]) continue;
+      const el = ed.querySelector('[data-id="' + t.blockId + '"]'); if (!el) continue;
+      const i = C.quoteAt(el.textContent, t.quote, t.at);
+      if (i >= 0) out.push({ t, el, i });
+    }
+    return out;
+  }
+  function renderTags() {
+    if (!(window.CSS && CSS.highlights && window.Highlight)) return;
+    const on = bdOn(), by = {};
+    if (on) for (const x of tagSpots()) { const r = rangeIn(x.el, x.i, x.i + x.t.quote.length); if (r) (by[x.t.cat] = by[x.t.cat] || []).push(r); }
+    for (const c of C.BREAKDOWN) { if (by[c.id]) CSS.highlights.set('bd-' + c.id, new Highlight(...by[c.id])); else CSS.highlights.delete('bd-' + c.id); }
+  }
+  function toggleBdMarks(on) { ls.set('draft.bdMarks', on == null ? !bdOn() : !!on); renderTags(); syncViewMenu(); if (S.rtab === 'breakdown') renderRight(); }
+  const sceneOfBlock = (id) => { const i = S.ep.blocks.findIndex((b) => b.id === id); return S.st.scenes.find((s) => i >= s.from && i <= s.to) || null; };
+  function removeTag(id) {
+    if (readOnly('Разметка разбивки')) return;
+    const t = (S.ep.tags || []).find((x) => x.id === id); if (!t) return;
+    pushUndo();
+    S.ep.tags = S.ep.tags.filter((x) => x !== t);
+    // a project file merged later must not bring the removed tag back
+    S.ep.untagged = (S.ep.untagged || []).concat([id]).slice(-500);
+    recompute();
+    toast('Пометка «' + t.quote + '» убрана. Вернуть: Ctrl+Z');
+  }
+  // a click on marked text shows what it is, with «Убрать» for those who may change the breakdown
+  function showTagPop(t, rect) {
+    const s = sceneOfBlock(t.blockId);
+    bdPop.ret = null;
+    bdPop.innerHTML = '<div class="bdq">' + bdSw(t.cat) + '<b>' + esc(C.BD[t.cat].name) + '</b></div><div>«' + esc(t.quote) + '»</div>' +
+      (t.note ? '<div class="small">' + esc(t.note) + '</div>' : '') +
+      '<div class="small muted">' + (s ? 'Сцена ' + esc(s.num) : 'До первой сцены') + (t.by ? ' · ' + esc(t.by) : '') + '</div>' +
+      '<div class="row">' + (S.me.role !== 'reader' && !TAB.stale ? '<button type="button" class="btn small danger" id="bdDel">Убрать</button>' : '') + '<button type="button" class="btn small" id="bdClose">Закрыть</button></div>';
+    if ($('#bdDel', bdPop)) $('#bdDel', bdPop).onclick = () => { closeBdPop(); removeTag(t.id); };
+    $('#bdClose', bdPop).onclick = closeBdPop;
+    bdPop.onkeydown = (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeBdPop(); ed.focus(); } };
+    placeBdPop(rect);
+  }
+  ed.addEventListener('click', (e) => {
+    if (!bdOn() || !S.ep.tags || !S.ep.tags.length || !window.getSelection().isCollapsed) return;
+    const cr = document.caretRangeFromPoint ? document.caretRangeFromPoint(e.clientX, e.clientY) : null;
+    if (!cr) return;
+    let el = cr.startContainer; while (el && !(el.nodeType === 1 && el.classList.contains('b'))) el = el.parentNode;
+    if (!el || !ed.contains(el)) return;
+    const pre = document.createRange(); pre.selectNodeContents(el); pre.setEnd(cr.startContainer, cr.startOffset);
+    const off = pre.toString().length;
+    const hit = tagSpots().find((x) => x.el === el && off >= x.i && off <= x.i + x.t.quote.length);
+    if (!hit) { closeBdPop(); return; }
+    const r = rangeIn(el, hit.i, hit.i + hit.t.quote.length);
+    showTagPop(hit.t, (r || el).getBoundingClientRect());
+  });
+  document.addEventListener('mousedown', (e) => { if (!bdPop.hidden && !bdPop.contains(e.target)) { bdPop.ret = null; closeBdPop(); } });
+  ed.addEventListener('keydown', () => { if (!bdPop.hidden) { bdPop.ret = null; closeBdPop(); } });
+  // the scene's breakdown, for the scene inspector
+  function bdSceneHTML(s) {
+    const cats = C.BREAKDOWN.filter((c) => s.bd && s.bd[c.id]);
+    return '<div class="bdscene"><div class="small muted">Разбивка' + (s.bdTags && s.bdTags.length ? ' · для параметров студии сцена особая: ' + s.bdTags.map((t) => esc(C.TAGS[t])).join(', ') : '') + '</div>' +
+      (cats.length ? cats.map((c) => '<div class="bdrow">' + bdSw(c.id) + '<b>' + esc(c.name) + ':</b> ' + s.bd[c.id].map((x) => esc(x.name) + (x.note ? ' <span class="muted">(' + esc(x.note) + ')</span>' : '')).join(', ') + '</div>').join('')
+        : '<div class="small muted">Пометок нет. Выделите текст и нажмите Ctrl+Alt+T.</div>') + '</div>';
+  }
+  // right panel: the episode by category with scene numbers, then by object
+  function renderBreakdown(pane) {
+    const items = C.breakdownItems(S.st), lost = (S.ep.tags || []).filter((t) => t.lost);
+    const sid = {}; S.st.scenes.forEach((s) => { sid[s.num] = s.id; });
+    const ro = S.me.role === 'reader';
+    const cats = C.BREAKDOWN.filter((c) => items.some((it) => it.cat === c.id));
+    const chipsFor = (nums) => nums.map((n) => '<button type="button" class="chip scn" data-jump="' + esc(sid[n] || '') + '" title="Перейти к сцене ' + esc(n) + '">' + esc(n) + '</button>').join('');
+    const objs = C.breakdownByObject(S.st);
+    pane.innerHTML = '<div class="row between"><span class="small muted">' + items.length + ' элем. · ' + cats.length + ' катег.</span><span class="row">' +
+      (ro ? '' : '<button class="btn small" id="bdNew" title="Ctrl+Alt+T">+ Пометить</button><button class="btn small ghost" id="bdXlsx">Excel (.xlsx)</button>') + '</span></div>' +
+      '<label class="bdtoggle"><input type="checkbox" id="bdMarks"' + (bdOn() ? ' checked' : '') + '> Разметка на странице (Вид → Разметка разбивки)</label>' +
+      (items.length ? cats.map((c) => '<div class="h">' + bdSw(c.id) + esc(c.name) + ' · ' + items.filter((it) => it.cat === c.id).length + '</div>' +
+        '<div class="bdlist">' + items.filter((it) => it.cat === c.id).map((it) => '<div class="bdit"><span class="nm">' + esc(it.name) + (it.notes.length ? ' <span class="small muted">' + esc(it.notes.join('; ')) + '</span>' : '') + '</span><span class="scs">' + chipsFor(it.scenes) + '</span></div>').join('') + '</div>').join('') +
+        '<div class="h">По объектам</div>' + objs.map((o) => '<div class="bdobj"><div class="row between"><b>' + esc(o.name) + '</b><span class="scs">' + chipsFor(o.scenes) + '</span></div>' +
+          C.BREAKDOWN.filter((c) => o.cats[c.id]).map((c) => '<div class="bdrow">' + bdSw(c.id) + esc(c.name) + ': ' + o.cats[c.id].map(esc).join(', ') + '</div>').join('') + '</div>').join('')
+        : '<p class="note">Разбивка — список того, что нужно для съёмки каждой сцены: реквизит, костюм, грим, транспорт, массовка, трюки… Выделите слово в тексте и выберите категорию (Производство → «Пометить для разбивки…», Ctrl+Alt+T). Трюки и животные из разбивки учитываются в параметрах студии как особые сцены.</p>') +
+      (lost.length ? '<div class="h">Текст удалён · ' + lost.length + '</div>' + lost.map((t) => '<div class="bdit">' + bdSw(t.cat) + '<span class="nm">«' + esc(t.quote) + '» <span class="small muted">' + esc((C.BD[t.cat] || {}).name || '') + '</span></span>' + (ro ? '' : '<button class="btn small ghost danger" data-untag="' + t.id + '" title="Убрать пометку">×</button>') + '</div>').join('') +
+        '<p class="note">Этих слов больше нет в тексте. Если текст вернётся (Ctrl+Z, драфт), пометка встанет на место.</p>' : '') +
+      '<p class="note">Excel: листы «Сцены», «Объекты», «Персонажи» и «Разбивка» — для КПП и сметы.</p>';
+    $$('[data-jump]', pane).forEach((b) => { b.onclick = () => { if (b.dataset.jump) { S.curScene = b.dataset.jump; jumpTo(b.dataset.jump); } }; });
+    $$('[data-untag]', pane).forEach((b) => { b.onclick = () => removeTag(b.dataset.untag); });
+    $('#bdMarks', pane).onchange = (e) => { e.target.blur(); toggleBdMarks(e.target.checked); };
+    if ($('#bdNew', pane)) $('#bdNew', pane).onclick = () => (window.getSelection().isCollapsed ? toast('Выделите в тексте то, что нужно для съёмки, и нажмите Ctrl+Alt+T.') : startTag());
+    if ($('#bdXlsx', pane)) $('#bdXlsx', pane).onclick = () => $('#exportMenu [data-exp=xlsx]').click();
+  }
+  async function exportBreakdownXLSX() {
+    await loadLib('jszip');
+    const z = new window.JSZip();
+    Object.entries(C.breakdownXLSX(S.ep, P(), S.st)).forEach(([n, v]) => z.file(n, v));
+    saveFile(fileBase() + ' — разбивка.xlsx', await z.generateAsync({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+  }
+
   // ---------- bible & relationships ----------
   function projectCharStats() {
     const res = {};
@@ -1215,8 +1414,8 @@
   $('#btnDraft').onclick = () => {
     if (readOnly('Сохранение драфта')) return;
     recompute();
-    const n = (S.ep.drafts || []).length + 1;
-    modal('<h2>Сохранить драфт</h2><label class="small muted">Название<input type="text" id="drName" value="Драфт ' + n + '"></label><label class="small muted">Что изменилось<textarea id="drNote" rows="2" placeholder="Например: правки продюсера по 3 и 5 сценам"></textarea></label><div class="actions"><button class="btn" id="drList">Все драфты</button><button class="btn" id="drC">Отмена</button><button class="btn primary" id="drOk">Сохранить</button></div>', (m) => {
+    const cur = C.revName(S.ep.revLevel || 0), n = (S.ep.drafts || []).filter((d) => d.name.indexOf(cur + ', версия ') === 0).length + 1;
+    modal('<h2>Сохранить версию драфта</h2><label class="small muted">Название<input type="text" id="drName" value="' + esc(cur + ', версия ' + n) + '"></label><label class="small muted">Что изменилось<textarea id="drNote" rows="2" placeholder="Например: правки продюсера по 3 и 5 сценам"></textarea></label><div class="actions"><button class="btn" id="drList">Все драфты</button><button class="btn" id="drC">Отмена</button><button class="btn primary" id="drOk">Сохранить</button></div>', (m) => {
       $('#drC', m).onclick = closeModal; $('#drList', m).onclick = () => showDrafts();
       $('#drOk', m).onclick = () => {
         const d = { id: C.uid(), name: $('#drName', m).value.trim() || 'Драфт ' + n, note: $('#drNote', m).value.trim(), date: Date.now(), author: S.me.name, ...epCopy(S.ep), pages: S.st.pages, scenes: S.st.scenes.length };
@@ -1236,8 +1435,9 @@
         const d = ds.find((x) => x.id === b.dataset.rest);
         S.ep.drafts.push({ id: C.uid(), name: 'Авто: перед восстановлением «' + d.name + '»', date: Date.now(), author: S.me.name, ...epCopy(S.ep), pages: S.st.pages, scenes: S.st.scenes.length });
         histAdd(S.ep, 'перед восстановлением драфта', true);
-        pushUndo(); S.ep.blocks = JSON.parse(JSON.stringify(d.blocks)); S.ep.sceneMeta = JSON.parse(JSON.stringify(d.sceneMeta || {})); setLock(S.ep, d);
-        closeModal(); renderEditor(); recompute(); renderEpisodes(); toast('Восстановлен «' + d.name + '». Текущий текст сохранён отдельным драфтом.');
+        pushUndo(); S.ep.blocks = JSON.parse(JSON.stringify(d.blocks)); S.ep.sceneMeta = JSON.parse(JSON.stringify(d.sceneMeta || {}));
+        const kept = restoreLock(d, 'восстановлен драфт «' + d.name + '»');
+        closeModal(); renderEditor(); recompute(); renderEpisodes(); toast('Восстановлен «' + d.name + '». Текущий текст сохранён отдельным драфтом.' + keptNote(kept));
       });
       if (openId && ds.find((d) => d.id === openId)) $('#drDiff', m).innerHTML = diffHTML(ds.find((d) => d.id === openId));
     });
@@ -1284,6 +1484,19 @@
     // breakdown tags are anchored to the text, so they come back with it; a tag brought back is no longer 'removed' for merges
     if ('tags' in sn) { ep.tags = jcopy(sn.tags || []); if (ep.untagged) ep.untagged = ep.untagged.filter((id) => !ep.tags.some((t) => t.id === id)); }
   }
+  // restoring a draft or a history snapshot: the page lock and the revisions are a producer's or an editor's call, so for
+  // anyone else they stay as they are (only the text and its marks come back); a lock the restore drops is logged as an
+  // unlock would be. Returns true when the lock or revision was kept for that reason
+  function restoreLock(sn, why) {
+    const ep = S.ep, pl = ep.pageLock || null;
+    const lockAt = (x) => (x && x.pageLock ? x.pageLock.at || 1 : 0);
+    const differs = ('pageLock' in sn && lockAt(sn) !== lockAt(ep)) || ('revisions' in sn && ((sn.revisions && sn.revisions.length ? sn.revLevel || 1 : 0) !== (ep.revLevel || 0)));
+    if (!canLock()) { setLock(ep, Object.assign({}, sn, { pageLock: pl, revisions: ep.revisions || null, revLevel: ep.revLevel || 0 })); return differs; }
+    setLock(ep, sn);
+    if (pl && lockAt(ep) !== lockAt({ pageLock: pl })) ep.pageLockLog = (ep.pageLockLog || []).concat([{ at: Date.now(), by: S.me.name, role: S.me.role, reason: why, was: { at: pl.at, by: pl.by, pages: (pl.pages || []).length } }]);
+    return false;
+  }
+  const keptNote = (kept) => (kept ? ' Лок страниц и номер драфта остались прежними: менять их может редактор или продюсер.' : '');
   async function histAdd(ep, reason, keep) {
     if (!ep) return null;
     // the state is copied before the first await: callers change the episode right after calling histAdd
@@ -1321,13 +1534,14 @@
   document.addEventListener('visibilitychange', () => { if (!document.hidden || !S.ep) return; saveNow(); if (!TAB.stale && (S.ep.updated || 0) > (S.ep.histAt || 0)) histAdd(S.ep, 'автоснимок'); });
   window.addEventListener('pagehide', saveNow);
   // text that would otherwise be dropped is kept as a named draft of its episode (the same text only once)
-  function keepDraft(ep, name, src) {
+  function keepDraft(ep, name, src, exact) {
     const c = epCopy(src), sig = JSON.stringify(c.blocks);
     ep.drafts = ep.drafts || [];
-    if (ep.drafts.some((d) => JSON.stringify(d.blocks) === sig)) return false;
+    // a finished draft (exact name) is a milestone: kept under its number even when a saved version has the same text
+    if (ep.drafts.some((d) => JSON.stringify(d.blocks) === sig && (!exact || d.name === name))) return false;
     let st = { pages: 0, scenes: [] };
     try { const p = S.db.projects.find((x) => x.episodes.includes(ep)) || P(); st = C.analyzeEpisode({ ...ep, blocks: c.blocks, sceneMeta: c.sceneMeta }, { ...p, rules: Object.assign({}, C.DEFAULT_RULES, p.rules || {}) }); } catch (e) { /* the counts are cosmetic */ }
-    ep.drafts.push({ id: C.uid(), name: name + ' ' + fmtDate(Date.now()), date: Date.now(), author: S.me.name, ...c, pages: st.pages, scenes: st.scenes.length });
+    ep.drafts.push({ id: C.uid(), name: exact ? name : name + ' ' + fmtDate(Date.now()), date: Date.now(), author: S.me.name, ...c, pages: st.pages, scenes: st.scenes.length });
     return true;
   }
   // what this tab has not saved yet: episodes whose text changed since its last save, and new comments
@@ -1427,9 +1641,10 @@
           diffHTML({ name: 'снимок ' + fmtFull(h.date), blocks: h.blocks });
         $('#hsAll', m).onclick = async () => {
           await histAdd(S.ep, 'перед откатом', true);
-          pushUndo(); S.ep.blocks = JSON.parse(JSON.stringify(h.blocks)); S.ep.sceneMeta = JSON.parse(JSON.stringify(h.sceneMeta || {})); setLock(S.ep, h);
+          pushUndo(); S.ep.blocks = JSON.parse(JSON.stringify(h.blocks)); S.ep.sceneMeta = JSON.parse(JSON.stringify(h.sceneMeta || {}));
+          const kept = restoreLock(h, 'возврат к снимку ' + fmtFull(h.date));
           closeModal(); renderEditor(); recompute(); renderEpisodes();
-          toast('Серия возвращена к состоянию на ' + fmtFull(h.date) + '. Отменить: Ctrl+Z, текущий текст сохранён в истории.');
+          toast('Серия возвращена к состоянию на ' + fmtFull(h.date) + '. Отменить: Ctrl+Z, текущий текст сохранён в истории.' + keptNote(kept));
         };
         $('#hsOne', m).onclick = async () => {
           const r = C.restoreScene(readBlocks(), h.blocks, $('#hsScene', m).value);
@@ -1622,6 +1837,8 @@
             else { for (const r of c.replies || []) if (!c1.replies.some((x) => x.date === r.date && x.text === r.text)) { c1.replies.push(r); added++; } c1.resolved = c1.resolved || c.resolved; }
           }
           for (const d of e2.drafts || []) if (!e1.drafts.some((x) => x.id === d.id)) { e1.drafts.push(d); added++; }
+          // breakdown tags: both copies' tags except those removed on either side; they anchor to whichever text wins
+          if ((e2.tags || []).length || (e2.untagged || []).length) { const mt = C.mergeTags(e1, e2); added += Math.max(0, mt.tags.length - (e1.tags || []).length); e1.tags = mt.tags; if (mt.untagged.length) e1.untagged = mt.untagged; }
           // files from before textAt existed fall back to 'updated', which also moves when a copy is only opened
           const newer = (e1.textAt || e2.textAt) ? (e2.textAt || 0) > (e1.textAt || 0) : (e2.updated || 0) > (e1.updated || 0);
           const textWon = newer && JSON.stringify(e1.blocks) !== JSON.stringify(e2.blocks);
@@ -1653,6 +1870,8 @@
           for (const l of e2.lockLog || []) if (!log.some((x) => x.at === l.at)) log.push(l);
           if (log.length) e1.lockLog = log.sort((a, b) => a.at - b.at);
         }
+        // the sides log is project-wide: entries of both copies, each once
+        if ((proj.sidesLog || []).length) ex.sidesLog = C.mergeSidesLog(ex.sidesLog, proj.sidesLog);
         if (proj.secret && !ex.secret) ex.secret = proj.secret;
         Object.assign(ex.chars, Object.assign({}, proj.chars, ex.chars)); Object.assign(ex.locs, Object.assign({}, proj.locs, ex.locs));
         toast('Проект обновлён: добавлено ' + added + ' комментариев, ответов и драфтов' + (replaced ? '; текст серий (' + replaced + ') заменён более новым из файла, прежний сохранён в драфтах' : ''));
@@ -1686,6 +1905,7 @@
       }
       if (k === 'pdf') pdfDialog();
       if (k === 'bible') saveFile(P().name + ' — библия персонажей.html', bibleHTML(), 'text/html');
+      if (k === 'xlsx') await exportBreakdownXLSX();
     } catch (err) { toast('Экспорт не удался: ' + err.message); }
   });
   const stripCache = (p) => JSON.parse(JSON.stringify(p, (k, v) => (k === '_st' ? undefined : v)));
@@ -1695,10 +1915,10 @@
     const drafts = S.ep.drafts || [];
     // the newest draft the team named, not an automatic «Авто: перед восстановлением…» copy
     const named = drafts.filter((d) => !/^Авто:/.test(d.name)).sort((a, b) => b.date - a.date);
-    const label = named.length ? named[0].name : 'Рабочий драфт';
+    const label = S.ep.revLevel ? C.revName(S.ep.revLevel) : named.length ? named[0].name : C.revName(0);
     modal('<h2>PDF в формате Final Draft</h2><div class="form-grid"><label>Для кого (имя или почта)<input type="text" id="pdfTo" value="' + esc(S.me.name) + '"></label><label>Название драфта на титуле<input type="text" id="pdfLabel" value="' + esc(label) + '"></label></div>' +
       '<label class="row"><input type="checkbox" id="pdfWm" checked' + (S.me.role === 'reader' ? ' disabled' : '') + '> Водяной знак с именем получателя на каждой странице</label>' +
-      (S.ep.revLevel ? '<label class="row"><input type="checkbox" id="pdfChanged"> Только изменённые страницы</label><p class="note">Страницы с пометками ревизии «' + esc(C.revName(S.ep.revLevel)) + '» и титул; номера страниц прежние. Так рассылают замену страниц группе.</p>' : '') +
+      (S.ep.revLevel ? '<label class="row"><input type="checkbox" id="pdfChanged"> Только изменённые страницы</label><p class="note">Страницы с пометками «' + esc(C.revName(S.ep.revLevel)) + '», A-страницы за ними и титул; номера страниц прежние. Так рассылают замену страниц группе.</p>' : '') +
       (sec.org ? '<p class="note">Гриф: «Коммерческая тайна. ' + esc(sec.org) + (sec.addr ? ', ' + esc(sec.addr) : '') + '».</p>' : '<p class="note">Гриф коммерческой тайны не задан: заполните обладателя в «Настройках», иначе колонтитул будет без него.</p>') +
       '<div class="actions"><button class="btn" id="pdfC">Отмена</button><button class="btn primary" id="pdfOk">Сохранить PDF</button></div>', (m) => {
       $('#pdfC', m).onclick = closeModal;
@@ -1718,17 +1938,21 @@
     doc.setFont('FreeMono', 'normal'); doc.setFontSize(12);
     const today = new Date().toLocaleDateString('ru-RU');
     const sec = P().secret || {};
+    // sides: one or several named copies of the chosen scenes; the expiry is printed where an ordinary copy has the date
+    const sd = opts.sides || null, copies = opts.copies && opts.copies.length ? opts.copies : [opts.to];
+    let who = copies[0];
+    const until = sd && sd.expires ? 'действительно до ' + C.ruDate(sd.expires) : today;
     const stamp = () => {
       // footer: trade-secret notice (98-ФЗ: owner and address) and the recipient of this copy
       doc.setFontSize(8);
-      const foot = (sec.org ? 'КОММЕРЧЕСКАЯ ТАЙНА. Обладатель: ' + sec.org + (sec.addr ? ', ' + sec.addr : '') + '. ' : '') + 'Экземпляр: ' + opts.to + ' · ' + today;
+      const foot = (sec.org ? 'КОММЕРЧЕСКАЯ ТАЙНА. Обладатель: ' + sec.org + (sec.addr ? ', ' + sec.addr : '') + '. ' : '') + 'Экземпляр: ' + who + ' · ' + until;
       doc.text(doc.splitTextToSize(foot, W - 2 * 54), W / 2, H - 0.45 * 72, { align: 'center' });
       doc.setFontSize(12);
       if (!opts.wm) return;
       doc.saveGraphicsState();
       doc.setGState(new doc.GState({ opacity: 0.11 }));
       doc.setFontSize(30);
-      const txt = opts.to + ' · ' + today;
+      const txt = who + ' · ' + (sd && sd.expires ? 'до ' + C.ruDate(sd.expires) : today);
       doc.text(txt, W / 2, H / 2, { align: 'center', angle: 38 });
       doc.text(txt, W / 2, H * 0.82, { align: 'center', angle: 38 });
       doc.text(txt, W / 2, H * 0.18, { align: 'center', angle: 38 });
@@ -1746,27 +1970,38 @@
     doc.text(opts.label || 'Рабочий драфт', W - paper.right * 72, bottom - 36, { align: 'right' });
     doc.text(today, W - paper.right * 72, bottom - 24, { align: 'right' });
     if (S.ep.lock) doc.text('Номера сцен залочены ' + new Date(S.ep.lock.at).toLocaleDateString('ru-RU'), W - paper.right * 72, bottom - 12, { align: 'right' });
-    // revisions: a band in the revision colour at the top of a revised page (coloured paper), the set's name and date
+    // drafts: a revised page carries «Драфт N — date» at the top (no coloured paper: the studio numbers drafts)
     const revs = S.st.revs || [], revOf = (lv) => (S.ep.revisions || []).find((r) => r.level === lv);
-    const revTitle = (lv) => C.revName(lv) + ' ревизия — ' + new Date((revOf(lv) || {}).date || Date.now()).toLocaleDateString('ru-RU');
-    const band = (lv) => {
-      const h = C.revColor(lv), c = [1, 3, 5].map((j) => Math.round(255 - (255 - parseInt(h.substr(j, 2), 16)) * 0.35));
-      doc.setFillColor(c[0], c[1], c[2]); doc.rect(0, 0, W, 0.14 * 72, 'F');
-    };
-    if (S.ep.revLevel) { band(S.ep.revLevel); doc.text(revTitle(S.ep.revLevel), W - paper.right * 72, bottom - 48, { align: 'right' }); }
+    const revTitle = (lv) => C.revName(lv) + ' — ' + new Date((revOf(lv) || {}).date || Date.now()).toLocaleDateString('ru-RU');
+    if (S.ep.revLevel && (opts.label || '') !== C.revName(S.ep.revLevel)) { doc.text(revTitle(S.ep.revLevel), W - paper.right * 72, bottom - 48, { align: 'right' }); }
     stamp();
-    const lay = S.st.lay;
+    // sides re-flow only the chosen scenes on the same page format; ix maps a block of the sides to its block in the script
+    const sub = opts.scenes ? C.sidesBlocks(S.ep.blocks, S.st.scenes, opts.scenes) : null;
+    const lay = sub ? C.paginate(sub.blocks, { lines: paper.lines, fmt: paper.fmt }) : S.st.lay, ix = (i) => (sub ? sub.map[i] : i);
     const sceneN = {}; S.st.scenes.forEach((s) => { sceneN[s.from] = s.num; });
-    const pageRev = lay.pages.map((pg) => Math.max(0, ...pg.items.map((it) => revs[it.i] || 0)));
+    const pageRev = lay.pages.map((pg) => Math.max(0, ...pg.items.map((it) => revs[ix(it.i)] || 0)));
     const markX = C.revMarkX(paper) * 72;
-    const printed = lay.pages.map((pg, k) => k).filter((k) => !opts.changedOnly || lay.pages[k].items.some((it) => revs[it.i] === S.ep.revLevel));
-    if (opts.changedOnly && !printed.length) { toast('В ревизии «' + C.revName(S.ep.revLevel) + '» пока нет изменённых страниц'); return; }
-    printed.forEach((k) => {
+    // changed pages only: a page with a mark of the current revision, and every A-page right after a page sent out (the
+    // text pushed off a locked page lives there, so the crew's copy would lose it); 2-3 says page 3 is gone
+    const lockN = lay.locked && S.ep.pageLock ? new Set(S.ep.pageLock.pages.map((pg, q) => String(pg.n || q + 1))) : null;
+    const aPage = (k) => !!lockN && !lockN.has(String(lay.labels[k]).split('-')[0]);
+    const printed = [];
+    lay.pages.forEach((pg, k) => { if (!opts.changedOnly || pg.items.some((it) => revs[ix(it.i)] === S.ep.revLevel) || (aPage(k) && printed[printed.length - 1] === k - 1)) printed.push(k); });
+    if (opts.changedOnly && !printed.length) { toast('В «' + C.revName(S.ep.revLevel) + '» пока нет изменённых страниц'); return; }
+    const printPage = (k) => {
       const pg = lay.pages[k];
       doc.addPage([W, H]);
+      // sides: «Сайды · note · стр. N» on top, N counted within the sides
+      // (shrunk to the text width for a long note, so it never runs off the sheet)
+      if (sd) {
+        const head = ['Сайды', sd.note, 'стр. ' + (k + 1)].filter(Boolean).join(' · '), room = (paper.w - paper.left - paper.right) * 72;
+        doc.setFontSize(10); const w = doc.getTextWidth(head); if (w > room) doc.setFontSize(10 * room / w);
+        doc.text(head, paper.left * 72, 0.5 * 72 + 9); doc.setFontSize(12);
+      }
       // locked pages print their own labels (12A): the page number never shifts between the copies sent out
-      if (k > 0) doc.text((lay.labels[k] || k + 1) + '.', (paper.w - paper.right) * 72, 0.5 * 72 + 9, { align: 'right' });
-      if (pageRev[k]) { band(pageRev[k]); doc.text(revTitle(pageRev[k]), (paper.w - paper.right - 0.75) * 72, 0.5 * 72 + 9, { align: 'right' }); }
+      else if (k > 0) doc.text((lay.labels[k] || k + 1) + '.', (paper.w - paper.right) * 72, 0.5 * 72 + 9, { align: 'right' });
+      // sides: the revision goes on its own line under the sides header, which would otherwise print over it
+      if (pageRev[k]) { if (sd) { doc.setFontSize(10); doc.text(revTitle(pageRev[k]), (paper.w - paper.right) * 72, 0.5 * 72 + 22, { align: 'right' }); doc.setFontSize(12); } else doc.text(revTitle(pageRev[k]), (paper.w - paper.right - 0.75) * 72, 0.5 * 72 + 9, { align: 'right' }); }
       let line = 0;
       const base = paper.top * 72 + 9.6;
       for (const it of pg.items) {
@@ -1776,16 +2011,94 @@
           const y = base + (line + j) * 12;
           if (f.right) doc.text(tx, C.rightEdge(f, paper) * 72, y, { align: 'right' });
           else doc.text(tx, f.indent * 72, y);
-          if (revs[it.i] && !it.contd) doc.text('*', markX, y);
-          if (j === 0 && it.t === 'scene' && sceneN[it.i] && !it.contd) { doc.text(String(sceneN[it.i]), (paper.left - 0.75) * 72, y); doc.text(String(sceneN[it.i]), Math.min(paper.w - paper.right + 0.3, paper.w - 0.35) * 72, y, { align: 'right' }); }
+          if (revs[ix(it.i)] && !it.contd) doc.text('*', markX, y);
+          if (j === 0 && it.t === 'scene' && sceneN[ix(it.i)] && !it.contd) { doc.text(String(sceneN[ix(it.i)]), (paper.left - 0.75) * 72, y); doc.text(String(sceneN[ix(it.i)]), Math.min(paper.w - paper.right + 0.3, paper.w - 0.35) * 72, y, { align: 'right' }); }
         });
         line += it.lines.length;
         if (it.more) { doc.text('(ДАЛЬШЕ)', F.character.indent * 72, base + line * 12); line++; }
       }
       stamp();
-    });
+    };
+    copies.forEach((to) => { who = to; printed.forEach(printPage); });
+    // sides have no title page: the copy starts with the first chosen scene
+    if (sub) doc.deletePage(1);
     const blob = doc.output('blob');
-    await saveFile(fileBase() + (opts.changedOnly ? ' — изменённые страницы' : '') + (opts.to && opts.to !== S.me.name ? ' — ' + opts.to.replace(/[\\/:*?"<>|«»@]/g, '_') : '') + '.pdf', blob, 'application/pdf');
+    if (sd) return saveFile((fileBase() + ' — сайды' + (sd.note ? ' ' + sd.note : '') + ' — ' + (copies.length > 1 ? copies.length + ' экз' : who)).replace(/[\\/:*?"<>|«»@]/g, '_') + '.pdf', blob, 'application/pdf');
+    return saveFile(fileBase() + (opts.changedOnly ? ' — изменённые страницы' : '') + (opts.to && opts.to !== S.me.name ? ' — ' + opts.to.replace(/[\\/:*?"<>|«»@]/g, '_') : '') + '.pdf', blob, 'application/pdf');
+  }
+  // ---------- sides (Производство → Сайды…) ----------
+  // Sides are the scenes of a shooting day handed to actors and crew. Each recipient gets a personal copy (name across every
+  // page, expiry in the footer), and every copy issued is written to the project's log; only an editor or a producer issues them.
+  function showSides() {
+    recompute();
+    const may = canLock() && !TAB.stale, live = S.st.scenes.filter((s) => !s.omitted);
+    const log = (P().sidesLog || []).slice().reverse();
+    const dt = (t) => new Date(t).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const cnt = {}; live.forEach((s) => s.cast.forEach((n) => { cnt[n] = (cnt[n] || 0) + 1; }));
+    const days = [...new Set(live.map((s) => String(s.day)).filter(Boolean))].sort((a, b) => (parseFloat(a) - parseFloat(b)) || a.localeCompare(b));
+    const form = !may ? '<p class="note">Выдавать сайды может редактор или продюсер (роль — в «Настройках»). Ниже — журнал выданных экземпляров.</p>' :
+      '<div class="form-grid"><label>Сцены персонажа<select id="sdChar"><option value="">— выбрать —</option>' + Object.keys(cnt).sort((a, b) => cnt[b] - cnt[a] || a.localeCompare(b)).map((n) => '<option value="' + esc(n) + '">' + esc(n) + ' (' + cnt[n] + ')</option>').join('') + '</select></label>' +
+      '<label>По сценарному дню<select id="sdDay"><option value="">— выбрать —</option>' + days.map((d) => '<option value="' + esc(d) + '">День ' + esc(d) + '</option>').join('') + '</select></label></div>' +
+      '<div class="row"><button class="btn small ghost" id="sdAll">Все</button><button class="btn small ghost" id="sdNone">Снять все</button><span class="small muted" id="sdSum"></span></div>' +
+      '<div class="tbl-wrap sides-list"><table class="t"><thead><tr><th></th><th class="n">№</th><th>Сцена</th><th class="n">Стр.</th></tr></thead><tbody>' +
+      live.map((s) => '<tr data-sdrow="' + s.id + '"><td><input type="checkbox" data-sd="' + s.id + '" aria-label="Сцена ' + esc(s.num) + '"></td><td class="n">' + esc(s.num) + '</td><td>' + esc(s.heading || '') + (s.day ? ' <span class="small muted">д. ' + esc(s.day) + '</span>' : '') + '</td><td class="n">' + C.fmtPages(s.pages) + '</td></tr>').join('') +
+      '</tbody></table></div>' +
+      '<div class="form-grid"><label>Кому, по одному в строке<textarea id="sdTo" rows="3" placeholder="Анна Петрова (Лена)&#10;Иван Сидоров (Игорь)"></textarea></label>' +
+      '<label>Пометка в шапке страницы<input type="text" id="sdNote" maxlength="60" placeholder="Съёмочный день 12"></label>' +
+      '<label>Действительно до<input type="date" id="sdExp" min="' + C.isoDay(Date.now()) + '" value="' + C.sidesExpiry(Date.now(), 3) + '"></label></div>' +
+      '<label class="row"><input type="checkbox" id="sdOne"> Все экземпляры одним файлом (иначе — отдельный PDF на каждого)</label>' +
+      '<p class="note">Только отмеченные сцены, по порядку сценария, в формате Final Draft; номера сцен с обеих сторон. На каждой странице — имя получателя по диагонали и в колонтитуле, срок и гриф коммерческой тайны. Срок лишь напечатан: PDF не перестанет открываться после этой даты. Журнал фиксирует выдачу экземпляра, а не то, кто его открыл или переслал.</p>';
+    const table = log.length ? '<div class="tbl-wrap sides-log"><table class="t"><thead><tr><th>Выдано</th><th>Кто выдал</th><th>Кому</th><th>Серия</th><th>Сцены</th><th>Пометка</th><th>До</th></tr></thead><tbody>' +
+      log.map((e) => '<tr><td>' + dt(e.at) + '</td><td>' + esc(e.by || '') + '</td><td>' + esc(e.to || '') + '</td><td>' + esc(e.epLabel || '') + '</td><td>' + esc((e.scenes || []).join(', ')) + '</td><td>' + esc(e.note || '') + '</td><td>' + esc(C.ruDate(e.expires)) + (C.sidesExpired(e) ? ' <span class="chip warn">истёк</span>' : '') + '</td></tr>').join('') +
+      '</tbody></table></div>' : '<p class="note">Сайды ещё не выдавались.</p>';
+    modal('<h2>Сайды</h2><p class="note">Сцены съёмочного дня для актёров и группы: каждый получатель получает свой именной экземпляр.</p>' + form + '<div class="h">Журнал выдачи</div>' + table +
+      '<div class="actions"><button class="btn" id="sdClose">' + (may ? 'Отмена' : 'Закрыть') + '</button>' + (may ? '<button class="btn primary" id="sdOk">Сохранить PDF</button>' : '') + '</div>', (m) => {
+      $('#sdClose', m).onclick = closeModal;
+      if (!may) return;
+      const boxes = $$('[data-sd]', m);
+      const sum = () => {
+        const on = live.filter((s) => $('[data-sd="' + s.id + '"]', m).checked);
+        $('#sdSum', m).textContent = on.length ? 'Отмечено сцен: ' + on.length + ' · ' + C.fmtPages(on.reduce((a, s) => a + s.pages, 0)) + ' стр.' : 'Сцены не отмечены';
+      };
+      const setOnly = (ids) => { boxes.forEach((b) => { b.checked = ids.includes(b.dataset.sd); }); sum(); };
+      boxes.forEach((b) => { b.onchange = sum; });
+      $$('[data-sdrow]', m).forEach((r) => r.onclick = (e) => { if (e.target.tagName === 'INPUT') return; const b = $('[data-sd]', r); b.checked = !b.checked; sum(); });
+      $('#sdChar', m).onchange = (e) => { if (!e.target.value) return; $('#sdDay', m).value = ''; setOnly(C.sidesPick(live, { char: e.target.value })); };
+      $('#sdDay', m).onchange = (e) => { if (!e.target.value) return; $('#sdChar', m).value = ''; setOnly(C.sidesPick(live, { day: e.target.value })); };
+      $('#sdAll', m).onclick = () => setOnly(live.map((s) => s.id));
+      $('#sdNone', m).onclick = () => setOnly([]);
+      sum();
+      $('#sdOk', m).onclick = () => {
+        const o = { ids: boxes.filter((b) => b.checked).map((b) => b.dataset.sd), to: C.sidesRecipients($('#sdTo', m).value), note: $('#sdNote', m).value.trim(), expires: $('#sdExp', m).value, one: $('#sdOne', m).checked };
+        if (!o.ids.length) return toast('Отметьте сцены для сайдов');
+        if (!o.to.length) { $('#sdTo', m).focus(); return toast('Впишите, кому выдаются сайды: по одному получателю в строке'); }
+        if (!o.expires) return toast('Укажите, до какой даты действует экземпляр');
+        if (o.expires < C.isoDay(Date.now())) { $('#sdExp', m).focus(); return toast('Срок «действительно до» уже прошёл: выберите сегодняшнюю или более позднюю дату'); }
+        closeModal();
+        issueSides(o).catch((err) => toast('Сайды не сохранены: ' + err.message));
+      };
+    });
+  }
+  // o: { ids: scene ids, to: [recipients], note, expires: 'YYYY-MM-DD', one: one file with all copies }
+  async function issueSides(o) {
+    if (readOnly('Выдача сайдов')) return false;
+    if (!canLock()) { needProducer('Выдать сайды'); return false; }
+    recompute();
+    const chosen = S.st.scenes.filter((s) => !s.omitted && o.ids.includes(s.id)), to = (o.to || []).filter(Boolean);
+    if (!chosen.length || !to.length) { toast(!chosen.length ? 'Отметьте сцены для сайдов' : 'Впишите получателей'); return false; }
+    const sides = { note: o.note || '', expires: o.expires || C.sidesExpiry(Date.now(), 3) }, ids = chosen.map((s) => s.id);
+    // a copy that is void on arrival is a typo in the date: the copy is not made
+    if (sides.expires < C.isoDay(Date.now())) { toast('Срок «действительно до» уже прошёл: выберите сегодняшнюю или более позднюю дату'); return false; }
+    // one log entry per copy, written once its PDF is made: the log is what was handed out, by whom and until when
+    const logged = (who) => { (P().sidesLog = P().sidesLog || []).push({ id: C.uid(), at: Date.now(), by: S.me.name, role: S.me.role, to: who, scenes: chosen.map((s) => s.num), note: sides.note, expires: sides.expires, ep: S.ep.id, epLabel: 'С' + S.ep.season + 'Е' + S.ep.number }); persist(); };
+    // a copy whose file was not saved (save declined or failed) was never handed out: it stays out of the log
+    const done = [];
+    if (o.one && to.length > 1) { if (await exportPDF({ copies: to, scenes: ids, sides, wm: true })) done.push(...to); }
+    else for (const who of to) if (await exportPDF({ to: who, scenes: ids, sides, wm: true })) done.push(who);
+    done.forEach(logged);
+    if (!done.length) { toast('Сайды не сохранены: файл не записан, в журнал ничего не внесено'); return false; }
+    toast('Сайды: ' + done.length + ' экз.' + (done.length < to.length ? ' из ' + to.length + ' (остальные не сохранены)' : '') + ', сцены ' + chosen.map((s) => s.num).join(', ') + '. Запись — в журнале (Производство → Сайды…)');
+    return true;
   }
   function bibleHTML() {
     const ps = projectCharStats();
@@ -1898,7 +2211,7 @@
     $('#btnImport').hidden = reader; $('#btnDraft').hidden = reader; $('#btnHistory').hidden = reader;
     $$('[data-exp]').forEach((b) => { b.hidden = reader && b.dataset.exp !== 'pdf'; });
     // menu and toolbar entries that change the project are hidden for a reader, so the menus only offer what works
-    ['#tbImport', '#tbDraft', '#tbHistory', '#mNewEp', '#mNewSeason', '#mTrash', '#mExportFt', '#mLock', '#mPageLock', '#mRenum', '#mUndo', '#mRedo', '#tbUndo', '#tbRedo'].forEach((q) => { const x = $(q); if (x) x.hidden = reader; });
+    ['#tbImport', '#tbDraft', '#tbHistory', '#mNewEp', '#mNewSeason', '#mTrash', '#mExportFt', '#mLock', '#mPageLock', '#mRenum', '#mTag', '#tbTag', '#mUndo', '#mRedo', '#tbUndo', '#tbRedo'].forEach((q) => { const x = $(q); if (x) x.hidden = reader; });
     $$('[data-type]').forEach((b) => { b.disabled = ro; });
     $$('[data-paper]').forEach((b) => { b.disabled = reader; });
     applyWatermark();
@@ -2038,6 +2351,11 @@
   $('#mLock').onclick = () => { showLeft('scenes'); const b = $('#lockNum') || $('#unlockNum'); if (b) b.click(); else if (!canLock()) needProducer('Залочить номера сцен'); };
   $('#mExportFt').onclick = () => $('#exportMenu [data-exp=docx]').click();
   $('#mRevisions').onclick = () => showRevisions();
+  $('#mSides').onclick = () => showSides();
+  $('#mTag').onclick = startTag;
+  $('#mBreakdown').onclick = () => showRight('breakdown');
+  $('#mBdMarks').onclick = () => toggleBdMarks();
+  same('#tbTag', '#mTag');
   $('#mPageLock').onclick = () => { if (S.ep.pageLock) unlockPages(); else if (!readOnly('Лок страниц')) lockPages(); };
   $$('[data-type]').forEach((b) => b.onclick = () => { const el = ed.querySelector('.b.cur') || curBlockEl(); if (el) { setType(el, b.dataset.type); setCaret(el.dataset.id, el.textContent.length); } });
   $$('[data-paper]').forEach((b) => b.onclick = () => { if (readOnly('Формат листа')) return; P().rules.paper = b.dataset.paper; P().episodes.forEach((e) => delete e._st); applyPaper(); recompute(); fitPage(); persist(); syncViewMenu(); });
@@ -2081,6 +2399,7 @@
     $('#mThemeLight').classList.toggle('on', th === 'light'); $('#mThemeDark').classList.toggle('on', th === 'dark'); $('#mThemeAuto').classList.toggle('on', !th);
     $$('[data-paper]').forEach((x) => x.classList.toggle('on', x.dataset.paper === (P() && P().rules.paper)));
     $('#mLock').textContent = S.ep && S.ep.lock ? 'Снять лок номеров сцен…' : 'Залочить номера сцен…';
+    $('#mBdMarks').classList.toggle('on', bdOn());
     $('#mPageLock').textContent = S.ep && S.ep.pageLock ? 'Снять лок страниц…' : 'Залочить страницы';
   }
   if (ls.get('draft.hideLeft', false)) document.body.classList.add('hide-left');
@@ -2101,7 +2420,7 @@
   }
   document.addEventListener('selectionchange', debounce(renderHint, 80));
   // Help menu
-  const KEYS_HTML = '<div class="tbl-wrap"><table class="t"><tbody>' + [['Enter', 'Следующий элемент (описание → описание, персонаж → реплика, реплика → описание)'], ['Tab', 'Описание → персонаж, реплика → ремарка, пустой персонаж → переход'], ['Shift+Tab', 'Предыдущий тип элемента'], ['Ctrl+1 … Ctrl+6', 'Сцена, описание, персонаж, ремарка, реплика, переход'], ['Ctrl+Z / Ctrl+Y', 'Отменить / повторить'], ['Ctrl+Alt+M', 'Комментарий к выделенному'], ['Ctrl+S', 'Сохранить на этом компьютере (сохраняется и само)'], ['Esc', 'Закрыть окно или меню']].map((r) => '<tr><td class="n">' + r[0] + '</td><td>' + r[1] + '</td></tr>').join('') + '</tbody></table></div>';
+  const KEYS_HTML = '<div class="tbl-wrap"><table class="t"><tbody>' + [['Enter', 'Следующий элемент (описание → описание, персонаж → реплика, реплика → описание)'], ['Tab', 'Описание → персонаж, реплика → ремарка, пустой персонаж → переход'], ['Shift+Tab', 'Предыдущий тип элемента'], ['Ctrl+1 … Ctrl+6', 'Сцена, описание, персонаж, ремарка, реплика, переход'], ['Ctrl+Z / Ctrl+Y', 'Отменить / повторить'], ['Ctrl+Alt+M', 'Комментарий к выделенному'], ['Ctrl+Alt+T', 'Пометить выделенное для разбивки (цифры 1–9 — категория)'], ['Ctrl+S', 'Сохранить на этом компьютере (сохраняется и само)'], ['Esc', 'Закрыть окно или меню']].map((r) => '<tr><td class="n">' + r[0] + '</td><td>' + r[1] + '</td></tr>').join('') + '</tbody></table></div>';
   function showStart() {
     modal('<h2>Начало работы</h2><p>«Драфт» — сценарный редактор в формате Final Draft. Страница на экране совпадает со страницей на бумаге: одна страница ≈ одна минута экрана.</p>' +
       '<ol class="start"><li><b>Пишите, не отвлекаясь на формат.</b> Начните заголовок с ИНТ., НАТ. или ПАВ. — он станет сценой. <b>Enter</b> и <b>Tab</b> переключают элементы, тип всегда виден в левом верхнем углу.</li>' +
@@ -2115,11 +2434,19 @@
   $('#mKeys').onclick = () => modal('<h2>Клавиши</h2>' + KEYS_HTML + '<div class="actions"><button class="btn primary" id="kC">Закрыть</button></div>', (m) => { $('#kC', m).onclick = closeModal; });
   $('#mFormatHelp').onclick = () => modal('<h2>Формат сценария</h2><p class="note">Страница: Courier 12, 54 строки (Letter, как в Final Draft) или 58 строк (A4). Поля 1,5" слева и 1" с остальных сторон. Персонаж от 3,5", ремарка от 3,0", реплика от 2,5" шириной 3,5", переход от 5,5" до 7,1" (вправо). Русская «американка» на A4: поля 3,75 / 1,25 / 2,5 / 2,5 см, персонаж 6,75 см от поля, реплика 3,75 / 3,75 см, ремарка 5,5 / 4,5 см. Шаблон листа выбирается в меню Формат.</p>' +
     '<p class="note">Заголовок сцены: ИНТ./НАТ./ПАВ. ОБЪЕКТ. ПОДОБЪЕКТ - ВРЕМЯ (ДЕНЬ, НОЧЬ, УТРО, ВЕЧЕР, РЕЖИМ). Номера сцен ставятся в сценарии автоматически; перед производством продюсер или редактор лочит номера, после чего вставка даёт 12A, а удаление оставляет «УДАЛЕНА».</p><div class="actions"><button class="btn primary" id="fhC">Закрыть</button></div>', (m) => { $('#fhC', m).onclick = closeModal; });
-  $('#mAbout').onclick = () => modal('<h2>Драфт</h2><p class="note">Русскоязычный сценарный редактор в формате Final Draft: точная страница, нумерация и ревизии как в производстве, экспорт в FilmToolz, продюсерские замечания, история изменений и защита текста.</p><div class="actions"><button class="btn primary" id="abC">Закрыть</button></div>', (m) => { $('#abC', m).onclick = closeModal; });
+  $('#mAbout').onclick = () => modal('<h2>Драфт</h2><p class="note">Русскоязычный сценарный редактор в формате Final Draft: точная страница, нумерация и драфты с пометками правок как в производстве, экспорт в FilmToolz, продюсерские замечания, история изменений и защита текста.</p><div class="actions"><button class="btn primary" id="abC">Закрыть</button></div>', (m) => { $('#abC', m).onclick = closeModal; });
   // global shortcuts that work outside the editor too
   document.addEventListener('keydown', (e) => {
     const mod = e.ctrlKey || e.metaKey;
     if (mod && (e.key === 'p' || e.key === 'з')) { e.preventDefault(); $('#exportMenu [data-exp=pdf]').click(); }
+    if (mod && e.altKey && e.code === 'KeyT') { e.preventDefault(); startTag(); }
+    // Ctrl+Z / Ctrl+Y outside the text too: a producer tags the script but cannot put the caret in it (the editor's own
+    // keys and form fields keep theirs)
+    if (mod && !e.altKey && !e.defaultPrevented && !ed.contains(e.target) && !bdPop.contains(e.target) && !/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) && !e.target.isContentEditable && $('#modalBack').hidden) {
+      const kz = e.code === 'KeyZ' && !/^[a-z]$/i.test(e.key) || /^[zя]$/i.test(e.key), ky = e.code === 'KeyY' && !/^[a-z]$/i.test(e.key) || /^[yн]$/i.test(e.key);
+      if (kz && !e.shiftKey) { e.preventDefault(); undo(); }
+      else if (kz && e.shiftKey || ky) { e.preventDefault(); redo(); }
+    }
     if (mod && e.shiftKey && (e.key === 'S' || e.key === 'Ы' || e.key === 's' || e.key === 'ы')) { e.preventDefault(); $('#btnDraft').click(); }
     // Ctrl+S saves wherever the focus is (the editor's keydown bubbles here too), so the browser's «Save page as» never opens
     if (mod && !e.shiftKey && !e.altKey && S.db && (e.code === 'KeyS' && !/^[a-z]$/i.test(e.key) || /^[sы]$/i.test(e.key))) { e.preventDefault(); recompute(); persist.cancel(); DB.put('db', S.db).then((ok) => toast(saved(ok) ? 'Сохранено на этом компьютере' : TAB.stale ? 'Не сохранено: Драфт изменён в другой вкладке. Обновите страницу.' : 'Не удалось сохранить в браузере. Сохраните файл проекта: «Экспорт → Файл проекта».')); }
@@ -2197,5 +2524,5 @@
   window.addEventListener('resize', debounce(syncViewMenu, 150));
   $('#btnFocus').addEventListener('click', () => setTimeout(fitPage, 50));
   boot();
-  window.__draft = { S, C, recompute, readBlocks, histAdd, histLoad, showHistory, showTrash, autoSnap, lockNumbers, omitScene, restoreScene, restoreMissing, exportPDF, applyRole, applyPaper, renderScenes, showRevisions, startRevision, lockPages, unlockPages, undo, redo };
+  window.__draft = { S, C, recompute, readBlocks, histAdd, histLoad, showHistory, showTrash, autoSnap, lockNumbers, omitScene, restoreScene, restoreMissing, exportPDF, applyRole, startTag, removeTag, toggleBdMarks, exportBreakdownXLSX, applyPaper, renderScenes, showRevisions, startRevision, lockPages, unlockPages, undo, redo, showSides, issueSides };
 })();

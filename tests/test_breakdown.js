@@ -145,5 +145,41 @@ ok(old.scenes.every((s) => s.bd && !Object.keys(s.bd).length && !s.bdTags.length
   const e2 = []; new DOMParser({ onError: (l, msg) => { if (l !== 'warning') e2.push(msg); } }).parseFromString(f2['xl/worksheets/sheet4.xml'], 'text/xml');
   eq(e2, [], 'escaped text stays well-formed');
   ok(f2['xl/worksheets/sheet4.xml'].includes('a&lt;b&gt;&amp;&quot;<'), 'escaped note');
-  console.log('test_breakdown: ' + n + ' checks ok');
+// 7. regressions: a tag never jumps to the same word in another scene, waits on its own element, and keeps its occurrence
+{
+  const bl = [B('h1', 'scene', 'ИНТ. КОМНАТА - ДЕНЬ'), B('a1', 'action', 'Дима прячет пистолет в ящик.'), B('h2', 'scene', 'НАТ. ДВОР - ДЕНЬ'), B('a2', 'action', 'На скамейке лежит пистолет и газета.'), B('h3', 'scene', 'ИНТ. КУХНЯ - НОЧЬ'), B('d3', 'dialogue', 'Привет.')];
+  const tg = () => [T('g', 'a1', 'пистолет', 'props', '', 12)];
+  // the words rewritten: lost on its own element, not moved to scene 2
+  let tt = tg(), cur9 = bl.map((b) => (b.id === 'a1' ? B('a1', 'action', 'Дима уходит.') : b));
+  C.anchorTags(cur9, tt, bl);
+  ok(tt[0].lost && tt[0].blockId === 'a1', 'rewritten word: lost, not moved to the next scene');
+  cur9 = bl.slice(); C.anchorTags(cur9, tt, cur9);
+  ok(!tt[0].lost && tt[0].blockId === 'a1', 'the text back: the tag is back');
+  // the element deleted: lost; later the same word typed at the end of the script does not take it
+  tt = tg(); cur9 = bl.filter((b) => b.id !== 'a1');
+  C.anchorTags(cur9, tt, bl); C.anchorTags(cur9, tt, cur9);
+  const typed = cur9.map((b) => (b.id === 'd3' ? B('d3', 'dialogue', 'Опусти пистолет!') : b));
+  C.anchorTags(typed, tt, cur9);
+  ok(tt[0].lost && tt[0].blockId === 'a1', 'a lost tag does not attach to the same word typed elsewhere');
+  // an omitted scene: its tags wait (lost) and come back with «Вернуть сцену» (the blocks keep their ids)
+  tt = tg(); const om9 = [B('h1', 'scene', 'УДАЛЕНА')].concat(bl.slice(2));
+  C.anchorTags(om9, tt, om9);
+  ok(tt[0].lost && tt[0].blockId === 'a1', 'omitted scene: the tag waits, not in scene 2');
+  C.anchorTags(bl, tt, om9);
+  ok(!tt[0].lost && tt[0].blockId === 'a1', 'restored scene: the tag is back on its element');
+  // an element split by Enter: the new element takes the tag; a join into the heading of the same scene too
+  tt = tg(); const sp9 = [bl[0], B('a1', 'action', 'Дима'), B('n1', 'action', 'прячет пистолет в ящик.')].concat(bl.slice(2));
+  C.anchorTags(sp9, tt, bl);
+  ok(!tt[0].lost && tt[0].blockId === 'n1' && tt[0].at === 7, 'split: the tag goes with its word to the new element: ' + JSON.stringify(tt[0]));
+  // typing before a repeated word: the tag stays on its own occurrence
+  const o9 = [B('c', 'action', 'Лена ставит чашку. Игорь берёт чашку и пьёт.')], n9 = [B('c', 'action', 'Утро. На столе стоит чашку-непроливайку. ' + o9[0].x)];
+  tt = [T('c1', 'c', 'чашку', 'props', '', 31)];
+  C.anchorTags(n9, tt, o9);
+  ok(tt[0].at === n9[0].x.indexOf('Игорь берёт чашку') + 12 && C.quoteAt(n9[0].x, 'чашку', tt[0].at) === tt[0].at, 'the offset follows typing before it: ' + tt[0].at);
+  // a quote with a double space is found as it stands
+  const ds = [B('z', 'action', 'Красный  зонт лежит.')]; tt = [T('z1', 'z', 'Красный  зонт', 'props', '', 0)];
+  C.anchorTags(ds, tt, ds);
+  ok(!tt[0].lost && C.analyzeEpisode({ blocks: [B('zs', 'scene', 'ИНТ. ДОМ - ДЕНЬ')].concat(ds), sceneMeta: {}, tags: tt }, proj).scenes[0].bd.props[0].name === 'Красный зонт', 'double space: found, named with one space');
+}
+console.log('test_breakdown: ' + n + ' checks ok');
 })().catch((e) => { console.error(e); process.exit(1); });

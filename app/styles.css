@@ -188,11 +188,12 @@ body.focus .left, body.focus .right { display: none; }
   position: absolute; left: 0; right: 0; height: 0; z-index: 1; border-top: 1px dashed var(--line); pointer-events: none; user-select: none;
   padding-right: 8px; text-align: right; color: var(--muted); font-family: var(--mono); font-size: 10px; line-height: 14px;
 }
-/* revision marks (Final Draft «*» in the right margin): outside the editable text, one asterisk per line, in the set's colour */
+/* draft marks (Final Draft «*» in the right margin): outside the editable text, one asterisk per line; older drafts grey */
 .page > .revmark {
   position: absolute; left: var(--rev-x, 7.6in); z-index: 1; white-space: pre; pointer-events: none; user-select: none;
-  font-family: var(--script); font-size: 12pt; font-weight: 700;
+  font-family: var(--script); font-size: 12pt; font-weight: 700; color: #b23a1e;
 }
+.page > .revmark.old { color: #9a9a9a; font-weight: 400; }
 .revinfo i, .revsw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: baseline; border: 1px solid var(--line); }
 .editor .b.cur { background: linear-gradient(90deg, transparent, var(--accent-soft) 0, var(--accent-soft)); border-radius: 2px; }
 .editor .b.flash { animation: flash 1.2s ease-out; }
@@ -391,3 +392,32 @@ input[type=range].hs { width: 100%; accent-color: var(--accent); }
 /* getting started */
 ol.start { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; line-height: 1.45; }
 .modal p { margin: 0; line-height: 1.45; }
+
+/* script breakdown: tagging popup, scene inspector, the «Разбивка» tab */
+.bdpop {
+  position: fixed; z-index: 70; background: var(--paper); color: var(--ink); border: 1px solid var(--line); border-radius: var(--r); box-shadow: var(--shadow);
+  width: 300px; max-width: calc(100vw - 16px); padding: 8px; display: flex; flex-direction: column; gap: 6px; font-size: 13px;
+}
+.bdpop .bdq { font-weight: 500; overflow-wrap: anywhere; display: flex; align-items: center; gap: 6px; }
+.bdcats { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; }
+.bdcats button { display: flex; align-items: center; gap: 6px; background: none; border: 1px solid transparent; border-radius: 5px; padding: 4px 6px; text-align: left; color: var(--ink); font: inherit; cursor: pointer; }
+.bdcats button:hover, .bdcats button:focus-visible { background: var(--accent-soft); outline: none; border-color: var(--accent); }
+.bdcats button span { flex: 1; }
+.bdcats kbd { font-size: 10.5px; color: var(--muted); font-family: var(--mono); }
+.bdpop input[type=text] { width: 100%; box-sizing: border-box; }
+.bdsw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; flex: none; margin-right: 4px; vertical-align: baseline; }
+.bdscene { display: flex; flex-direction: column; gap: 3px; border-top: 1px solid var(--line); padding-top: 6px; }
+.bdrow { font-size: 12.5px; line-height: 1.4; }
+.bdlist { display: flex; flex-direction: column; }
+.bdit { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; padding: 3px 0; border-bottom: 1px dashed var(--line); font-size: 13px; }
+.bdit .nm { min-width: 0; overflow-wrap: anywhere; }
+.bdit .scs, .bdobj .scs { display: flex; flex-wrap: wrap; gap: 3px; justify-content: flex-end; }
+.chip.scn { cursor: pointer; background: var(--paper); font-family: var(--mono); }
+.chip.scn:hover { border-color: var(--accent); color: var(--accent); }
+.chip.bdt { border: 1px dashed var(--accent); background: transparent; }
+.bdobj { border: 1px solid var(--line); border-radius: var(--r); padding: 6px 8px; margin-bottom: 6px; display: flex; flex-direction: column; gap: 3px; }
+.bdtoggle { display: flex; gap: 6px; align-items: center; font-size: 12.5px; cursor: pointer; }
+/* sides dialog: the scene list and the issue log scroll inside the dialog */
+.sides-list, .sides-log { max-height: 240px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; margin: 6px 0 10px; }
+.sides-list tr[data-sdrow] { cursor: pointer; }
+.sides-list td:first-child { width: 24px; }

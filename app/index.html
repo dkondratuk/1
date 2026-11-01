@@ -23,6 +23,7 @@
         <button data-exp="docx">Word для FilmToolz (.docx)</button>
         <button data-exp="fountain">Fountain / текст</button>
         <button data-exp="bible">Библия персонажей (.html)</button>
+        <button data-exp="xlsx">Разбивка в Excel (.xlsx)</button>
         <button data-exp="project">Файл проекта (.json)</button>
         <hr>
         <button id="btnSettings">Настройки…</button>
@@ -43,6 +44,7 @@
         <button id="mLeft" class="check">Навигатор</button>
         <button id="mRight" class="check">Производство</button>
         <button id="btnFocus">Режим фокуса<kbd>только страница</kbd></button>
+        <button id="mBdMarks" class="check">Разметка разбивки</button>
         <hr>
         <button id="mZoomIn">Крупнее<kbd>Ctrl +</kbd></button>
         <button id="mZoomOut">Мельче<kbd>Ctrl −</kbd></button>
@@ -89,8 +91,12 @@
         <button id="mLock">Залочить номера сцен…</button>
         <button id="mRenum">Нумерация сцен</button>
         <hr>
-        <button id="mRevisions">Ревизии…</button>
+        <button id="mRevisions">Драфты: новый драфт и пометки…</button>
         <button id="mPageLock">Залочить страницы…</button>
+        <button id="mSides">Сайды…<kbd>сцены на съёмочный день</kbd></button>
+        <hr>
+        <button id="mTag">Пометить для разбивки…<kbd>Ctrl+Alt+T</kbd></button>
+        <button id="mBreakdown">Разбивка сцен</button>
         <hr>
         <button id="mTiming">Хронометраж и павильон</button>
         <button id="mRules">Проверка по параметрам студии</button>
@@ -132,6 +138,7 @@
     <button class="tb" id="tbRedo" title="Повторить (Ctrl+Y)">↷</button>
     <span class="sep"></span>
     <button class="tb" id="tbComment" title="Комментарий к выделенному (Ctrl+Alt+M)">Комментарий</button>
+    <button class="tb" id="tbTag" title="Пометить выделенное для разбивки: реквизит, костюм, транспорт… (Ctrl+Alt+T)">Разбивка</button>
     <button class="tb" id="tbDraft" title="Сохранить версию серии с датой">Сохранить драфт</button>
     <button class="tb" id="tbHistory" title="Откат по времени: автоснимки каждые 15 минут">История</button>
     <span class="sep"></span>
@@ -144,6 +151,7 @@
         <button data-exp="docx">Word для FilmToolz (.docx)</button>
         <button data-exp="fountain">Fountain / текст</button>
         <button data-exp="bible">Библия персонажей (.html)</button>
+        <button data-exp="xlsx">Разбивка в Excel (.xlsx)</button>
         <hr>
         <button data-exp="project">Файл проекта (.json)</button>
         <button data-exp="openproject">Открыть файл проекта…</button>
@@ -186,12 +194,14 @@
       <button class="tab" data-rtab="comments">Замечания</button>
       <button class="tab" data-rtab="bible">Персонажи</button>
       <button class="tab" data-rtab="objects">Объекты</button>
+      <button class="tab" data-rtab="breakdown">Разбивка</button>
     </div>
     <section class="rpane" id="pane-stats"></section>
     <section class="rpane" id="pane-rules" hidden></section>
     <section class="rpane" id="pane-comments" hidden></section>
     <section class="rpane" id="pane-bible" hidden></section>
     <section class="rpane" id="pane-objects" hidden></section>
+    <section class="rpane" id="pane-breakdown" hidden></section>
   </aside>
 </div>
 

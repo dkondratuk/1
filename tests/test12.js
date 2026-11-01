@@ -57,7 +57,7 @@ const pdfjs = require('pdfjs-dist/legacy/build/pdf.js');
   console.log('reader', await ev(() => ({ ce: document.querySelector('#editor').getAttribute('contenteditable'), imp: document.querySelector('#btnImport').hidden, fdxHidden: document.querySelector('[data-exp=fdx]').hidden, pdfHidden: document.querySelector('[data-exp=pdf]').hidden, wm: document.querySelector('#page').dataset.wm })));
   // PDF with watermark and trade-secret footer: capture the blob
   await ev(() => { window.__pdf = null; const orig = URL.createObjectURL; URL.createObjectURL = (bl) => { window.__pdf = bl; return orig(bl); }; window.__draft.S.project.secret = { org: 'ООО «Студия Тест»', addr: 'г. Москва' }; });
-  await ev(() => window.__draft.exportPDF({ to: 'Актёр Сидоров', label: 'Розовая ревизия', wm: true }));
+  await ev(() => window.__draft.exportPDF({ to: 'Актёр Сидоров', label: 'Драфт 3', wm: true }));
   await p.waitForTimeout(800);
   const b64 = await ev(async () => { const buf = await window.__pdf.arrayBuffer(); let s = ''; const u = new Uint8Array(buf); for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i]); return btoa(s); });
   const data = new Uint8Array(Buffer.from(b64, 'base64'));
@@ -65,7 +65,7 @@ const pdfjs = require('pdfjs-dist/legacy/build/pdf.js');
   const doc = await pdfjs.getDocument({ data, useSystemFonts: true }).promise;
   const txt = async (i) => (await (await doc.getPage(i)).getTextContent()).items.map((it) => it.str).join('');
   const t1 = await txt(1), t2 = await txt(2);
-  console.log('pdf pages', doc.numPages, '| title has label:', t1.includes('Розовая ревизия'), '| footer org:', t2.includes('Студия Тест'), '| copy:', t2.includes('Экземпляр: Актёр Сидоров'), '| watermark:', t2.split('Актёр Сидоров').length - 1 >= 3);
+  console.log('pdf pages', doc.numPages, '| title has label:', t1.includes('Драфт 3'), '| footer org:', t2.includes('Студия Тест'), '| copy:', t2.includes('Экземпляр: Актёр Сидоров'), '| watermark:', t2.split('Актёр Сидоров').length - 1 >= 3);
   console.log('errors', errs);
   await b.close();
 })();

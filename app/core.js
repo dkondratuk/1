@@ -211,6 +211,8 @@
     const put = (it) => { items().push(it); used += it.sb + it.lines.length; };
     // the cue repeated at the top of the next page keeps its extension: ИВАН (ЗК) (ПРОД.)
     const contd = (i) => ({ i, t: 'character', lines: [lastCue + ' (ПРОД.)'], sb: 0, contd: true });
+    // an «УДАЛЕНА» heading is a whole scene of its own: it stays on the page where the scene was
+    const omitted = (k) => blocks[k].t === 'scene' && OMIT_RE.test(blocks[k].x || '');
     // what goes to the next page with block b: a scene heading never ends a page, a cue and parentheticals stay with
     // their dialogue, and a speech broken between its parts gets (ДАЛЬШЕ) here and the cue with (ПРОД.) there
     const carryOver = (b, i) => {
@@ -219,7 +221,7 @@
       const take = () => { const it = cur.pop(); u -= it.sb + it.lines.length; out.unshift(it); };
       while (cur.length) {
         const it = cur[cur.length - 1];
-        if (it.t === 'scene') { take(); speech = false; continue; }
+        if (it.t === 'scene' && !omitted(it.i)) { take(); speech = false; continue; }
         if (!speech) break;
         if (it.t === 'paren') take();
         else if (it.t === 'character') { take(); speech = false; }
@@ -255,7 +257,7 @@
       let need = sb + inf.L;
       // keep with next: a heading takes at least 2 lines of the next element, a cue the first line of its speech,
       // a parenthetical the dialogue line after it
-      if (next && b.t === 'scene') need += next.sb + Math.min(next.L, 2);
+      if (next && b.t === 'scene' && !omitted(i)) need += next.sb + Math.min(next.L, 2);
       if (next && b.t === 'character') need += next.sb + 1;
       if (next && b.t === 'paren' && nb.t === 'dialogue') need += 1;
       if (need <= lpp - used) { put({ i, t: b.t, lines: inf.lines, sb }); continue; }
@@ -330,61 +332,88 @@
     idx.forEach((i, k) => { if (!keep[k]) return; kept.add(i); if (!firstOf.has(val[k])) firstOf.set(val[k], i); });
     const pos = new Map(blocks.map((b, i) => [b.id, i]));
     const at = new Map(), slot = (i) => { if (!at.has(i)) at.set(i, { start: null, mids: [] }); return at.get(i); };
-    let last = -1;
+    let last = -1, lastQ = -1;
+    // a page whose text is all gone goes into the label of the page before it (2-3, as Final Draft numbers it), so the
+    // replacement page tells the crew to take out the old page 3 too; one before the first page goes into the next one
+    const gone = {}, lead = [];
+    const name = (q) => String(lock.pages[q].n || q + 1);
     lock.pages.forEach((pg, q) => {
       let i = null, mid = false;
       if (pg.mid && pos.has(pg.id) && kept.has(pos.get(pg.id))) { i = pos.get(pg.id); mid = true; } else if (firstOf.has(q)) i = firstOf.get(q);
-      // a page whose text is all gone, or that would come before the previous one, is skipped (its number is not printed)
+      // a page that would come before the previous one is skipped (its number is not printed)
       // (several pages may start inside one long block)
-      if (i == null || i < last || (i === last && !mid)) return;
+      if (i == null) { if (lastQ >= 0) (gone[lastQ] = gone[lastQ] || []).push(q); else lead.push(q); return; }
+      if (i < last || (i === last && !mid)) return;
       if (mid) slot(i).mids.push(q); else slot(i).start = q;
-      last = i;
+      if (lead.length && lastQ < 0 && i === 0) { gone[q] = lead.slice(); gone[q].first = true; }
+      last = i; lastQ = q;
     });
-    const used = new Set(lock.pages.map((pg, q) => String(pg.n || q + 1)));
+    const used = new Set(lock.pages.map((pg, q) => name(q)));
     const plan = { at, mids: [], cur: 0, aN: 0 };
-    plan.label = (q) => { plan.cur = q; plan.aN = 0; return String(lock.pages[q].n || q + 1); };
+    plan.label = (q) => {
+      plan.cur = q; plan.aN = 0;
+      const g = gone[q];
+      return !g ? name(q) : g.first ? name(g[0]) + '-' + name(q) : name(q) + '-' + name(g[g.length - 1]);
+    };
     plan.next = (q) => {
       if (q == null && plan.mids.length) q = plan.mids.shift();
       if (q != null) return plan.label(q);
-      let s; do s = aPageLabel(String(lock.pages[plan.cur].n || plan.cur + 1), ++plan.aN); while (used.has(s) && plan.aN < 200);
+      let s; do s = aPageLabel(name(plan.cur), ++plan.aN); while (used.has(s) && plan.aN < 200);
       return s;
     };
     return plan;
   }
 
-  // ---------- production revisions (WGA colour order, as in Final Draft) ----------
-  // Level 0 is the white original. Every revision keeps a copy of the text at its start (base); a block differs from a
+  // ---------- production drafts (Final Draft revisions, numbered instead of WGA colours) ----------
+  // The studio names every production revision by number: level 0 is «Драфт 1» (the text as first sent out), level n is
+  // «Драфт n+1». Colours are kept only for the FDX file, where Final Draft needs one per set; the app never shows them.
+  // Level 0 is the original. Every revision keeps a copy of the text at its start (base); a block differs from a
   // base when it is new there, has other text or another type, or follows text deleted since (Final Draft marks the line
   // where text was removed). A block carries the highest level it differs in, so earlier marks stay with their colour.
   const REV_SETS = [['Белая', '#8a8a8a'], ['Голубая', '#2f7fd8'], ['Розовая', '#e0569a'], ['Жёлтая', '#c9a000'], ['Зелёная', '#2e9e4f'],
     ['Золотистая', '#d08c00'], ['Бежевая', '#b08a5e'], ['Лососевая', '#f0785a'], ['Вишнёвая', '#b0223f']];
   const REV_ORD = ['', 'Вторая', 'Третья', 'Четвёртая', 'Пятая', 'Шестая', 'Седьмая', 'Восьмая', 'Девятая', 'Десятая'];
-  function revName(level) {
+  const revName = (level) => 'Драфт ' + ((level || 0) + 1);
+  // the WGA colour name, only for reading old files and for the FDX set list
+  function revColorName(level) {
     const name = REV_SETS[level % REV_SETS.length][0], k = Math.floor(level / REV_SETS.length);
     return k ? (REV_ORD[k] || (k + 1) + '-я') + ' ' + name.toLowerCase() : name;
   }
   const revColor = (level) => REV_SETS[level % REV_SETS.length][1];
   // the right-margin column of the marks: 7.6 in on Letter, never over the text nor off the sheet
   const revMarkX = (paper) => Math.min(paper.w - 0.3, Math.max(7.6, paper.w - paper.right + 0.1));
-  function revMarks(blocks, revisions) {
+  // Text moved elsewhere (a scene moved up or down) is revised too: blocks outside the longest run that keeps the base
+  // order are marked, as Final Draft marks cut-and-pasted text. Under a page lock (lock) a deletion is marked on the page
+  // the text left: when the next surviving block starts a locked page, the block before the deleted text takes the mark.
+  // A deletion right after a block already marked in that revision (an «УДАЛЕНА» heading) marks nothing more.
+  function revMarks(blocks, revisions, lock) {
     const out = blocks.map(() => 0);
     const pos = new Map(blocks.map((b, i) => [b.id, i]));
+    const starts = new Set(((lock && lock.pages) || []).filter((pg) => !pg.mid).map((pg) => pg.id));
     for (const r of revisions || []) {
       const lv = r.level || 0, base = r.base || [];
       if (!lv) continue;
-      const was = new Map(base.map((b) => [b.id, b]));
-      blocks.forEach((b, i) => { const o = was.get(b.id); if ((!o || o.t !== b.t || (o.x || '') !== (b.x || '')) && lv > out[i]) out[i] = lv; });
+      const was = new Map(base.map((b) => [b.id, b])), at = new Map(base.map((b, k) => [b.id, k]));
+      const chg = blocks.map((b) => { const o = was.get(b.id); return !o || o.t !== b.t || (o.x || '') !== (b.x || ''); });
+      const idx = [], val = [];
+      blocks.forEach((b, i) => { if (at.has(b.id)) { idx.push(i); val.push(at.get(b.id)); } });
+      const inOrder = lnds(val);
+      idx.forEach((i, k) => { if (!inOrder[k]) chg[i] = true; });
+      chg.forEach((c, i) => { if (c && lv > out[i]) out[i] = lv; });
       for (let k = 0; k < base.length; k++) {
         if (pos.has(base[k].id)) continue;
         let j = k + 1; while (j < base.length && !pos.has(base[j].id)) j++;
-        const i = j < base.length ? pos.get(base[j].id) : blocks.length - 1;
-        if (i >= 0 && lv > out[i]) out[i] = lv;
+        const before = k > 0 ? pos.get(base[k - 1].id) : undefined, after = j < base.length ? pos.get(base[j].id) : undefined;
         k = j - 1;
+        if (before != null && chg[before]) continue;
+        let i = after != null ? after : blocks.length - 1;
+        if (before != null && after != null && starts.has(blocks[after].id)) i = before;
+        if (i >= 0 && lv > out[i]) out[i] = lv;
       }
     }
     return out;
   }
-  // a fresh revision: the next level, its WGA name and colour, and the text it is measured against
+  // a fresh draft: the next level, its number name (colour only for FDX), and the text it is measured against
   function newRevision(prevLevel, blocks, by, date) {
     const level = (prevLevel || 0) + 1;
     return { level, name: revName(level), color: revColor(level), date: date || Date.now(), by: by || '', base: blocks.map((b) => ({ id: b.id, t: b.t, x: b.x || '' })) };
@@ -393,7 +422,8 @@
   // above, so revMarks gives every block back exactly the level it had in Final Draft
   function revisionsFromMarks(blocks, active, date) {
     const max = Math.max(0, active || 0, ...blocks.map((b) => b.rev || 0));
-    if (!blocks.some((b) => b.rev)) return null;
+    // a set Final Draft was writing in counts even before its first mark: later edits are marked in it
+    if (!max) return null;
     const revisions = [];
     for (let lv = 1; lv <= max; lv++) revisions.push(newRevision(lv - 1, blocks.filter((b) => (b.rev || 0) < lv), 'Final Draft', date));
     return { revisions, revLevel: max };
@@ -516,7 +546,7 @@
     const tot = minutes || 1;
     const stats = {
       pages, minutes, scenes, objects: objList, main, totalShifts, lay,
-      revs: ep.revisions && ep.revisions.length ? revMarks(blocks, ep.revisions) : null,
+      revs: ep.revisions && ep.revisions.length ? revMarks(blocks, ep.revisions, ep.pageLock) : null,
       pavMin: sum((s) => s.pav), intMin: sum((s) => !s.pav && s.h.type === 'int'),
       extMin: sum((s) => !s.pav && (s.h.type === 'ext' || s.h.type === 'intext')),
       nightMin: sum((s) => s.night && !s.pav), nightAllMin: sum((s) => s.night),
@@ -578,21 +608,57 @@
     for (let i = text.indexOf(quote); i >= 0; i = text.indexOf(quote, i + 1)) if (best < 0 || Math.abs(i - (at || 0)) < Math.abs(best - (at || 0))) best = i;
     return best;
   }
-  // tags follow their text like comments: an element that no longer holds the quote (joined, split) hands the tag to the
-  // nearest element that does, searched from where the tag was in prev (the blocks before the edit). Unlike a comment a tag
-  // marks a word that recurs (a prop), so it looks only a few elements away: a deleted word must not jump to another scene
+  // tags follow their text like comments, but a tag marks a word that recurs (a prop), so it never jumps to the same word
+  // elsewhere: it moves only with its own text, within its scene and a few elements away (TAG_REACH):
+  // - its element is gone in this edit (joined into a neighbour): the nearest element that holds the quote takes it;
+  // - its element is still there without the quote (split by Enter): only an element new in this edit may take it;
+  // - otherwise the words were deleted or rewritten: the tag is lost and waits on its own element for the text to come
+  //   back (Ctrl+Z, a draft, «Вернуть сцену»). An element gone before the last edit is not searched again.
+  // prev is the text before the edit; t.at follows typing earlier in the element, so a repeated word keeps its own tag
   const TAG_REACH = 3;
+  function sceneSpan(blocks, i) {
+    let a = i, z = i;
+    while (a > 0 && blocks[a].t !== 'scene') a--;
+    while (z + 1 < blocks.length && blocks[z + 1].t !== 'scene') z++;
+    return [a, z];
+  }
+  function shiftAt(at, was, now) {
+    if (was == null || was === now) return at || 0;
+    let p = 0; const m = Math.min(was.length, now.length);
+    while (p < m && was[p] === now[p]) p++;
+    let q = 0; while (q < m - p && was[was.length - 1 - q] === now[now.length - 1 - q]) q++;
+    return (at || 0) >= was.length - q ? (at || 0) + now.length - was.length : at || 0;
+  }
   function anchorTags(blocks, tags, prev) {
     const pos = {}; blocks.forEach((b, i) => { pos[b.id] = i; });
     const texts = blocks.map((b) => b.x || '');
+    const old = {}; (prev || []).forEach((b, i) => { old[b.id] = { i, x: b.x || '' }; });
+    const fresh = (k) => prev && !(blocks[k].id in old);
     let moved = 0;
     for (const t of tags || []) {
-      const i = pos[t.blockId];
-      if (i != null && texts[i].indexOf(t.quote) >= 0) { if (t.lost) delete t.lost; continue; }
-      let start = i;
-      if (start == null) { const j = prev ? prev.findIndex((b) => b.id === t.blockId) : -1; start = j >= 0 ? j : blocks.length - 1; }
-      const k = findAnchor(texts, t.quote, start, TAG_REACH);
-      if (k >= 0) { if (blocks[k].id !== t.blockId) moved++; t.blockId = blocks[k].id; delete t.lost; } else t.lost = true;
+      const i = pos[t.blockId], was = old[t.blockId];
+      if (i != null && texts[i].indexOf(t.quote) >= 0) {
+        const at = quoteAt(texts[i], t.quote, shiftAt(t.at, was && was.x, texts[i]));
+        if (t.at != null || at) t.at = at;
+        if (t.lost) delete t.lost;
+        continue;
+      }
+      let start = i, any = false;
+      if (start == null && was) {
+        // where the element was: the nearest element of prev still in the text, earlier first
+        for (let d = 1; start == null && d < prev.length; d++) for (const j of [was.i - d, was.i + d]) if (start == null && prev[j] && prev[j].id in pos) start = pos[prev[j].id];
+        any = true;
+      }
+      let k = -1;
+      if (start != null) {
+        const [a, z] = sceneSpan(blocks, start);
+        const sub = texts.map((x, j) => (j >= a && j <= z && (any || fresh(j)) ? x : ''));
+        k = findAnchor(sub, t.quote, start, TAG_REACH);
+      }
+      if (k >= 0) {
+        if (blocks[k].id !== t.blockId) moved++;
+        t.blockId = blocks[k].id; t.at = quoteAt(texts[k], t.quote, (t.at || 0) + texts[k].length - (was ? was.x.length : 0)); delete t.lost;
+      } else t.lost = true;
     }
     return moved;
   }
@@ -1604,9 +1670,43 @@
     return { blocks: out, how: 'inserted' };
   }
 
+  // ---------- sides (scenes for a shooting day) ----------
+  // Final Draft «Print selected scenes»: only the chosen scenes, in script order, re-flowed on the same page format.
+  // map[i] is the script index of block i of the sides, so scene numbers and revision marks stay those of the script.
+  function sidesBlocks(blocks, scenes, ids) {
+    const want = new Set(ids), out = [], map = [];
+    for (const s of scenes) {
+      if (!want.has(s.id) || s.omitted) continue;
+      for (let i = s.from; i <= s.to; i++) { out.push(blocks[i]); map.push(i); }
+    }
+    return { blocks: out, map };
+  }
+  // quick picks of the dialog: every scene of one character (speaking or in the action), or of one story day
+  function sidesPick(scenes, by) {
+    return scenes.filter((s) => !s.omitted && (by.char ? s.cast.includes(by.char) : by.day != null && by.day !== '' && String(s.day) === String(by.day))).map((s) => s.id);
+  }
+  // recipients: one per line, each name once (the same actor typed twice would get two identical copies)
+  function sidesRecipients(text) {
+    const seen = new Set();
+    return String(text || '').split(/\r?\n/).map(clean).filter((n) => { const k = n.toLowerCase(); if (!n || seen.has(k)) return false; seen.add(k); return true; });
+  }
+  // dates as YYYY-MM-DD in local time (the value of <input type=date>), printed as ДД.ММ.ГГГГ whatever the locale
+  function isoDay(t) { const d = new Date(t); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+  function sidesExpiry(from, days) { const d = new Date(from); d.setDate(d.getDate() + (days == null ? 3 : days)); return isoDay(d); }
+  function ruDate(iso) { const m = /^(\d{4})-(\d\d)-(\d\d)$/.exec(iso || ''); return m ? m[3] + '.' + m[2] + '.' + m[1] : String(iso || ''); }
+  // a copy is valid through its expiry day
+  function sidesExpired(entry, now) { return !!(entry && entry.expires) && isoDay(now == null ? Date.now() : now) > entry.expires; }
+  // the issue log merges like comments: every entry of both copies of the project, once, oldest first
+  function mergeSidesLog(a, b) {
+    const out = (a || []).slice();
+    for (const e of b || []) if (e && e.id && !out.some((x) => x.id === e.id)) out.push(e);
+    return out.sort((x, y) => (x.at || 0) - (y.at || 0));
+  }
+
   root.Core = {
+    sidesBlocks, sidesPick, sidesRecipients, sidesExpiry, sidesExpired, mergeSidesLog, isoDay, ruDate,
     BREAKDOWN, BD, BD_SPECIAL, findAnchor, quoteAt, anchorTags, bdKey, bdName, breakdownItems, breakdownByObject, mergeTags, breakdownXLSX,
-    REV_SETS, revName, revColor, revMarkX, revMarks, newRevision, revisionsFromMarks, fdxActiveSet, pageLockFrom,
+    REV_SETS, revName, revColorName, revColor, revMarkX, revMarks, newRevision, revisionsFromMarks, fdxActiveSet, pageLockFrom,
     parseLines, LINE_COLORS, autoLine, listOf, paperOf, FMT_RU, lockAssign, lockMissing, lockInsertIndex, omittedHeading, OMIT_RE, numParts,
     TYPES, TYPE_LABEL, FMT, PAPER, TIMES, PREFIXES, TRANSITIONS, EXTENSIONS, TAGS, SPECIAL_TAGS, DEFAULT_RULES, MANUAL_CHECKS,
     uid, up, clean, parseHeading, formatHeading, charName, wrap, paginate, rightEdge, displayText, analyzeEpisode, evalRules, fmtPages, fmtTime,
