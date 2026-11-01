@@ -203,8 +203,11 @@
     const breaks = {}, inner = {};
     let used = 0;
     let lastChar = '', lastCue = '';
+    // locked pages: the plan says where a locked page must start and names the pages (12, 12A…)
+    const PL = pageLockPlan(blocks, opts && opts.pageLock);
+    const labels = PL ? [PL.label(0)] : null;
     const items = () => pages[pages.length - 1].items;
-    const newPage = () => { pages.push({ items: [] }); used = 0; };
+    const newPage = (q) => { pages.push({ items: [] }); used = 0; if (PL) labels.push(PL.next(q)); };
     const put = (it) => { items().push(it); used += it.sb + it.lines.length; };
     // the cue repeated at the top of the next page keeps its extension: ИВАН (ЗК) (ПРОД.)
     const contd = (i) => ({ i, t: 'character', lines: [lastCue + ' (ПРОД.)'], sb: 0, contd: true });
@@ -233,6 +236,20 @@
       const b = blocks[i], inf = info[i];
       if (b.t === 'character') { lastChar = charName(b.x); lastCue = clean(up(b.x).replace(/\(\s*(ПРОД|CONT'?D)\.?\s*\)/g, ' ')) || lastChar; }
       else if (b.t !== 'dialogue' && b.t !== 'paren') lastChar = lastCue = '';
+      if (PL) {
+        // a locked page starts where it started at the lock, however much text the page before it lost or gained:
+        // the break is forced here (a heading or cue left at the bottom still goes along with its text)
+        const a = PL.at.get(i), force = (q) => {
+          if (!items().length) { labels[labels.length - 1] = PL.next(q); return; }
+          const carry = carryOver(b, i);
+          newPage(q);
+          if (carry && carry.length) { carry[0].sb = 0; carry.forEach(put); breaks[carry[0].i] = { page: pages.length }; } else breaks[i] = { page: pages.length };
+        };
+        // a page that began inside the previous block, which now ends sooner: that page starts with this block
+        if (PL.mids.length) { const q = PL.mids[0]; PL.mids = []; if (!(a && a.start != null)) force(q); }
+        if (a && a.start != null && a.start > PL.cur) force(a.start);
+        if (a) PL.mids = a.mids.filter((q) => q > PL.cur);
+      }
       const f = F[b.t] || F.action, nb = blocks[i + 1], next = info[i + 1];
       let sb = used === 0 ? 0 : inf.sb;
       let need = sb + inf.L;
@@ -271,7 +288,122 @@
     const last = pages[pages.length - 1];
     const lastUsed = last.items.reduce((a, it) => a + it.sb + it.lines.length, 0);
     const total = blocks.length ? (pages.length - 1) + lastUsed / lpp : 0;
-    return { pages, total, info, breaks, inner, lpp };
+    return { pages, total, info, breaks, inner, lpp, labels: labels || pages.map((pg, k) => String(k + 1)), locked: !!PL };
+  }
+
+  // ---------- locked pages (Final Draft «Lock Pages») ----------
+  // The lock remembers, for every page, its label and the block it starts with (mid: the page starts inside that block),
+  // and for every block the page it started on (of). Later the same blocks start the same pages; text that does not fit
+  // goes to A-pages (12A, 12B…), a page that lost text stays short, and the next page keeps its number.
+  function pageLockFrom(lay, blocks) {
+    const of = {}, pages = [];
+    lay.pages.forEach((pg, k) => {
+      for (const it of pg.items) if (!it.contd && !(blocks[it.i].id in of)) of[blocks[it.i].id] = k;
+      const first = pg.items.find((it) => !it.contd) || pg.items[0];
+      if (!first) return;
+      pages.push({ n: (lay.labels || [])[k] || String(k + 1), id: blocks[first.i].id, mid: of[blocks[first.i].id] < k });
+    });
+    return { pages, of };
+  }
+  // longest non-decreasing run of locked page numbers, so a scene moved elsewhere counts as new text there
+  function lnds(a) {
+    const tails = [], tailK = [], prev = [];
+    a.forEach((v, k) => {
+      let lo = 0, hi = tails.length;
+      while (lo < hi) { const m = (lo + hi) >> 1; if (tails[m] <= v) lo = m + 1; else hi = m; }
+      prev[k] = lo ? tailK[lo - 1] : -1; tails[lo] = v; tailK[lo] = k;
+    });
+    const keep = a.map(() => false);
+    for (let k = tails.length ? tailK[tails.length - 1] : -1; k >= 0; k = prev[k]) keep[k] = true;
+    return keep;
+  }
+  function aPageLabel(base, n) {
+    const m = String(base).match(/^(.*?)([A-Z]?)$/), k = (m[2] ? LETTERS.indexOf(m[2]) + 1 : 0) + n - 1;
+    return m[1] + (k < LETTERS.length ? LETTERS[k] : 'Z' + (LETTERS[k - LETTERS.length] || k));
+  }
+  function pageLockPlan(blocks, lock) {
+    if (!lock || !lock.pages || !lock.pages.length) return null;
+    const of = lock.of || {}, own = (id) => Object.prototype.hasOwnProperty.call(of, id);
+    const idx = [], val = [];
+    blocks.forEach((b, i) => { if (own(b.id)) { idx.push(i); val.push(of[b.id]); } });
+    const keep = lnds(val), kept = new Set(), firstOf = new Map();
+    idx.forEach((i, k) => { if (!keep[k]) return; kept.add(i); if (!firstOf.has(val[k])) firstOf.set(val[k], i); });
+    const pos = new Map(blocks.map((b, i) => [b.id, i]));
+    const at = new Map(), slot = (i) => { if (!at.has(i)) at.set(i, { start: null, mids: [] }); return at.get(i); };
+    let last = -1;
+    lock.pages.forEach((pg, q) => {
+      let i = null, mid = false;
+      if (pg.mid && pos.has(pg.id) && kept.has(pos.get(pg.id))) { i = pos.get(pg.id); mid = true; } else if (firstOf.has(q)) i = firstOf.get(q);
+      // a page whose text is all gone, or that would come before the previous one, is skipped (its number is not printed)
+      // (several pages may start inside one long block)
+      if (i == null || i < last || (i === last && !mid)) return;
+      if (mid) slot(i).mids.push(q); else slot(i).start = q;
+      last = i;
+    });
+    const used = new Set(lock.pages.map((pg, q) => String(pg.n || q + 1)));
+    const plan = { at, mids: [], cur: 0, aN: 0 };
+    plan.label = (q) => { plan.cur = q; plan.aN = 0; return String(lock.pages[q].n || q + 1); };
+    plan.next = (q) => {
+      if (q == null && plan.mids.length) q = plan.mids.shift();
+      if (q != null) return plan.label(q);
+      let s; do s = aPageLabel(String(lock.pages[plan.cur].n || plan.cur + 1), ++plan.aN); while (used.has(s) && plan.aN < 200);
+      return s;
+    };
+    return plan;
+  }
+
+  // ---------- production revisions (WGA colour order, as in Final Draft) ----------
+  // Level 0 is the white original. Every revision keeps a copy of the text at its start (base); a block differs from a
+  // base when it is new there, has other text or another type, or follows text deleted since (Final Draft marks the line
+  // where text was removed). A block carries the highest level it differs in, so earlier marks stay with their colour.
+  const REV_SETS = [['Белая', '#8a8a8a'], ['Голубая', '#2f7fd8'], ['Розовая', '#e0569a'], ['Жёлтая', '#c9a000'], ['Зелёная', '#2e9e4f'],
+    ['Золотистая', '#d08c00'], ['Бежевая', '#b08a5e'], ['Лососевая', '#f0785a'], ['Вишнёвая', '#b0223f']];
+  const REV_ORD = ['', 'Вторая', 'Третья', 'Четвёртая', 'Пятая', 'Шестая', 'Седьмая', 'Восьмая', 'Девятая', 'Десятая'];
+  function revName(level) {
+    const name = REV_SETS[level % REV_SETS.length][0], k = Math.floor(level / REV_SETS.length);
+    return k ? (REV_ORD[k] || (k + 1) + '-я') + ' ' + name.toLowerCase() : name;
+  }
+  const revColor = (level) => REV_SETS[level % REV_SETS.length][1];
+  // the right-margin column of the marks: 7.6 in on Letter, never over the text nor off the sheet
+  const revMarkX = (paper) => Math.min(paper.w - 0.3, Math.max(7.6, paper.w - paper.right + 0.1));
+  function revMarks(blocks, revisions) {
+    const out = blocks.map(() => 0);
+    const pos = new Map(blocks.map((b, i) => [b.id, i]));
+    for (const r of revisions || []) {
+      const lv = r.level || 0, base = r.base || [];
+      if (!lv) continue;
+      const was = new Map(base.map((b) => [b.id, b]));
+      blocks.forEach((b, i) => { const o = was.get(b.id); if ((!o || o.t !== b.t || (o.x || '') !== (b.x || '')) && lv > out[i]) out[i] = lv; });
+      for (let k = 0; k < base.length; k++) {
+        if (pos.has(base[k].id)) continue;
+        let j = k + 1; while (j < base.length && !pos.has(base[j].id)) j++;
+        const i = j < base.length ? pos.get(base[j].id) : blocks.length - 1;
+        if (i >= 0 && lv > out[i]) out[i] = lv;
+        k = j - 1;
+      }
+    }
+    return out;
+  }
+  // a fresh revision: the next level, its WGA name and colour, and the text it is measured against
+  function newRevision(prevLevel, blocks, by, date) {
+    const level = (prevLevel || 0) + 1;
+    return { level, name: revName(level), color: revColor(level), date: date || Date.now(), by: by || '', base: blocks.map((b) => ({ id: b.id, t: b.t, x: b.x || '' })) };
+  }
+  // FDX import: marks read from RevisionID become revisions whose base is the text without the marks of that level and
+  // above, so revMarks gives every block back exactly the level it had in Final Draft
+  function revisionsFromMarks(blocks, active, date) {
+    const max = Math.max(0, active || 0, ...blocks.map((b) => b.rev || 0));
+    if (!blocks.some((b) => b.rev)) return null;
+    const revisions = [];
+    for (let lv = 1; lv <= max; lv++) revisions.push(newRevision(lv - 1, blocks.filter((b) => (b.rev || 0) < lv), 'Final Draft', date));
+    return { revisions, revLevel: max };
+  }
+  // <Revisions ActiveSet=… RevisionMode=…>: the set Final Draft was writing in, when revision mode was on
+  function fdxActiveSet(xml) {
+    const m = String(xml).match(/<Revisions\b[^>]*>/);
+    if (!m || /RevisionMode="Off"/.test(m[0])) return 0;
+    const a = m[0].match(/ActiveSet="(\d+)"/);
+    return a ? +a[1] : 0;
   }
 
   // ---------- analysis ----------
@@ -289,14 +421,18 @@
     const rules = Object.assign({}, DEFAULT_RULES, project.rules || {});
     const paper = paperOf(rules);
     const blocks = ep.blocks || [];
-    const lay = paginate(blocks, { lines: paper.lines, fmt: paper.fmt });
-    const pages = lay.total;
+    const lay = paginate(blocks, { lines: paper.lines, fmt: paper.fmt, pageLock: ep.pageLock });
+    // locked pages keep their numbers (short pages, A-pages), but the timing counts the text itself
+    const pages = lay.locked ? paginate(blocks, { lines: paper.lines, fmt: paper.fmt }).total : lay.total;
+    const pageAt = [];
+    lay.pages.forEach((pg, k) => pg.items.forEach((it) => { if (pageAt[it.i] == null) pageAt[it.i] = lay.labels[k]; }));
     const minutes = pages * rules.minPerPage;
     const nominal = lay.info.map((inf, i) => (i === 0 ? 0 : inf.sb) + inf.L);
     const totalNominal = nominal.reduce((a, b) => a + b, 0) || 1;
     const locs = project.locs || {};
     const chars = project.chars || {};
     const dictNames = Object.keys(chars);
+    const bdBy = bdByScene(blocks, ep.tags);
     const scenes = sceneSplit(blocks).map((s, k) => {
       let lines = 0;
       const speaking = new Set();
@@ -327,15 +463,18 @@
       const minors = [...cast].filter((n) => chars[n] && chars[n].minor);
       const guests = [...cast].filter((n) => chars[n] && chars[n].guest);
       const tags = omitted ? [] : (meta.tags || []);
-      const special = tags.some((t) => SPECIAL_TAGS.includes(t)) || minors.length > 0;
+      // breakdown items in Трюки / Животные make the scene special as the scene tags do; a scene with both counts once
+      const bd = omitted ? {} : (bdBy[s.id] || {});
+      const bdTags = Object.keys(BD_SPECIAL).filter((c) => bd[c] && bd[c].length && !tags.includes(BD_SPECIAL[c])).map((c) => BD_SPECIAL[c]);
+      const special = tags.concat(bdTags).some((t) => SPECIAL_TAGS.includes(t)) || minors.length > 0;
       const rate = pav ? rules.ratePav : (h.type === 'ext' || h.type === 'intext') ? rules.rateExt : rules.rateInt;
       const shifts = omitted ? 0 : min / (special ? rate / rules.specialFactor : rate);
       return {
         id: s.id, n: k + 1, from: s.from, to: s.to, heading: s.heading, h, pav, night: isNight(h),
         lines, share, pages: share * pages, min, sec: Math.round(min * 60), cast: [...cast], speaking: [...speaking],
-        silent: [...cast].filter((n) => !speaking.has(n)), minors, guests, tags, special, shifts, replicas, dialogueWords,
+        silent: [...cast].filter((n) => !speaking.has(n)), minors, guests, tags, bd, bdTags, special, shifts, replicas, dialogueWords,
         synopsis: meta.synopsis || '', day: meta.day || h.day || '', num: meta.num || String(k + 1), fileNum: !!meta.num,
-        line: meta.line || '', omitted,
+        line: meta.line || '', omitted, page: pageAt[s.from] || '1',
       };
     });
     for (const s of scenes) {
@@ -377,6 +516,7 @@
     const tot = minutes || 1;
     const stats = {
       pages, minutes, scenes, objects: objList, main, totalShifts, lay,
+      revs: ep.revisions && ep.revisions.length ? revMarks(blocks, ep.revisions) : null,
       pavMin: sum((s) => s.pav), intMin: sum((s) => !s.pav && s.h.type === 'int'),
       extMin: sum((s) => !s.pav && (s.h.type === 'ext' || s.h.type === 'intext')),
       nightMin: sum((s) => s.night && !s.pav), nightAllMin: sum((s) => s.night),
@@ -402,6 +542,179 @@
     }
     stats.characters = Object.values(cmap).sort((a, b) => b.min - a.min);
     return stats;
+  }
+
+  // ---------- script breakdown (Final Draft Tagger, Movie Magic) ----------
+  // categories in the order of the tagging popup (keys 1–9 pick the first nine); the colour marks the tagged text on screen
+  const BREAKDOWN = [
+    { id: 'props', name: 'Реквизит', color: '#d97706' },
+    { id: 'costume', name: 'Костюм', color: '#7c3aed' },
+    { id: 'makeup', name: 'Грим', color: '#db2777' },
+    { id: 'vehicles', name: 'Транспорт', color: '#0891b2' },
+    { id: 'extras', name: 'Массовка', color: '#65a30d' },
+    { id: 'stunts', name: 'Трюки', color: '#dc2626' },
+    { id: 'animals', name: 'Животные', color: '#a16207' },
+    { id: 'sfx', name: 'Спецэффекты', color: '#ea580c' },
+    { id: 'sound', name: 'Звук/музыка', color: '#2563eb' },
+    { id: 'weapons', name: 'Оружие', color: '#64748b' },
+    { id: 'set', name: 'Декорация', color: '#059669' },
+    { id: 'cameo', name: 'Персонаж-эпизод', color: '#c026d3' },
+  ];
+  const BD = {}; BREAKDOWN.forEach((c) => { BD[c.id] = c; });
+  // breakdown categories that make a scene special for the studio rules, as the scene tag they stand for (counted once)
+  const BD_SPECIAL = { stunts: 'stunts', animals: 'animals' };
+
+  // the element nearest to start (outward, earlier first) whose text holds the quote; -1 if none. Comments and tags share it
+  function findAnchor(texts, quote, start, maxDist) {
+    if (!quote || !texts.length) return -1;
+    start = Math.max(0, Math.min(Math.floor(start) || 0, texts.length - 1));
+    for (let d = 0; d < texts.length && !(d > maxDist); d++) for (const k of d ? [start - d, start + d] : [start]) if (k >= 0 && k < texts.length && texts[k].indexOf(quote) >= 0) return k;
+    return -1;
+  }
+  // the occurrence of the quote nearest to where it was tagged, so a word repeated in one element keeps its own tag
+  function quoteAt(text, quote, at) {
+    let best = -1;
+    if (!quote) return best;
+    for (let i = text.indexOf(quote); i >= 0; i = text.indexOf(quote, i + 1)) if (best < 0 || Math.abs(i - (at || 0)) < Math.abs(best - (at || 0))) best = i;
+    return best;
+  }
+  // tags follow their text like comments: an element that no longer holds the quote (joined, split) hands the tag to the
+  // nearest element that does, searched from where the tag was in prev (the blocks before the edit). Unlike a comment a tag
+  // marks a word that recurs (a prop), so it looks only a few elements away: a deleted word must not jump to another scene
+  const TAG_REACH = 3;
+  function anchorTags(blocks, tags, prev) {
+    const pos = {}; blocks.forEach((b, i) => { pos[b.id] = i; });
+    const texts = blocks.map((b) => b.x || '');
+    let moved = 0;
+    for (const t of tags || []) {
+      const i = pos[t.blockId];
+      if (i != null && texts[i].indexOf(t.quote) >= 0) { if (t.lost) delete t.lost; continue; }
+      let start = i;
+      if (start == null) { const j = prev ? prev.findIndex((b) => b.id === t.blockId) : -1; start = j >= 0 ? j : blocks.length - 1; }
+      const k = findAnchor(texts, t.quote, start, TAG_REACH);
+      if (k >= 0) { if (blocks[k].id !== t.blockId) moved++; t.blockId = blocks[k].id; delete t.lost; } else t.lost = true;
+    }
+    return moved;
+  }
+  // one item per category and name: «Пистолет», «пистолет.» and «ПИСТОЛЕТ» are the same prop
+  const bdKey = (s) => clean(String(s || '')).toLowerCase().replace(/ё/g, 'е').replace(/^[«"'(\s]+|[»"').,:;!?\s]+$/g, '');
+  const bdName = (s) => { const q = clean(String(s || '')).replace(/^[«"'(]+|[»"').,:;!?]+$/g, ''); return q.charAt(0).toUpperCase() + q.slice(1); };
+  // tags by scene id: { sceneId: { cat: [{ name, note }] } }; a tag whose text is gone counts nowhere
+  function bdByScene(blocks, tags) {
+    const sceneOf = {}; let cur = '';
+    blocks.forEach((b) => { if (b.t === 'scene') cur = b.id; sceneOf[b.id] = cur; });
+    const out = {};
+    for (const t of tags || []) {
+      if (t.lost || !BD[t.cat] || !(t.blockId in sceneOf)) continue;
+      const sid = sceneOf[t.blockId], m = out[sid] || (out[sid] = {}), list = m[t.cat] || (m[t.cat] = []);
+      const k = bdKey(t.quote); if (!k) continue;
+      const it = list.find((x) => bdKey(x.name) === k);
+      if (!it) list.push({ name: bdName(t.quote), note: t.note || '' });
+      else if (t.note && !it.note.split('; ').includes(t.note)) it.note = it.note ? it.note + '; ' + t.note : t.note;
+    }
+    return out;
+  }
+  // the whole episode by category: [{ cat, name, scenes: [num], sceneIds, notes }] in the categories' order, names alphabetical
+  function breakdownItems(st) {
+    const map = {};
+    for (const s of st.scenes) for (const [cat, list] of Object.entries(s.bd || {})) for (const x of list) {
+      const k = cat + '\u0001' + bdKey(x.name);
+      const it = map[k] || (map[k] = { cat, name: x.name, scenes: [], sceneIds: [], notes: [] });
+      if (!it.sceneIds.includes(s.id)) { it.sceneIds.push(s.id); it.scenes.push(s.num); }
+      if (x.note && !it.notes.includes(x.note)) it.notes.push(x.note);
+    }
+    const all = Object.values(map);
+    return BREAKDOWN.flatMap((c) => all.filter((it) => it.cat === c.id).sort((a, b) => a.name.localeCompare(b.name, 'ru')));
+  }
+  // per object (location): what the scenes shot there need, by category
+  function breakdownByObject(st) {
+    const out = {};
+    for (const s of st.scenes) {
+      if (s.omitted || !s.bd || !Object.keys(s.bd).length) continue;
+      const key = s.h.object || '(без объекта)';
+      const o = out[key] || (out[key] = { name: key, scenes: [], cats: {} });
+      if (!o.scenes.includes(s.num)) o.scenes.push(s.num);
+      for (const [cat, list] of Object.entries(s.bd)) {
+        const names = o.cats[cat] || (o.cats[cat] = []);
+        for (const x of list) if (!names.some((n) => bdKey(n) === bdKey(x.name))) names.push(x.name);
+      }
+    }
+    return Object.values(out);
+  }
+  // two copies of an episode: tags from both, except the ones either side removed (ep.untagged keeps those ids)
+  function mergeTags(e1, e2) {
+    const off = [...new Set([...(e1.untagged || []), ...(e2.untagged || [])])];
+    const tags = (e1.tags || []).slice();
+    for (const t of e2.tags || []) if (!tags.some((x) => x.id === t.id)) tags.push(t);
+    const res = { tags: tags.filter((t) => !off.includes(t.id)), untagged: off };
+    return res;
+  }
+
+  // ---------- breakdown workbook (.xlsx, minimal SpreadsheetML) ----------
+  const xlEsc = (s) => String(s == null ? '' : s).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f￾￿]/g, '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const xlCol = (n) => { let s = ''; for (n++; n > 0; n = Math.floor((n - 1) / 26)) s = String.fromCharCode(65 + (n - 1) % 26) + s; return s; };
+  // rows: arrays of strings and numbers; the first row is the bold header and stays frozen when scrolling
+  function xlSheet(rows, widths) {
+    const cell = (v, r, c, st) => {
+      const ref = xlCol(c) + (r + 1), s = st ? ' s="' + st + '"' : '';
+      if (typeof v === 'number' && isFinite(v)) return '<c r="' + ref + '"' + s + '><v>' + v + '</v></c>';
+      if (v == null || v === '') return '';
+      return '<c r="' + ref + '"' + s + ' t="inlineStr"><is><t xml:space="preserve">' + xlEsc(v) + '</t></is></c>';
+    };
+    const ncol = Math.max(1, ...rows.map((r) => r.length));
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+      '<dimension ref="A1:' + xlCol(ncol - 1) + Math.max(1, rows.length) + '"/>' +
+      '<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>' +
+      '<sheetFormatPr defaultRowHeight="15"/>' +
+      (widths ? '<cols>' + widths.map((w, i) => '<col min="' + (i + 1) + '" max="' + (i + 1) + '" width="' + w + '" customWidth="1"/>').join('') + '</cols>' : '') +
+      '<sheetData>' + rows.map((row, r) => '<row r="' + (r + 1) + '">' + row.map((v, c) => cell(v, r, c, r === 0 ? 1 : typeof v === 'string' && v.length > 40 ? 2 : 0)).join('') + '</row>').join('') + '</sheetData></worksheet>';
+  }
+  // sheets «Сцены», «Объекты», «Персонажи», «Разбивка»; returns { path: xml } for a zip
+  function breakdownXLSX(ep, project, st) {
+    const cats = BREAKDOWN.filter((c) => c.id !== 'extras');
+    const join = (list) => (list || []).map((x) => x.name).join(', ');
+    const round = (v, d) => Math.round(v * Math.pow(10, d)) / Math.pow(10, d);
+    const scenes = [['№', 'Заголовок', 'Объект', 'Режим', 'ИНТ/НАТ/ПАВ', 'Сценарный день', 'Страницы', 'Хронометраж', 'Персонажи', 'Массовка', ...cats.map((c) => c.name)]];
+    for (const s of st.scenes) {
+      const bd = s.bd || {};
+      // the crowd column takes the breakdown's «Массовка» items, or the scene's own «Массовка» mark
+      const crowd = join(bd.extras) || (s.tags.includes('crowd') ? 'да' : '');
+      scenes.push([s.num, s.heading || '', s.omitted ? '' : s.h.object, s.omitted ? '' : s.h.time, s.omitted ? '' : (s.h.prefix || '') + (s.pav && s.h.type !== 'pav' ? ' (пав.)' : ''),
+        s.day || '', s.omitted ? '' : fmtPages(s.pages), s.omitted ? '' : fmtTime(s.min), s.cast.join(', '), crowd, ...cats.map((c) => join(bd[c.id]))]);
+    }
+    const objects = [['Объект', 'Павильон', 'Сцен', 'Страницы', 'Хронометраж', '%', 'Смен']];
+    for (const o of st.objects) objects.push([o.name, o.pav ? 'да' : 'нет', o.scenes, fmtPages(o.pages), fmtTime(o.min), round(o.share * 100, 1), round(o.shifts, 2)]);
+    const chars = [['Персонаж', 'Сцен', 'Реплик', 'Время в кадре']];
+    for (const c of st.characters || []) chars.push([c.name, c.scenes, c.replicas, fmtTime(c.min)]);
+    const items = [['Категория', 'Элемент', 'Сцены', 'Сцен', 'Примечание']];
+    for (const it of breakdownItems(st)) items.push([BD[it.cat].name, it.name, it.scenes.join(', '), it.scenes.length, it.notes.join('; ')]);
+    const sheets = [
+      ['Сцены', xlSheet(scenes, [7, 44, 22, 10, 12, 10, 10, 11, 30, 18, ...cats.map(() => 18)])],
+      ['Объекты', xlSheet(objects, [30, 10, 7, 10, 12, 7, 7])],
+      ['Персонажи', xlSheet(chars, [26, 7, 8, 13])],
+      ['Разбивка', xlSheet(items, [18, 30, 24, 7, 30])],
+    ];
+    const NS = 'http://schemas.openxmlformats.org/', XML = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
+    const files = {
+      '[Content_Types].xml': XML + '<Types xmlns="' + NS + 'package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>' +
+        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' +
+        sheets.map((s, i) => '<Override PartName="/xl/worksheets/sheet' + (i + 1) + '.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>').join('') + '</Types>',
+      '_rels/.rels': XML + '<Relationships xmlns="' + NS + 'package/2006/relationships"><Relationship Id="rId1" Type="' + NS + 'officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
+      'xl/workbook.xml': XML + '<workbook xmlns="' + NS + 'spreadsheetml/2006/main" xmlns:r="' + NS + 'officeDocument/2006/relationships"><bookViews><workbookView/></bookViews><sheets>' +
+        sheets.map((s, i) => '<sheet name="' + xlEsc(s[0]) + '" sheetId="' + (i + 1) + '" r:id="rId' + (i + 1) + '"/>').join('') + '</sheets></workbook>',
+      'xl/_rels/workbook.xml.rels': XML + '<Relationships xmlns="' + NS + 'package/2006/relationships">' +
+        sheets.map((s, i) => '<Relationship Id="rId' + (i + 1) + '" Type="' + NS + 'officeDocument/2006/relationships/worksheet" Target="worksheets/sheet' + (i + 1) + '.xml"/>').join('') +
+        '<Relationship Id="rId' + (sheets.length + 1) + '" Type="' + NS + 'officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>',
+      // styles: 0 plain, 1 bold header on grey, 2 wrapped long text
+      'xl/styles.xml': XML + '<styleSheet xmlns="' + NS + 'spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts>' +
+        '<fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE8EAED"/><bgColor indexed="64"/></patternFill></fill></fills>' +
+        '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
+        '<cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf></cellXfs>' +
+        '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>',
+    };
+    sheets.forEach((s, i) => { files['xl/worksheets/sheet' + (i + 1) + '.xml'] = s[1]; });
+    void ep; void project;
+    return files;
   }
 
   // ---------- production rules (studio PDF) ----------
@@ -469,7 +782,7 @@
     const spPct = st.specialMin / (st.minutes || 1) * 100;
     const sp = live.filter((s) => s.special);
     add('special', 'Дети, животные, трюки, сложная постановка', spPct <= r.specialMaxPct ? (sp.length ? 'warn' : 'ok') : 'fail',
-      spPct.toFixed(0) + '% хронометража', sp.map((s) => sref(s, s.heading + ' · ' + [...s.tags.filter((t) => SPECIAL_TAGS.includes(t)).map((t) => TAGS[t]), ...(s.minors.length ? ['несовершеннолетние: ' + s.minors.join(', ')] : [])].join(', '))),
+      spPct.toFixed(0) + '% хронометража', sp.map((s) => sref(s, s.heading + ' · ' + [...s.tags.filter((t) => SPECIAL_TAGS.includes(t)).map((t) => TAGS[t]), ...(s.bdTags || []).map((t) => TAGS[t] + ' (по разбивке)'), ...(s.minors.length ? ['несовершеннолетние: ' + s.minors.join(', ')] : [])].join(', '))),
       'Выработка в таких сценах падает в 2–3 раза.');
     const tagged = (t) => live.filter((s) => s.tags.includes(t));
     const clips = tagged('clip');
@@ -838,7 +1151,8 @@
       let text = '';
       const ts = p.getElementsByTagName('Text');
       // only this paragraph's own Text runs, not those of nested paragraphs
-      for (let j = 0; j < ts.length; j++) { let q = ts[j].parentNode; while (q && q.nodeName !== 'Paragraph') q = q.parentNode; if (q === p) text += ts[j].textContent; }
+      let rev = 0;
+      for (let j = 0; j < ts.length; j++) { let q = ts[j].parentNode; while (q && q.nodeName !== 'Paragraph') q = q.parentNode; if (q === p) { text += ts[j].textContent; if (ts[j].textContent.trim()) rev = Math.max(rev, +ts[j].getAttribute('RevisionID') || 0); } }
       text = clean(text);
       let t = map[p.getAttribute('Type')] || 'action';
       if (hasOmitted && !text) { text = 'OMITTED'; t = 'scene'; }
@@ -850,6 +1164,7 @@
       if (t === 'paren' && !/^\(/.test(text)) text = '(' + text + ')';
       const nb = { id: uid(), t, x: text };
       if (t === 'scene' && fdxNum) nb.num = fdxNum;
+      if (rev > 0) nb.rev = rev;
       if (fdxDay) nb.day = fdxDay;
       if (t === 'scene' && (hasOmitted || OMIT_RE.test(text))) { nb.x = omittedHeading(fdxNum); nb.omitted = true; }
       blocks.push(nb);
@@ -917,18 +1232,16 @@
   const FDX_TYPE = { scene: 'Scene Heading', action: 'Action', character: 'Character', paren: 'Parenthetical', dialogue: 'Dialogue', transition: 'Transition' };
   function exportFDX(ep, project, st, opts) {
     opts = opts || {};
-    const lay = st.lay;
-    const pageOf = {};
-    lay.pages.forEach((pg, k) => pg.items.forEach((it) => { if (!(it.i in pageOf)) pageOf[it.i] = k + 1; }));
+    const revs = st.revs || [];
     const sceneByIdx = {}; st.scenes.forEach((s) => { sceneByIdx[s.from] = s; });
     const paper = paperOf(project.rules);
     const F = paper.fmt;
     const paras = (ep.blocks || []).map((b, i) => {
       const s = sceneByIdx[i];
       const num = s ? (opts.episodePrefix && !/-/.test(s.num) ? (ep.number || 1) + '-' + s.num : s.num) : '';
-      const props = s ? '<SceneProperties Length="' + fmtPages(s.pages) + '" Page="' + (pageOf[i] || 1) + '" Title="' + xmlEsc(s.synopsis || '') + '"/>' : '';
+      const props = s ? '<SceneProperties Length="' + fmtPages(s.pages) + '" Page="' + (s.page || 1) + '" Title="' + xmlEsc(s.synopsis || '') + '"/>' : '';
       const text = s && s.omitted ? 'OMITTED' : displayText(b) + headingDay(s, b);
-      return '    <Paragraph' + (s ? ' Number="' + num + '"' : '') + ' Type="' + FDX_TYPE[b.t] + '">' + props + '<Text>' + xmlEsc(text) + '</Text></Paragraph>';
+      return '    <Paragraph' + (s ? ' Number="' + num + '"' : '') + ' Type="' + FDX_TYPE[b.t] + '">' + props + '<Text' + (revs[i] ? ' RevisionID="' + revs[i] + '"' : '') + '>' + xmlEsc(text) + '</Text></Paragraph>';
     });
     const el = (name, f, behavior) => '    <ElementSettings Type="' + name + '"><FontSpec AdornmentStyle="0" Background="#FFFFFFFFFFFF" Color="#000000000000" Font="Courier New" RevisionID="0" Size="12" Style=""/><ParagraphSpec Alignment="' + (f.right ? 'Right' : 'Left') + '" FirstIndent="0.00" Leading="Regular" LeftIndent="' + f.indent.toFixed(2) + '" RightIndent="' + (f.right ? rightEdge(f, paper) : f.indent + f.width / 10).toFixed(2) + '" SpaceBefore="' + (f.sb * 12) + '" Spacing="1" StartsNewPage="No"/><Behavior PaginateAs="' + name + '" ReturnKey="' + behavior + '" Shortcut=""/></ElementSettings>';
     const chars = Object.keys(project.chars || {}).sort();
@@ -938,13 +1251,22 @@
       '  <TitlePage>\n    <Content>\n' + [project.name, ep.title ? 'Серия ' + (ep.number || '') + '. ' + ep.title : '', project.author || ''].filter(Boolean).map((t) => '      <Paragraph Alignment="Center" Type="General"><Text>' + xmlEsc(t) + '</Text></Paragraph>').join('\n') + '\n    </Content>\n  </TitlePage>\n' +
       el('Scene Heading', F.scene, 'Action') + '\n' + el('Action', F.action, 'Action') + '\n' + el('Character', F.character, 'Dialogue') + '\n' +
       el('Parenthetical', F.paren, 'Dialogue') + '\n' + el('Dialogue', F.dialogue, 'Action') + '\n' + el('Transition', F.transition, 'Scene Heading') + '\n' +
-      '  <PageLayout BackgroundColor="#FFFFFFFFFFFF" BottomMargin="' + Math.round(paper.bottom * 72) + '" BreakDialogueAndActionAtSentences="Yes" DocumentLeading="Normal" FooterMargin="36" ForegroundColor="#000000000000" HeaderMargin="36" InvisiblesColor="#A0A0A0A0A0A0" TopMargin="' + Math.round(paper.top * 72) + '" UsesSmartQuotes="Yes"><AutoCastList AddParentheses="Yes" AutomaticallyGenerate="No" CastListElement="Cast List"/></PageLayout>\n' +
+      '  <PageLayout BackgroundColor="#FFFFFFFFFFFF" BottomMargin="' + Math.round(paper.bottom * 72) + '" BreakDialogueAndActionAtSentences="Yes" DocumentLeading="Normal" FooterMargin="36" ForegroundColor="#000000000000" HeaderMargin="36" InvisiblesColor="#A0A0A0A0A0A0" TopMargin="' + Math.round(paper.top * 72) + '" UsesSmartQuotes="Yes"><AutoCastList AddParentheses="Yes" AutomaticallyGenerate="No" CastListElement="Cast List"/></PageLayout>\n' + fdxRevisions(ep, revs) +
       '  <SmartType>\n    <Characters>\n' + chars.map((c) => '      <Character>' + xmlEsc(c) + '</Character>').join('\n') + '\n    </Characters>\n' +
       '    <Extensions>\n' + EXTENSIONS.map((x) => '      <Extension>' + xmlEsc(x) + '</Extension>').join('\n') + '\n    </Extensions>\n' +
       '    <SceneIntros>\n' + PREFIXES.map((x) => '      <SceneIntro>' + xmlEsc(x) + '</SceneIntro>').join('\n') + '\n    </SceneIntros>\n' +
       '    <Locations>\n' + [...locs].sort().map((x) => '      <Location>' + xmlEsc(x) + '</Location>').join('\n') + '\n    </Locations>\n' +
       '    <TimesOfDay Separator=" - ">\n' + TIMES.map((x) => '      <TimeOfDay>' + x + '</TimeOfDay>').join('\n') + '\n    </TimesOfDay>\n' +
       '    <Transitions>\n' + TRANSITIONS.map((x) => '      <Transition>' + xmlEsc(x) + '</Transition>').join('\n') + '\n    </Transitions>\n  </SmartType>\n</FinalDraft>\n';
+  }
+  // Final Draft's revision sets (48-bit colours, ID = level); written only for an episode that has revisions
+  function fdxRevisions(ep, revs) {
+    const max = Math.max(ep.revLevel || 0, ...revs.map((x) => x || 0), 0);
+    if (!max) return '';
+    const c48 = (hex) => '#' + hex.slice(1).toUpperCase().replace(/../g, (h) => h + h);
+    const sets = [];
+    for (let lv = 1; lv <= max; lv++) sets.push('    <Revision Color="' + c48(revColor(lv)) + '" FullRevision="No" ID="' + lv + '" Mark="*" Name="' + xmlEsc(revName(lv)) + '" Style=""/>');
+    return '  <Revisions ActiveSet="' + (ep.revLevel || max) + '" Location="7.75" RevisionMode="Active" RevisionsShown="Active" ShowAllMarks="No" ShowAllSets="No" ShowPageColor="No">\n' + sets.join('\n') + '\n  </Revisions>\n';
   }
   // a script day kept only in the scene card goes into the heading text ("ИНТ. КУХНЯ - ДЕНЬ 2"), where Final Draft, FilmToolz and our import read it
   function headingDay(s, b) {
@@ -1283,6 +1605,8 @@
   }
 
   root.Core = {
+    BREAKDOWN, BD, BD_SPECIAL, findAnchor, quoteAt, anchorTags, bdKey, bdName, breakdownItems, breakdownByObject, mergeTags, breakdownXLSX,
+    REV_SETS, revName, revColor, revMarkX, revMarks, newRevision, revisionsFromMarks, fdxActiveSet, pageLockFrom,
     parseLines, LINE_COLORS, autoLine, listOf, paperOf, FMT_RU, lockAssign, lockMissing, lockInsertIndex, omittedHeading, OMIT_RE, numParts,
     TYPES, TYPE_LABEL, FMT, PAPER, TIMES, PREFIXES, TRANSITIONS, EXTENSIONS, TAGS, SPECIAL_TAGS, DEFAULT_RULES, MANUAL_CHECKS,
     uid, up, clean, parseHeading, formatHeading, charName, wrap, paginate, rightEdge, displayText, analyzeEpisode, evalRules, fmtPages, fmtTime,

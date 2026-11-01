@@ -317,7 +317,8 @@
   // undo / redo (our own, because the editor changes blocks programmatically)
   S.undo = []; S.redo = [];
   let lastEdit = 0;
-  function snapshot() { return { blocks: readBlocks(), caret: getCaret(), sceneMeta: JSON.parse(JSON.stringify(S.ep.sceneMeta || {})), lock: S.ep.lock ? JSON.parse(JSON.stringify(S.ep.lock)) : null }; }
+  // revision bases never change once taken, so undo shares them instead of copying every base on each keystroke
+  function snapshot() { return { blocks: readBlocks(), caret: getCaret(), sceneMeta: JSON.parse(JSON.stringify(S.ep.sceneMeta || {})), lock: S.ep.lock ? JSON.parse(JSON.stringify(S.ep.lock)) : null, revisions: S.ep.revisions ? S.ep.revisions.slice() : null, revLevel: S.ep.revLevel || 0, pageLock: S.ep.pageLock || null, tags: jcopy(S.ep.tags || []) }; }
   function pushUndo() { S.undo.push(snapshot()); if (S.undo.length > 200) S.undo.shift(); S.redo = []; lastEdit = Date.now(); }
   function restore(sn) { S.ep.blocks = sn.blocks; if (sn.sceneMeta) S.ep.sceneMeta = sn.sceneMeta; setLock(S.ep, sn); renderEditor(); if (sn.caret) setCaret(sn.caret.id, sn.caret.off); recompute(); }
   function undo() { if (!S.undo.length || S.me.role === 'reader') return; S.redo.push(snapshot()); restore(S.undo.pop()); }
@@ -502,18 +503,21 @@
     // 'updated' moves on every recompute; textAt only when the words change, so merging two copies can tell which text is newer
     if (S.textSig && S.textSig.id === S.ep.id && S.textSig.sig !== sig) S.ep.textAt = Date.now();
     S.textSig = { id: S.ep.id, sig };
+    if (S.ep.tags && S.ep.tags.length) C.anchorTags(nb, S.ep.tags, S.ep.blocks);
     S.ep.blocks = nb;
     S.ep.updated = Date.now();
     S.st = C.analyzeEpisode(S.ep, P());
     // under a numbering lock every new scene gets its A-number at once, so it never shifts the others
     // a lock with no frozen number on any scene is stale state (it would renumber everything 1, 1A, 1B…): leave it alone
     if (S.ep.lock && S.st.scenes.some((s) => s.fileNum) && C.lockAssign(S.st.scenes, S.ep.sceneMeta).length) S.st = C.analyzeEpisode(S.ep, P());
+    // revision marks are derived from the revision bases; each block keeps its level (block.rev) for the exports
+    nb.forEach((b, i) => { const r = S.st.revs ? S.st.revs[i] : 0; if (r) b.rev = r; else delete b.rev; });
     // the open episode's text changed: its cached analysis is stale for the episode list and the bible once it is left
     delete S.ep._st;
     S.rulesRes = C.evalRules(S.ep, P(), S.st, seasonContext());
     decorateEditor();
     if (S.zoom && S.zoom !== 1) sizePage();
-    renderScenes(); renderRight(); renderRuler(); renderComments(); renderEpisodesMeta();
+    renderScenes(); renderRight(); renderRuler(); renderComments(); renderTags(); renderEpisodesMeta();
     persist();
     void full;
   }
@@ -530,11 +534,11 @@
   }
   function decorateEditor() {
     const els = [...ed.children];
-    const breaks = S.st.lay.breaks;
+    const breaks = S.st.lay.breaks, labels = S.st.lay.labels;
     const sceneN = {}; S.st.scenes.forEach((s) => { sceneN[s.id] = s.num; });
     els.forEach((el, i) => {
       const br = breaks[i];
-      if (br) { if (el.dataset.pb !== String(br.page)) el.dataset.pb = br.page; } else if (el.dataset.pb) delete el.dataset.pb;
+      if (br) { const lb = labels[br.page - 1] || String(br.page); if (el.dataset.pb !== lb) el.dataset.pb = lb; } else if (el.dataset.pb) delete el.dataset.pb;
       if (el.dataset.t === 'scene') { const n = sceneN[el.dataset.id]; if (n && el.dataset.n !== String(n)) el.dataset.n = n; }
       else if (el.dataset.n) delete el.dataset.n;
       const om = el.dataset.t === 'scene' && !!(S.ep.sceneMeta[el.dataset.id] || {}).omitted;
@@ -553,16 +557,32 @@
       for (const b of inner[k]) {
         const m = document.createElement('div');
         m.className = 'pbin'; m.setAttribute('aria-hidden', 'true'); m.dataset.page = b.page;
-        m.textContent = 'стр. ' + b.page; m.style.top = (top + b.line * lh) + 'px';
+        m.textContent = 'стр. ' + (labels[b.page - 1] || b.page); m.style.top = (top + b.line * lh) + 'px';
         pg.appendChild(m);
       }
     }
+    // revision marks: an asterisk in the right margin of every line of a revised element, in its revision's colour
+    pg.querySelectorAll(':scope > .revmark').forEach((m) => m.remove());
+    const revs = S.st.revs;
+    if (revs && revMarksOn()) els.forEach((el, i) => {
+      const lv = revs[i]; if (!lv) return;
+      const lh = parseFloat(getComputedStyle(el).lineHeight) || 16, L = S.st.lay.info[i].L;
+      const m = document.createElement('div');
+      m.className = 'revmark'; m.setAttribute('aria-hidden', 'true'); m.dataset.level = lv; m.title = C.revName(lv) + ' ревизия';
+      m.textContent = Array(L).fill('*').join('\n'); m.style.color = C.revColor(lv);
+      m.style.top = (el.offsetTop + el.offsetHeight - L * lh) + 'px'; m.style.lineHeight = lh + 'px';
+      pg.appendChild(m);
+    });
   }
+  const revMarksOn = () => ls.get('draft.revMarks', true) !== false;
   function renderRuler() {
     const st = S.st;
     $('#pageInfo').textContent = 'стр. ' + st.pages.toFixed(2) + ' · ' + C.fmtTime(st.minutes) + ' · ' + st.scenes.length + ' сц. · павильон ' + Math.round(st.pavPct) + '%' +
       (st.lines && st.lines.length ? ' · ' + st.lines.map((l) => l.name + ' ' + (l.share * 100).toFixed(0) + '%').join(' / ') : '');
     $('#roleInfo').textContent = roleName(S.me.role) + ': ' + S.me.name + (S.ep.lock ? ' · номера сцен залочены' : '');
+    const lv = S.ep.revLevel || 0, ri = $('#revInfo');
+    ri.hidden = !lv && !S.ep.pageLock;
+    ri.innerHTML = (lv ? '<i style="background:' + C.revColor(lv) + '"></i>' + esc(C.revName(lv)) + ' ревизия' : '') + (S.ep.pageLock ? (lv ? ' · ' : '') + 'страницы залочены' : '');
   }
 
   // ---------- left: episodes ----------
@@ -676,7 +696,7 @@
       '<div class="row"><button class="btn small" id="renum">Перенумеровать по порядку' + (nc.proposal[0].includes('-') ? ' (' + esc(nc.proposal[0]) + '…)' : '') + '</button><span class="small muted">отменить: Ctrl+Z</span></div></div>' : '');
     pane.innerHTML = numHTML + S.st.scenes.map((s) => '<div class="sc' + (s.id === S.curScene ? ' active' : '') + (s.sec < r.shortSceneSec ? ' short' : '') + (s.omitted ? ' omitted' : '') + '" data-id="' + s.id + '"><span class="num">' + esc(s.num) + '</span><span class="hd">' + esc(s.heading || '(без заголовка)') + '</span>' +
       '<span class="meta"><span class="mono">' + C.fmtPages(s.pages) + ' · ' + C.fmtTime(s.min) + '</span>' + (s.pav ? '<span class="chip pav">павильон</span>' : '') + (s.night ? '<span class="chip night">ночь</span>' : '') +
-      s.tags.map((t) => '<span class="chip tag">' + esc(C.TAGS[t]) + '</span>').join('') + (s.cast.length ? '<span>' + s.cast.length + ' арт.</span>' : '') + (s.day ? '<span>д.' + esc(s.day) + '</span>' : '') + (s.line ? '<span class="chip" style="border-color:' + lineColor(s.line) + ';color:' + lineColor(s.line) + '" title="' + (s.lineAuto ? 'авто: ' + esc(s.lineAuto) : 'задано вручную') + '">' + esc(s.line) + (s.lineAuto ? ' ·' : '') + '</span>' : '') + '</span>' +
+      s.tags.map((t) => '<span class="chip tag">' + esc(C.TAGS[t]) + '</span>').join('') + (s.cast.length ? '<span>' + s.cast.length + ' арт.</span>' : '') + (s.day ? '<span>д.' + esc(s.day) + '</span>' : '') + (S.ep.pageLock ? '<span title="Страница (лок страниц)">с. ' + esc(s.page) + '</span>' : '') + (s.line ? '<span class="chip" style="border-color:' + lineColor(s.line) + ';color:' + lineColor(s.line) + '" title="' + (s.lineAuto ? 'авто: ' + esc(s.lineAuto) : 'задано вручную') + '">' + esc(s.line) + (s.lineAuto ? ' ·' : '') + '</span>' : '') + '</span>' +
       (s.synopsis ? '<span class="syn">' + esc(s.synopsis) + '</span>' : '') + '</div>').join('') +
       (insp ? inspectorHTML(insp) : '<p class="note">Нажмите на сцену, чтобы перейти к ней, добавить синопсис, сценарный день и производственные метки.</p>');
     $$('.sc', pane).forEach((x) => x.onclick = () => { S.curScene = x.dataset.id; jumpTo(x.dataset.id); renderScenes(); });
@@ -718,6 +738,71 @@
         S.ep.lockLog = (S.ep.lockLog || []).concat([{ at: Date.now(), by: S.me.name, role: S.me.role, reason, was: S.ep.lock }]);
         delete S.ep.lock;
         closeModal(); recompute(); renderScenes(); toast('Лок снят');
+      };
+    });
+  }
+  // ---------- production revisions and locked pages (Final Draft: Production → Revisions, Lock Pages) ----------
+  const fmtDay = (t) => new Date(t).toLocaleDateString('ru-RU');
+  function showRevisions() {
+    recompute();
+    const ep = S.ep, lv = ep.revLevel || 0, list = (ep.revisions || []).slice().reverse();
+    const may = canLock() && !TAB.stale, next = C.revName(lv + 1);
+    const marked = (S.st.revs || []).filter((x) => x === lv && lv).length;
+    const pl = ep.pageLock, aPages = S.st.lay.labels.filter((l) => /[A-Z]$/.test(l)).length;
+    const sw = (lvl) => '<i class="revsw" style="background:' + C.revColor(lvl) + '"></i>';
+    modal('<h2>Ревизии · серия ' + ep.number + '</h2>' +
+      '<p class="note">' + (lv ? 'Текущая ревизия — <b>' + esc(C.revName(lv)) + '</b>. Всё, что меняется в тексте, помечается звёздочкой на правом поле; пометки прошлых ревизий остаются в своём цвете. В PDF на изменённых страницах — шапка с названием ревизии и датой.' : 'Текст — белый оригинал, пометок нет. Когда сценарий ушёл в производство, начните ревизию: дальнейшие правки будут помечаться звёздочкой на полях, как в Final Draft.') + '</p>' +
+      (list.length ? '<div class="tbl-wrap"><table class="t"><thead><tr><th>Ревизия</th><th>Начата</th><th>Кто</th><th class="n">Помечено</th></tr></thead><tbody>' +
+        list.map((r) => '<tr><td>' + sw(r.level) + esc(r.name || C.revName(r.level)) + (r.level === lv ? ' <span class="chip">текущая</span>' : '') + '</td><td class="mono small">' + fmtDay(r.date) + '</td><td class="small">' + esc(r.by || '') + '</td><td class="n">' + (S.st.revs || []).filter((x) => x === r.level).length + '</td></tr>').join('') +
+        '<tr><td>' + sw(0) + 'Белая</td><td colspan="3" class="small muted">оригинал</td></tr></tbody></table></div>' : '') +
+      '<div class="row">' + (may ? '<button class="btn primary" id="rvStart">' + sw(lv + 1) + 'Начать ревизию «' + esc(next) + '»</button>' : '<span class="small muted">Начать ревизию может продюсер или редактор.</span>') + '</div>' +
+      '<label class="row"><input type="checkbox" id="rvMarks"' + (revMarksOn() ? ' checked' : '') + '> Показывать пометки на экране</label>' +
+      (lv ? '<p class="note">Помечено элементов в текущей ревизии: ' + marked + '. В окне PDF можно напечатать только изменённые страницы.</p>' : '') +
+      '<div class="h">Лок страниц</div>' +
+      (pl ? '<div class="rule ok"><div class="top"><span class="dot"></span><span class="title">Страницы залочены</span><span class="val">' + fmtDate(pl.at) + '</span></div><div class="note">' + esc(pl.by || '') + '. Номера страниц не сдвигаются: текст, который не помещается, уходит на A-страницы (12A, 12B), а укоротившаяся страница остаётся короткой. A-страниц сейчас: ' + aPages + '.</div>' + (may ? '<div class="row"><button class="btn small ghost" id="rvUnlock">Снять лок страниц…</button></div>' : '') + '</div>'
+        : '<div class="rule"><div class="top"><span class="dot"></span><span class="title">Страницы не залочены</span></div><div class="note">Перед рассылкой ревизий группе залочьте страницы: тогда исправленная страница 12 заменяет прежнюю 12, не сдвигая остальные.</div>' + (may ? '<div class="row"><button class="btn small" id="rvLock">Залочить страницы</button></div>' : '') + '</div>') +
+      '<div class="actions"><button class="btn" id="rvClose">Закрыть</button></div>', (m) => {
+      $('#rvClose', m).onclick = closeModal;
+      $('#rvMarks', m).onchange = (e) => { ls.set('draft.revMarks', e.target.checked); decorateEditor(); };
+      if ($('#rvStart', m)) $('#rvStart', m).onclick = () => { startRevision(); showRevisions(); };
+      if ($('#rvLock', m)) $('#rvLock', m).onclick = () => { lockPages(); showRevisions(); };
+      if ($('#rvUnlock', m)) $('#rvUnlock', m).onclick = unlockPages;
+    });
+  }
+  function startRevision() {
+    if (readOnly('Новая ревизия')) return;
+    if (!canLock()) return needProducer('Начать ревизию');
+    recompute();
+    histAdd(S.ep, 'перед началом ревизии', true);
+    pushUndo();
+    const r = C.newRevision(S.ep.revLevel || 0, S.ep.blocks, S.me.name + ' (' + roleName(S.me.role) + ')');
+    S.ep.revisions = (S.ep.revisions || []).concat([r]); S.ep.revLevel = r.level;
+    recompute();
+    toast(r.name + ' ревизия начата: правки помечаются звёздочкой на полях. Отменить: Ctrl+Z');
+  }
+  function lockPages() {
+    if (readOnly('Лок страниц')) return;
+    if (!canLock()) return needProducer('Залочить страницы');
+    recompute();
+    histAdd(S.ep, 'перед локом страниц', true);
+    pushUndo();
+    S.ep.pageLock = Object.assign({ at: Date.now(), by: S.me.name + ' (' + roleName(S.me.role) + ')' }, C.pageLockFrom(S.st.lay, S.ep.blocks));
+    recompute();
+    toast('Страницы залочены: ' + S.ep.pageLock.pages.length + ' стр.');
+  }
+  function unlockPages() {
+    if (readOnly('Снять лок страниц')) return;
+    if (!canLock()) return needProducer('Снять лок страниц');
+    modal('<h2>Снять лок страниц</h2><p class="note">После снятия лока страницы перенумеруются подряд, A-страницы исчезнут, и разосланные группе страницы перестанут совпадать с текстом. Поэтому действие записывается в историю с причиной.</p><label class="small muted">Причина<input type="text" id="upReason" placeholder="Например: новый полный драфт"></label><div class="actions"><button class="btn" id="upC">Отмена</button><button class="btn primary" id="upOk">Снять лок</button></div>', (m) => {
+      $('#upC', m).onclick = closeModal;
+      $('#upOk', m).onclick = () => {
+        const reason = $('#upReason', m).value.trim() || 'без причины';
+        histAdd(S.ep, 'снят лок страниц: ' + reason, true);
+        pushUndo();
+        const was = S.ep.pageLock || {};
+        S.ep.pageLockLog = (S.ep.pageLockLog || []).concat([{ at: Date.now(), by: S.me.name, role: S.me.role, reason, was: { at: was.at, by: was.by, pages: (was.pages || []).length } }]);
+        delete S.ep.pageLock;
+        closeModal(); recompute(); toast('Лок страниц снят');
       };
     });
   }
@@ -940,8 +1025,7 @@
       if ((!el || el.textContent.indexOf(c.quote) < 0) && c.quote) {
         all = all || [...ed.querySelectorAll('.b[data-id]')];
         const start = Math.max(0, Math.min(el ? all.indexOf(el) : blockIndex(c.blockId), all.length - 1));
-        let hit = null;
-        for (let d = 0; d < all.length && !hit; d++) for (const k of d ? [start - d, start + d] : [start]) if (all[k] && all[k].textContent.indexOf(c.quote) >= 0) { hit = all[k]; break; }
+        const hit = all[C.findAnchor(all.map((x) => x.textContent), c.quote, start)];
         if (hit) { el = hit; c.blockId = hit.dataset.id; }
       }
       c.lost = !el;
@@ -1188,9 +1272,18 @@
     if (!S.hist[ep.id]) S.hist[ep.id] = (await DB.get(histKey(ep))) || [];
     return S.hist[ep.id];
   }
-  function epCopy(ep) { return { blocks: JSON.parse(JSON.stringify(ep.blocks)), sceneMeta: JSON.parse(JSON.stringify(ep.sceneMeta || {})), lock: ep.lock ? JSON.parse(JSON.stringify(ep.lock)) : null }; }
-  // the numbering lock travels with the numbers it froze: a saved state without the 'lock' key (older data) leaves it as is
-  function setLock(ep, sn) { if (!sn || !('lock' in sn)) return; if (sn.lock) ep.lock = JSON.parse(JSON.stringify(sn.lock)); else delete ep.lock; }
+  const jcopy = (v) => JSON.parse(JSON.stringify(v));
+  function epCopy(ep) { return { blocks: jcopy(ep.blocks), sceneMeta: jcopy(ep.sceneMeta || {}), lock: ep.lock ? jcopy(ep.lock) : null, revisions: ep.revisions ? jcopy(ep.revisions) : null, revLevel: ep.revLevel || 0, pageLock: ep.pageLock ? jcopy(ep.pageLock) : null, tags: jcopy(ep.tags || []) }; }
+  // the numbering lock travels with the numbers it froze, revisions and locked pages with the text they describe:
+  // a saved state without the key (older data) leaves it as is
+  function setLock(ep, sn) {
+    if (!sn) return;
+    if ('lock' in sn) { if (sn.lock) ep.lock = jcopy(sn.lock); else delete ep.lock; }
+    if ('revisions' in sn) { if (sn.revisions && sn.revisions.length) { ep.revisions = jcopy(sn.revisions); ep.revLevel = sn.revLevel || ep.revisions[ep.revisions.length - 1].level; } else { delete ep.revisions; delete ep.revLevel; } }
+    if ('pageLock' in sn) { if (sn.pageLock) ep.pageLock = jcopy(sn.pageLock); else delete ep.pageLock; }
+    // breakdown tags are anchored to the text, so they come back with it; a tag brought back is no longer 'removed' for merges
+    if ('tags' in sn) { ep.tags = jcopy(sn.tags || []); if (ep.untagged) ep.untagged = ep.untagged.filter((id) => !ep.tags.some((t) => t.id === id)); }
+  }
   async function histAdd(ep, reason, keep) {
     if (!ep) return null;
     // the state is copied before the first await: callers change the episode right after calling histAdd
@@ -1201,7 +1294,7 @@
     const list = await histLoad(ep);
     const last = list[list.length - 1];
     if (last && last.sig === sig) { ep.histAt = Date.now(); return last; }
-    const h = { id: C.uid(), date: Date.now(), author: S.me.name, reason: reason || 'автоснимок', keep: !!keep, pages, scenes, sig, blocks: copy.blocks, sceneMeta: copy.sceneMeta, lock: copy.lock };
+    const h = { id: C.uid(), date: Date.now(), author: S.me.name, reason: reason || 'автоснимок', keep: !!keep, pages, scenes, sig, blocks: copy.blocks, sceneMeta: copy.sceneMeta, lock: copy.lock, revisions: copy.revisions, revLevel: copy.revLevel, pageLock: copy.pageLock, tags: copy.tags };
     list.push(h);
     S.hist[ep.id] = C.thinHistory(list);
     ep.histAt = h.date;
@@ -1221,7 +1314,7 @@
     scheduleRecompute.cancel(); recompute(); persist.cancel();
     // a stale tab cannot edit, and rescueTab already set aside what it had not saved
     if (TAB.stale) return;
-    const pend = { tab: TAB.id, at: Date.now(), epId: S.ep.id, blocks: S.ep.blocks, sceneMeta: S.ep.sceneMeta || {}, lock: S.ep.lock || null, textAt: S.ep.textAt || 0, updated: S.ep.updated };
+    const pend = { tab: TAB.id, at: Date.now(), epId: S.ep.id, blocks: S.ep.blocks, sceneMeta: S.ep.sceneMeta || {}, lock: S.ep.lock || null, revisions: S.ep.revisions || null, revLevel: S.ep.revLevel || 0, pageLock: S.ep.pageLock || null, tags: S.ep.tags || [], textAt: S.ep.textAt || 0, updated: S.ep.updated };
     ls.set('draft.pending', pend);
     DB.put('db', S.db).then((ok) => { saved(ok); if (ok && (ls.get('draft.pending', null) || {}).at === pend.at) try { localStorage.removeItem('draft.pending'); } catch (e) { /* ignore */ } });
   }
@@ -1287,7 +1380,7 @@
       const f = find(pend.epId);
       if (f && JSON.stringify(f.e.blocks) !== JSON.stringify(pend.blocks)) {
         // the same tab wrote last and its unload copy is newer: that is just the tail the database missed
-        if (rev.tab === pend.tab && (pend.textAt || 0) >= (f.e.textAt || 0)) { f.e.blocks = pend.blocks; f.e.sceneMeta = pend.sceneMeta || {}; if ('lock' in pend) { if (pend.lock) f.e.lock = pend.lock; else delete f.e.lock; } f.e.textAt = pend.textAt; f.e.updated = Math.max(f.e.updated || 0, pend.updated || 0); }
+        if (rev.tab === pend.tab && (pend.textAt || 0) >= (f.e.textAt || 0)) { f.e.blocks = pend.blocks; f.e.sceneMeta = pend.sceneMeta || {}; setLock(f.e, pend); f.e.textAt = pend.textAt; f.e.updated = Math.max(f.e.updated || 0, pend.updated || 0); }
         else if (rev.tab !== pend.tab && keepDraft(f.e, 'Несохранённое из другой вкладки', pend)) n++;
       }
     }
@@ -1439,7 +1532,7 @@
     try {
       toast('Разбираю ' + f.name + '…');
       let blocks;
-      if (ext === 'fdx' || ext === 'xml') blocks = C.importFDX(await f.text());
+      if (ext === 'fdx' || ext === 'xml') { const xml = await f.text(); blocks = C.importFDX(xml); blocks.activeSet = C.fdxActiveSet(xml); }
       else if (ext === 'docx') {
         await loadLib('jszip');
         const zip = await window.JSZip.loadAsync(await f.arrayBuffer());
@@ -1478,6 +1571,9 @@
       histAdd(S.ep, 'перед загрузкой файла', true); pushUndo(); ep = S.ep; ep.blocks = blocks; ep.sceneMeta = fin.sceneMeta;
       // a new file brings its own numbering: the old lock no longer describes it (Ctrl+Z brings both back)
       if (ep.lock) { ep.lockLog = (ep.lockLog || []).concat([{ at: Date.now(), by: S.me.name, role: S.me.role, reason: 'текст заменён загруженным файлом', was: ep.lock }]); delete ep.lock; }
+      // the same for locked pages and revisions: they describe the old text's elements
+      if (ep.pageLock) { ep.pageLockLog = (ep.pageLockLog || []).concat([{ at: Date.now(), by: S.me.name, role: S.me.role, reason: 'текст заменён загруженным файлом', was: { at: ep.pageLock.at, by: ep.pageLock.by, pages: (ep.pageLock.pages || []).length } }]); delete ep.pageLock; }
+      delete ep.revisions; delete ep.revLevel;
     }
     else {
       // a title line before the first scene names the episode
@@ -1485,6 +1581,9 @@
       if (blocks[0] && blocks[0].t === 'action' && blocks[1] && blocks[1].t === 'scene' && blocks[0].x.length < 90) title = blocks.shift().x;
       ep = newEpisode(P(), season, title, blocks); ep.sceneMeta = fin.sceneMeta;
     }
+    // revision marks from Final Draft (RevisionID) become this episode's revisions (after a title line was taken off)
+    const rv = C.revisionsFromMarks(ep.blocks, rawBlocks.activeSet || 0);
+    if (rv) { ep.revisions = rv.revisions; ep.revLevel = rv.revLevel; }
     closeModal(); openEpisode(ep.id);
     const st = S.st;
     modal('<h2>Сценарий загружен</h2><p>' + esc(source) + ': ' + st.scenes.length + ' сцен, ' + st.pages.toFixed(1) + ' стр. в формате Final Draft (' + C.fmtTime(st.minutes) + ').</p>' +
@@ -1525,10 +1624,20 @@
           for (const d of e2.drafts || []) if (!e1.drafts.some((x) => x.id === d.id)) { e1.drafts.push(d); added++; }
           // files from before textAt existed fall back to 'updated', which also moves when a copy is only opened
           const newer = (e1.textAt || e2.textAt) ? (e2.textAt || 0) > (e1.textAt || 0) : (e2.updated || 0) > (e1.updated || 0);
-          if (newer && JSON.stringify(e1.blocks) !== JSON.stringify(e2.blocks)) {
+          const textWon = newer && JSON.stringify(e1.blocks) !== JSON.stringify(e2.blocks);
+          if (textWon) {
             keepDraft(e1, 'Авто: перед открытием файла проекта', e1);
             e1.blocks = e2.blocks; e1.sceneMeta = e2.sceneMeta; e1.updated = e2.updated; e1.textAt = e2.textAt; replaced++;
           }
+          // revisions come from the copy that started the latest one (on a tie, with the text that won); locked pages,
+          // like the numbering lock, from the newest lock or unlock event
+          const revAt = (e) => Math.max(0, ...(e.revisions || []).map((r) => r.date || 0));
+          if (revAt(e2) > revAt(e1) || (textWon && revAt(e2) === revAt(e1))) setLock(e1, { revisions: e2.revisions || null, revLevel: e2.revLevel || 0 });
+          const plAt = (e) => Math.max(e.pageLock ? e.pageLock.at || 0 : 0, ...(e.pageLockLog || []).map((l) => l.at || 0), 0);
+          if (plAt(e2) > plAt(e1)) setLock(e1, { pageLock: e2.pageLock || null });
+          const plog = (e1.pageLockLog || []).slice();
+          for (const l of e2.pageLockLog || []) if (!plog.some((x) => x.at === l.at)) plog.push(l);
+          if (plog.length) e1.pageLockLog = plog.sort((a, b) => a.at - b.at);
           // the numbering lock is production state, not text: the newest lock or unlock event wins whichever text copy won
           const lockAt = (e) => Math.max(e.lock ? e.lock.at || 0 : 0, ...(e.lockLog || []).map((l) => l.at || 0), 0);
           if (lockAt(e2) > lockAt(e1)) {
@@ -1589,10 +1698,11 @@
     const label = named.length ? named[0].name : 'Рабочий драфт';
     modal('<h2>PDF в формате Final Draft</h2><div class="form-grid"><label>Для кого (имя или почта)<input type="text" id="pdfTo" value="' + esc(S.me.name) + '"></label><label>Название драфта на титуле<input type="text" id="pdfLabel" value="' + esc(label) + '"></label></div>' +
       '<label class="row"><input type="checkbox" id="pdfWm" checked' + (S.me.role === 'reader' ? ' disabled' : '') + '> Водяной знак с именем получателя на каждой странице</label>' +
+      (S.ep.revLevel ? '<label class="row"><input type="checkbox" id="pdfChanged"> Только изменённые страницы</label><p class="note">Страницы с пометками ревизии «' + esc(C.revName(S.ep.revLevel)) + '» и титул; номера страниц прежние. Так рассылают замену страниц группе.</p>' : '') +
       (sec.org ? '<p class="note">Гриф: «Коммерческая тайна. ' + esc(sec.org) + (sec.addr ? ', ' + esc(sec.addr) : '') + '».</p>' : '<p class="note">Гриф коммерческой тайны не задан: заполните обладателя в «Настройках», иначе колонтитул будет без него.</p>') +
       '<div class="actions"><button class="btn" id="pdfC">Отмена</button><button class="btn primary" id="pdfOk">Сохранить PDF</button></div>', (m) => {
       $('#pdfC', m).onclick = closeModal;
-      $('#pdfOk', m).onclick = () => { const o = { to: $('#pdfTo', m).value.trim() || S.me.name, label: $('#pdfLabel', m).value.trim(), wm: $('#pdfWm', m).checked }; closeModal(); exportPDF(o).catch((err) => toast('Экспорт не удался: ' + err.message)); };
+      $('#pdfOk', m).onclick = () => { const o = { to: $('#pdfTo', m).value.trim() || S.me.name, label: $('#pdfLabel', m).value.trim(), wm: $('#pdfWm', m).checked, changedOnly: !!($('#pdfChanged', m) || {}).checked }; closeModal(); exportPDF(o).catch((err) => toast('Экспорт не удался: ' + err.message)); };
     });
   }
   async function exportPDF(opts) {
@@ -1636,12 +1746,27 @@
     doc.text(opts.label || 'Рабочий драфт', W - paper.right * 72, bottom - 36, { align: 'right' });
     doc.text(today, W - paper.right * 72, bottom - 24, { align: 'right' });
     if (S.ep.lock) doc.text('Номера сцен залочены ' + new Date(S.ep.lock.at).toLocaleDateString('ru-RU'), W - paper.right * 72, bottom - 12, { align: 'right' });
+    // revisions: a band in the revision colour at the top of a revised page (coloured paper), the set's name and date
+    const revs = S.st.revs || [], revOf = (lv) => (S.ep.revisions || []).find((r) => r.level === lv);
+    const revTitle = (lv) => C.revName(lv) + ' ревизия — ' + new Date((revOf(lv) || {}).date || Date.now()).toLocaleDateString('ru-RU');
+    const band = (lv) => {
+      const h = C.revColor(lv), c = [1, 3, 5].map((j) => Math.round(255 - (255 - parseInt(h.substr(j, 2), 16)) * 0.35));
+      doc.setFillColor(c[0], c[1], c[2]); doc.rect(0, 0, W, 0.14 * 72, 'F');
+    };
+    if (S.ep.revLevel) { band(S.ep.revLevel); doc.text(revTitle(S.ep.revLevel), W - paper.right * 72, bottom - 48, { align: 'right' }); }
     stamp();
     const lay = S.st.lay;
     const sceneN = {}; S.st.scenes.forEach((s) => { sceneN[s.from] = s.num; });
-    lay.pages.forEach((pg, k) => {
+    const pageRev = lay.pages.map((pg) => Math.max(0, ...pg.items.map((it) => revs[it.i] || 0)));
+    const markX = C.revMarkX(paper) * 72;
+    const printed = lay.pages.map((pg, k) => k).filter((k) => !opts.changedOnly || lay.pages[k].items.some((it) => revs[it.i] === S.ep.revLevel));
+    if (opts.changedOnly && !printed.length) { toast('В ревизии «' + C.revName(S.ep.revLevel) + '» пока нет изменённых страниц'); return; }
+    printed.forEach((k) => {
+      const pg = lay.pages[k];
       doc.addPage([W, H]);
-      if (k > 0) doc.text((k + 1) + '.', (paper.w - paper.right) * 72, 0.5 * 72 + 9, { align: 'right' });
+      // locked pages print their own labels (12A): the page number never shifts between the copies sent out
+      if (k > 0) doc.text((lay.labels[k] || k + 1) + '.', (paper.w - paper.right) * 72, 0.5 * 72 + 9, { align: 'right' });
+      if (pageRev[k]) { band(pageRev[k]); doc.text(revTitle(pageRev[k]), (paper.w - paper.right - 0.75) * 72, 0.5 * 72 + 9, { align: 'right' }); }
       let line = 0;
       const base = paper.top * 72 + 9.6;
       for (const it of pg.items) {
@@ -1651,6 +1776,7 @@
           const y = base + (line + j) * 12;
           if (f.right) doc.text(tx, C.rightEdge(f, paper) * 72, y, { align: 'right' });
           else doc.text(tx, f.indent * 72, y);
+          if (revs[it.i] && !it.contd) doc.text('*', markX, y);
           if (j === 0 && it.t === 'scene' && sceneN[it.i] && !it.contd) { doc.text(String(sceneN[it.i]), (paper.left - 0.75) * 72, y); doc.text(String(sceneN[it.i]), Math.min(paper.w - paper.right + 0.3, paper.w - 0.35) * 72, y, { align: 'right' }); }
         });
         line += it.lines.length;
@@ -1659,7 +1785,7 @@
       stamp();
     });
     const blob = doc.output('blob');
-    await saveFile(fileBase() + (opts.to && opts.to !== S.me.name ? ' — ' + opts.to.replace(/[\\/:*?"<>|«»@]/g, '_') : '') + '.pdf', blob, 'application/pdf');
+    await saveFile(fileBase() + (opts.changedOnly ? ' — изменённые страницы' : '') + (opts.to && opts.to !== S.me.name ? ' — ' + opts.to.replace(/[\\/:*?"<>|«»@]/g, '_') : '') + '.pdf', blob, 'application/pdf');
   }
   function bibleHTML() {
     const ps = projectCharStats();
@@ -1772,7 +1898,7 @@
     $('#btnImport').hidden = reader; $('#btnDraft').hidden = reader; $('#btnHistory').hidden = reader;
     $$('[data-exp]').forEach((b) => { b.hidden = reader && b.dataset.exp !== 'pdf'; });
     // menu and toolbar entries that change the project are hidden for a reader, so the menus only offer what works
-    ['#tbImport', '#tbDraft', '#tbHistory', '#mNewEp', '#mNewSeason', '#mTrash', '#mExportFt', '#mLock', '#mRenum', '#mUndo', '#mRedo', '#tbUndo', '#tbRedo'].forEach((q) => { const x = $(q); if (x) x.hidden = reader; });
+    ['#tbImport', '#tbDraft', '#tbHistory', '#mNewEp', '#mNewSeason', '#mTrash', '#mExportFt', '#mLock', '#mPageLock', '#mRenum', '#mUndo', '#mRedo', '#tbUndo', '#tbRedo'].forEach((q) => { const x = $(q); if (x) x.hidden = reader; });
     $$('[data-type]').forEach((b) => { b.disabled = ro; });
     $$('[data-paper]').forEach((b) => { b.disabled = reader; });
     applyWatermark();
@@ -1789,6 +1915,7 @@
     // columns are exactly the characters pagination wraps at: in ch, since Courier's advance (0.60009 em) makes
     // 60 characters a fraction of a pixel wider than 6in and a full line would wrap on screen only
     st.setProperty('--tx-w', F.action.width + 'ch');
+    st.setProperty('--rev-x', C.revMarkX(paper) + 'in');
     for (const [t, k] of [['character', 'char'], ['paren', 'paren'], ['dialogue', 'dial'], ['transition', 'tr']]) {
       st.setProperty('--in-' + k, (F[t].indent - paper.left) + 'in');
       // a right-aligned transition ends at its edge (Final Draft 7.10 in) or flush with the right margin, as on paper
@@ -1910,6 +2037,8 @@
   $('#mRenum').onclick = () => showLeft('scenes');
   $('#mLock').onclick = () => { showLeft('scenes'); const b = $('#lockNum') || $('#unlockNum'); if (b) b.click(); else if (!canLock()) needProducer('Залочить номера сцен'); };
   $('#mExportFt').onclick = () => $('#exportMenu [data-exp=docx]').click();
+  $('#mRevisions').onclick = () => showRevisions();
+  $('#mPageLock').onclick = () => { if (S.ep.pageLock) unlockPages(); else if (!readOnly('Лок страниц')) lockPages(); };
   $$('[data-type]').forEach((b) => b.onclick = () => { const el = ed.querySelector('.b.cur') || curBlockEl(); if (el) { setType(el, b.dataset.type); setCaret(el.dataset.id, el.textContent.length); } });
   $$('[data-paper]').forEach((b) => b.onclick = () => { if (readOnly('Формат листа')) return; P().rules.paper = b.dataset.paper; P().episodes.forEach((e) => delete e._st); applyPaper(); recompute(); fitPage(); persist(); syncViewMenu(); });
   const setTheme = (t) => { ls.set('draft.theme', t); applyTheme(); syncViewMenu(); };
@@ -1952,6 +2081,7 @@
     $('#mThemeLight').classList.toggle('on', th === 'light'); $('#mThemeDark').classList.toggle('on', th === 'dark'); $('#mThemeAuto').classList.toggle('on', !th);
     $$('[data-paper]').forEach((x) => x.classList.toggle('on', x.dataset.paper === (P() && P().rules.paper)));
     $('#mLock').textContent = S.ep && S.ep.lock ? 'Снять лок номеров сцен…' : 'Залочить номера сцен…';
+    $('#mPageLock').textContent = S.ep && S.ep.pageLock ? 'Снять лок страниц…' : 'Залочить страницы';
   }
   if (ls.get('draft.hideLeft', false)) document.body.classList.add('hide-left');
   if (ls.get('draft.hideRight', false)) document.body.classList.add('hide-right');
@@ -2067,5 +2197,5 @@
   window.addEventListener('resize', debounce(syncViewMenu, 150));
   $('#btnFocus').addEventListener('click', () => setTimeout(fitPage, 50));
   boot();
-  window.__draft = { S, C, recompute, readBlocks, histAdd, histLoad, showHistory, showTrash, autoSnap, lockNumbers, omitScene, restoreScene, restoreMissing, exportPDF, applyRole, applyPaper, renderScenes };
+  window.__draft = { S, C, recompute, readBlocks, histAdd, histLoad, showHistory, showTrash, autoSnap, lockNumbers, omitScene, restoreScene, restoreMissing, exportPDF, applyRole, applyPaper, renderScenes, showRevisions, startRevision, lockPages, unlockPages, undo, redo };
 })();

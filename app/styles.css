@@ -188,6 +188,12 @@ body.focus .left, body.focus .right { display: none; }
   position: absolute; left: 0; right: 0; height: 0; z-index: 1; border-top: 1px dashed var(--line); pointer-events: none; user-select: none;
   padding-right: 8px; text-align: right; color: var(--muted); font-family: var(--mono); font-size: 10px; line-height: 14px;
 }
+/* revision marks (Final Draft «*» in the right margin): outside the editable text, one asterisk per line, in the set's colour */
+.page > .revmark {
+  position: absolute; left: var(--rev-x, 7.6in); z-index: 1; white-space: pre; pointer-events: none; user-select: none;
+  font-family: var(--script); font-size: 12pt; font-weight: 700;
+}
+.revinfo i, .revsw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: baseline; border: 1px solid var(--line); }
 .editor .b.cur { background: linear-gradient(90deg, transparent, var(--accent-soft) 0, var(--accent-soft)); border-radius: 2px; }
 .editor .b.flash { animation: flash 1.2s ease-out; }
 @keyframes flash { from { background: var(--hl-active); } to { background: transparent; } }
