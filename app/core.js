@@ -5,15 +5,16 @@
   const TYPES = ['scene', 'action', 'character', 'paren', 'dialogue', 'transition'];
   const TYPE_LABEL = { scene: 'Сцена', action: 'Описание', character: 'Персонаж', paren: 'Ремарка', dialogue: 'Реплика', transition: 'Переход' };
 
-  // Final Draft default screenplay geometry. Indent: inches from the left edge of the sheet; width: characters
-  // (Courier 12 = 10 characters per inch); sb: blank lines before the element.
+  // Final Draft default screenplay geometry, as in the ElementSettings of FDX files saved by Final Draft 11/13.
+  // Indent: inches from the left edge of the sheet; width: characters (Courier 12 = 10 characters per inch);
+  // sb: blank lines before the element; edge: where a right-aligned element ends.
   const FMT = {
     scene:      { indent: 1.5, width: 60, sb: 2 },
     action:     { indent: 1.5, width: 60, sb: 1 },
-    character:  { indent: 3.7, width: 38, sb: 1 },
-    paren:      { indent: 3.1, width: 25, sb: 0 },
+    character:  { indent: 3.5, width: 37.5, sb: 1 },
+    paren:      { indent: 3.0, width: 25, sb: 0 },
     dialogue:   { indent: 2.5, width: 35, sb: 0 },
-    transition: { indent: 5.5, width: 20, sb: 1, right: true },
+    transition: { indent: 5.5, width: 16, sb: 1, right: true, edge: 7.1 },
   };
   // Russian «американка» (screenwriter.ru): A4, margins top/bottom 2.5 cm, left 3.75 cm, right 1.25 cm (text 16 cm = 63 chars);
   // character 6.75 cm from the left margin, dialogue 3.75/3.75 cm, parenthetical 5.5/4.5 cm.
@@ -82,7 +83,7 @@
   const clean = (s) => (s || '').replace(/[ \t]/g, ' ').replace(/\s{2,}/g, ' ').trim();
 
   // ---------- scene headings ----------
-  const PREFIX_RE = /^\s*(?:(\d+[\-–.\d]*[А-ЯA-Z]?)[.)]?\s+)?(ИНТ\.?\s*\/\s*НАТ\.?|НАТ\.?\s*\/\s*ИНТ\.?|ИНТ\.|НАТ\.|ПАВ\.|ИНТ(?=\s)|НАТ(?=\s)|ПАВ(?=\s)|INT\.|EXT\.|INT\.?\/EXT\.?|I\/E\.?)\s*/i;
+  const PREFIX_RE = /^\s*(?:((?:\d+-)?[A-ZА-Я]?\d+[\-–.\d]*[А-ЯA-Z]?)[.)]?\s+)?(ИНТ\.?\s*\/\s*НАТ\.?|НАТ\.?\s*\/\s*ИНТ\.?|ИНТ\.|НАТ\.|ПАВ\.|ИНТ(?=\s)|НАТ(?=\s)|ПАВ(?=\s)|INT\.|EXT\.|INT\.?\/EXT\.?|I\/E\.?)\s*/i;
   const TIME_RE = new RegExp('(?:\\s*[-–—]\\s*|\\s+|^)(РАННЕЕ УТРО|ПОЗДНИЙ ВЕЧЕР|' + TIMES.join('|') + ')\\.?(?:\\s*(?:Д\\.?\\s*|ДЕНЬ\\s*)?(\\d{1,3})\\.?)?\\s*$', 'i');
 
   function prefixType(p) {
@@ -94,7 +95,8 @@
   }
   const TYPE_PREFIX = { int: 'ИНТ.', ext: 'НАТ.', intext: 'ИНТ./НАТ.', pav: 'ПАВ.' };
 
-  const NUM_RE = /^\s*(\d+[\-–.\d]*[А-ЯA-Z]?)[.)]\s+/;
+  // scene numbers: 12, 12А, 1-12, 51-12А and the letter-first A1, B1 that lockAssign gives scenes before the first locked one
+  const NUM_RE = /^\s*((?:\d+-)?[A-ZА-Я]?\d+[\-–.\d]*[А-ЯA-Z]?)[.)]\s+/;
   const FLASH_RE = /^\s*(ФЛЕШБЭК|ФЛЭШБЭК|ФЛЕШБЕК|ВОСПОМИНАНИЕ|ФЛЕШФОРВАРД|СОН|FLASHBACK)\s*[.:\-–—]?\s*/i;
   function parseHeading(text) {
     const raw = clean(up(text));
@@ -137,23 +139,28 @@
   }
   const isNight = (h) => /НОЧЬ/.test(h.time || '');
 
+  // \b is ASCII-only in JS, so the boundary around ПРОД is spelled out for Cyrillic
   function charName(text) {
-    return clean(up(text).replace(/\(.*?\)/g, ' ').replace(/\b(ПРОД|CONT'?D)\.?/g, '')).replace(/[.:]+$/, '');
+    return clean(up(text).replace(/\(.*?\)/g, ' ').replace(/(^|[^А-ЯЁA-Z0-9])(ПРОД|CONT'?D)\.?(?![А-ЯЁA-Z0-9])/g, '$1')).replace(/[.:]+$/, '');
   }
 
   // ---------- pagination (Final Draft rules) ----------
   function wrap(text, width) {
-    const words = clean(text).split(' ');
     const lines = [];
     let cur = '';
-    for (let w of words) {
-      while (w.length > width) {
-        if (cur) { lines.push(cur); cur = ''; }
-        lines.push(w.slice(0, width)); w = w.slice(width);
-      }
-      if (!cur) cur = w;
-      else if (cur.length + 1 + w.length <= width) cur += ' ' + w;
-      else { lines.push(cur); cur = w; }
+    for (const word of clean(text).split(' ')) {
+      // like Final Draft and the browser, a line may also break after a hyphen inside a word (что-|то)
+      word.replace(/([^\s-]-)(?=[^\s\d-])/g, '$1\u0000').split('\u0000').forEach((part, k) => {
+        let w = part;
+        const sep = k ? '' : ' ';
+        while (w.length > width) {
+          if (cur) { lines.push(cur); cur = ''; }
+          lines.push(w.slice(0, width)); w = w.slice(width);
+        }
+        if (!cur) cur = w;
+        else if (cur.length + sep.length + w.length <= width) cur += sep + w;
+        else { lines.push(cur); cur = w; }
+      });
     }
     lines.push(cur);
     return lines;
@@ -161,6 +168,26 @@
   function displayText(b) {
     const t = b.x || '';
     return (b.t === 'scene' || b.t === 'character' || b.t === 'transition') ? up(t) : t;
+  }
+  // a right-aligned element ends at its own edge (Final Draft transition: 7.10 in) or at the right margin
+  const rightEdge = (f, paper) => f.edge || paper.w - paper.right;
+
+  // Final Draft BreakDialogueAndActionAtSentences: break after the last sentence end that fits in `room` lines,
+  // with at least 2 lines on each side; the rest is rewrapped for the next page
+  function sentenceSplit(text, width, room) {
+    const re = /[.!?…]+['"»”)]*\s+/g;
+    let m, best = null;
+    while ((m = re.exec(text))) {
+      const cut = m.index + m[0].length, head = wrap(text.slice(0, cut), width);
+      if (head.length > room) break;
+      if (head.length >= 2 && wrap(text.slice(cut), width).length >= 2) best = { head, rest: text.slice(cut), done: text.slice(0, cut) };
+    }
+    return best;
+  }
+  // no sentence end fits and the block is taller than the page: it has to break at a line, still 2 lines on each side
+  function lineSplit(lines, room) {
+    const k = Math.min(room, lines.length - 2);
+    return k >= 2 ? { head: lines.slice(0, k), rest: lines.slice(k).join(' '), done: lines.slice(0, k).join(' ') } : null;
   }
 
   function paginate(blocks, opts) {
@@ -172,83 +199,79 @@
       const lines = wrap(displayText(b), f.width);
       return { lines, L: lines.length, sb: f.sb };
     });
-    const breaks = {};
+    // breaks: block i starts a page; inner: page breaks inside block i, as a line offset from its top
+    const breaks = {}, inner = {};
     let used = 0;
-    let lastChar = '';
+    let lastChar = '', lastCue = '';
+    const items = () => pages[pages.length - 1].items;
     const newPage = () => { pages.push({ items: [] }); used = 0; };
+    const put = (it) => { items().push(it); used += it.sb + it.lines.length; };
+    // the cue repeated at the top of the next page keeps its extension: ИВАН (ЗК) (ПРОД.)
+    const contd = (i) => ({ i, t: 'character', lines: [lastCue + ' (ПРОД.)'], sb: 0, contd: true });
+    // what goes to the next page with block b: a scene heading never ends a page, a cue and parentheticals stay with
+    // their dialogue, and a speech broken between its parts gets (ДАЛЬШЕ) here and the cue with (ПРОД.) there
+    const carryOver = (b, i) => {
+      const cur = items(), out = [];
+      let u = used, speech = b.t === 'dialogue' || b.t === 'paren';
+      const take = () => { const it = cur.pop(); u -= it.sb + it.lines.length; out.unshift(it); };
+      while (cur.length) {
+        const it = cur[cur.length - 1];
+        if (it.t === 'scene') { take(); speech = false; continue; }
+        if (!speech) break;
+        if (it.t === 'paren') take();
+        else if (it.t === 'character') { take(); speech = false; }
+        else if (it.t === 'dialogue' && lastCue) {
+          if (u + 1 <= lpp) { it.more = lastChar; out.unshift(contd(out.length ? out[0].i : i)); break; }
+          take();
+        } else break;
+      }
+      // a page is never emptied: then the block breaks here instead
+      if (!cur.length) { cur.push(...out.filter((it) => !it.contd)); return null; }
+      return out;
+    };
     for (let i = 0; i < blocks.length; i++) {
       const b = blocks[i], inf = info[i];
-      if (b.t === 'character') lastChar = charName(b.x);
+      if (b.t === 'character') { lastChar = charName(b.x); lastCue = clean(up(b.x).replace(/\(\s*(ПРОД|CONT'?D)\.?\s*\)/g, ' ')) || lastChar; }
+      else if (b.t !== 'dialogue' && b.t !== 'paren') lastChar = lastCue = '';
+      const f = F[b.t] || F.action, nb = blocks[i + 1], next = info[i + 1];
       let sb = used === 0 ? 0 : inf.sb;
-      const next = info[i + 1];
       let need = sb + inf.L;
-      if ((b.t === 'scene' || b.t === 'character') && next) need += (used + need === 0 ? 0 : next.sb) + 1;
-      if (b.t === 'paren' && next && blocks[i + 1].t === 'dialogue') need += 1;
-      const avail = lpp - used;
-      if (need <= avail) {
-        pages[pages.length - 1].items.push({ i, t: b.t, lines: inf.lines, sb });
-        used += sb + inf.L;
-        continue;
-      }
-      // try to split long action / dialogue across the page
-      const splittable = b.t === 'action' || b.t === 'dialogue';
-      let room = avail - sb - (b.t === 'dialogue' ? 1 : 0);
-      if (splittable && room >= 2 && inf.L - room >= 2 && used > 0) {
-        let lines = inf.lines.slice();
-        pages[pages.length - 1].items.push({ i, t: b.t, lines: lines.slice(0, room), sb, more: b.t === 'dialogue' ? lastChar : '' });
-        lines = lines.slice(room);
+      // keep with next: a heading takes at least 2 lines of the next element, a cue the first line of its speech,
+      // a parenthetical the dialogue line after it
+      if (next && b.t === 'scene') need += next.sb + Math.min(next.L, 2);
+      if (next && b.t === 'character') need += next.sb + 1;
+      if (next && b.t === 'paren' && nb.t === 'dialogue') need += 1;
+      if (need <= lpp - used) { put({ i, t: b.t, lines: inf.lines, sb }); continue; }
+      const splittable = b.t === 'action' || b.t === 'dialogue', dlg = b.t === 'dialogue' && !!lastCue;
+      const text = displayText(b);
+      let sp = splittable && used > 0 ? sentenceSplit(text, f.width, lpp - used - sb - (dlg ? 1 : 0)) : null;
+      // no sentence end to break at: the block moves to the next page, unless it is taller than a page anyway
+      const carry = !sp && used > 0 && !(splittable && inf.L > lpp) ? carryOver(b, i) : null;
+      if (carry) {
         newPage();
-        breaks[i] = { page: pages.length, split: true };
-        if (b.t === 'dialogue') {
-          pages[pages.length - 1].items.push({ i, t: 'character', lines: [lastChar + ' (ПРОД.)'], sb: 0, contd: true });
-          used += 1;
-        }
-        while (lines.length > lpp - used) {
-          const take = lpp - used - (b.t === 'dialogue' ? 1 : 0);
-          pages[pages.length - 1].items.push({ i, t: b.t, lines: lines.slice(0, take), sb: 0, more: b.t === 'dialogue' ? lastChar : '' });
-          lines = lines.slice(take);
-          newPage();
-          if (b.t === 'dialogue') { pages[pages.length - 1].items.push({ i, t: 'character', lines: [lastChar + ' (ПРОД.)'], sb: 0, contd: true }); used += 1; }
-        }
-        pages[pages.length - 1].items.push({ i, t: b.t, lines, sb: 0 });
-        used += lines.length;
-        continue;
+        if (carry.length) { carry[0].sb = 0; carry.forEach(put); breaks[carry[0].i] = { page: pages.length }; } else breaks[i] = { page: pages.length };
+        sb = used === 0 ? 0 : inf.sb;
       }
-      if (used > 0) {
-        // dialogue blocks moved to a new page keep their speaker
-        const moveFrom = (b.t === 'dialogue' || b.t === 'paren') ? backtrackSpeaker(pages[pages.length - 1].items, blocks) : null;
+      // place the block, breaking it wherever it does not fit (at a sentence end when there is one)
+      let rest = text, done = '';
+      for (;;) {
+        const lines = wrap(rest, f.width);
+        if (sb + lines.length <= lpp - used) { put({ i, t: b.t, lines, sb }); break; }
+        const room = lpp - used - sb - (dlg ? 1 : 0);
+        const cut = sp || (splittable && sentenceSplit(rest, f.width, room)) || lineSplit(lines, room) ||
+          { head: lines.slice(0, Math.max(1, room)), rest: lines.slice(Math.max(1, room)).join(' '), done: lines.slice(0, Math.max(1, room)).join(' ') };
+        sp = null;
+        put({ i, t: b.t, lines: cut.head, sb, more: dlg ? lastChar : '' });
+        done += (done ? ' ' : '') + cut.done; rest = cut.rest; sb = 0;
         newPage();
-        if (moveFrom && moveFrom.length) {
-          for (const it of moveFrom) { it.sb = it === moveFrom[0] ? 0 : it.sb; pages[pages.length - 1].items.push(it); used += it.sb + it.lines.length; }
-          breaks[moveFrom[0].i] = { page: pages.length };
-        } else breaks[i] = { page: pages.length };
+        (inner[i] = inner[i] || []).push({ page: pages.length, line: wrap(done, f.width).length });
+        if (dlg) put(contd(i));
       }
-      sb = used === 0 ? 0 : inf.sb;
-      let lines = inf.lines.slice();
-      while (lines.length > lpp - used) {
-        const take = lpp - used;
-        pages[pages.length - 1].items.push({ i, t: b.t, lines: lines.slice(0, take), sb });
-        lines = lines.slice(take); sb = 0;
-        newPage();
-      }
-      pages[pages.length - 1].items.push({ i, t: b.t, lines, sb });
-      used += sb + lines.length;
     }
     const last = pages[pages.length - 1];
     const lastUsed = last.items.reduce((a, it) => a + it.sb + it.lines.length, 0);
     const total = blocks.length ? (pages.length - 1) + lastUsed / lpp : 0;
-    return { pages, total, info, breaks, lpp };
-  }
-  // when a dialogue does not fit, its character cue (and parenthetical) move with it
-  function backtrackSpeaker(items, blocks) {
-    const out = [];
-    for (let k = items.length - 1; k >= 0; k--) {
-      const it = items[k];
-      if (it.t === 'paren' || it.t === 'character') { out.unshift(it); items.splice(k, 1); if (it.t === 'character') break; }
-      else break;
-    }
-    if (!out.length || out[0].t !== 'character') { items.push(...out); return null; }
-    return out;
+    return { pages, total, info, breaks, inner, lpp };
   }
 
   // ---------- analysis ----------
@@ -291,7 +314,10 @@
         }
       }
       const meta = (ep.sceneMeta || {})[s.id] || {};
-      (meta.extras || []).forEach((n) => mentioned.add(charName(n)));
+      // an omitted scene keeps its tags and extras in meta (restore brings them back) but contributes no cast, tags or shifts
+      const omitted = !!meta.omitted || OMIT_RE.test(s.heading || '');
+      if (omitted) { speaking.clear(); mentioned.clear(); }
+      else (meta.extras || []).forEach((n) => mentioned.add(charName(n)));
       const cast = new Set([...speaking, ...mentioned]);
       const h = parseHeading(s.heading);
       const loc = locs[h.object] || {};
@@ -300,11 +326,10 @@
       const min = share * minutes;
       const minors = [...cast].filter((n) => chars[n] && chars[n].minor);
       const guests = [...cast].filter((n) => chars[n] && chars[n].guest);
-      const tags = meta.tags || [];
-      const omitted = !!meta.omitted || OMIT_RE.test(s.heading || '');
+      const tags = omitted ? [] : (meta.tags || []);
       const special = tags.some((t) => SPECIAL_TAGS.includes(t)) || minors.length > 0;
       const rate = pav ? rules.ratePav : (h.type === 'ext' || h.type === 'intext') ? rules.rateExt : rules.rateInt;
-      const shifts = min / (special ? rate / rules.specialFactor : rate);
+      const shifts = omitted ? 0 : min / (special ? rate / rules.specialFactor : rate);
       return {
         id: s.id, n: k + 1, from: s.from, to: s.to, heading: s.heading, h, pav, night: isNight(h),
         lines, share, pages: share * pages, min, sec: Math.round(min * 60), cast: [...cast], speaking: [...speaking],
@@ -347,8 +372,8 @@
       share: o.lines / sceneLines, base: !!(locs[o.name] || {}).base, main: !!(locs[o.name] || {}).main,
     })).sort((a, b) => b.lines - a.lines);
     let main = objList.find((o) => o.main) || objList.find((o) => o.pav) || objList[0] || null;
-    const totalShifts = scenes.reduce((a, s) => a + s.shifts, 0);
-    const sum = (f) => scenes.filter(f).reduce((a, s) => a + s.min, 0);
+    const totalShifts = live.reduce((a, s) => a + s.shifts, 0);
+    const sum = (f) => live.filter(f).reduce((a, s) => a + s.min, 0);
     const tot = minutes || 1;
     const stats = {
       pages, minutes, scenes, objects: objList, main, totalShifts, lay,
@@ -362,7 +387,7 @@
     stats.pavPct = stats.pavMin / tot * 100;
     // characters
     const cmap = {};
-    for (const s of scenes) {
+    for (const s of live) {
       for (const n of s.cast) {
         const c = cmap[n] || (cmap[n] = { name: n, scenes: 0, speaking: 0, min: 0, replicas: 0, words: 0, partners: {} });
         c.scenes++; c.min += s.min;
@@ -619,8 +644,9 @@
   }
 
   // ---------- import ----------
-  const HEADING_START = /^\s*(?:\d+[\-–.\d]*[А-ЯA-Z]?[.)]?\s+)?(ИНТ|НАТ|ПАВ|INT|EXT|I\/E)[.\s/]/i;
-  const isCaps = (s) => /[А-ЯЁA-Z]/.test(s) && !/[а-яёa-z]/.test(s.replace(/\(.*?\)/g, ''));
+  const HEADING_START = /^\s*(?:(?:\d+-)?[A-ZА-Я]?\d+[\-–.\d]*[А-ЯA-Z]?[.)]?\s+)?(ИНТ|НАТ|ПАВ|INT|EXT|I\/E)[.\s/]/i;
+  // only the text outside parentheses counts: a parenthetical such as "(Маше)" is never a caps cue
+  const isCaps = (s) => { const o = s.replace(/\(.*?\)/g, ''); return /[А-ЯЁA-Z]/.test(o) && !/[а-яёa-z]/.test(o); };
   const SENT_END = /[.!?…:»")\]]$/;
   const NOT_NAMES = /^(ТИТР|НАДПИСЬ|ЗТМ|ВСТАВКА|КОНЕЦ|ПРОДОЛЖЕНИЕ|СМЕНА КАДРА|ЗАТЕМНЕНИЕ|НАПЛЫВ|FADE|CUT)/;
 
@@ -642,15 +668,19 @@
       const gap = !prev || prev.t === 'gap' || L.gapBefore;
       const last = blocks[blocks.length - 1];
       const styleType = styleToType(style);
-      if (HEADING_START.test(text) || styleType === 'scene') { const b = push('scene', normalizeHeadingText(text)); const ph = parseHeading(text); if (ph.guessed) b.guessed = true; if (ph.num) b.num = ph.num; continue; }
-      if (styleType === 'cast' || (styleType == null && last && last.t === 'scene' && looksLikeCast(text))) { push('cast', text); continue; }
+      // the normalised heading drops the number and the script day: both ride on the block to absorb, which puts them in the scene card
+      if (HEADING_START.test(text) || styleType === 'scene') { const b = push('scene', normalizeHeadingText(text)); const ph = parseHeading(text); if (ph.guessed) b.guessed = true; if (ph.num) b.num = ph.num; if (ph.day) b.day = ph.day; continue; }
+      // a cast list sits in the action column; a lone caps name with text right under it is the cue of the scene's first speech
+      const nx = lines[k + 1];
+      const cueAbove = text.indexOf(',') < 0 && !!(nx && clean(nx.text) && !nx.gapBefore);
+      if (styleType === 'cast' || (styleType == null && last && last.t === 'scene' && (rel == null || rel < 0.6) && !cueAbove && looksLikeCast(text))) { push('cast', text); continue; }
       if (styleType === 'character' && (NOT_NAMES.test(up(text)) || /^(ЗАСТАВКА|ГРАФИКА|МУЗЫКА|ИИ:)/i.test(text))) { push('action', text); continue; }
       if (styleType && styleType !== 'scene') { pushTyped(styleType, text); continue; }
       if (styled && style) { push('action', text); continue; }
       if (/^(СМЕНА КАДРА|ЗАТЕМНЕНИЕ|НАПЛЫВ|ИЗ ЗАТЕМНЕНИЯ|CUT TO|FADE)/i.test(text) && isCaps(text)) { push('transition', text); continue; }
       if (rel != null) {
         if (rel >= 3.4 && isCaps(text)) { push('transition', text); continue; }
-        if (rel >= 1.6 && rel < 3.4 && isCaps(text) && text.length <= 40) { pushTyped('character', text); continue; }
+        if (rel >= 1.6 && rel < 3.4 && !/^\(/.test(text) && isCaps(text) && text.length <= 40) { pushTyped('character', text); continue; }
         if (rel >= 1.2 && /^\(/.test(text)) { pushTyped('paren', text); continue; }
         if (rel >= 0.6 && rel < 1.6) {
           if (last && (last.t === 'dialogue') && !gap && L.joinable !== false) { last.x = clean(last.x + ' ' + text); continue; }
@@ -668,7 +698,7 @@
         continue;
       }
       const nextText = clean((lines[k + 1] || {}).text || '');
-      if (isCaps(text) && text.length <= 40 && !SENT_END.test(text.replace(/\(.*?\)$/, '').trim()) && nextText && !NOT_NAMES.test(text)) {
+      if (!/^\(/.test(text) && isCaps(text) && text.length <= 40 && !SENT_END.test(text.replace(/\(.*?\)$/, '').trim()) && nextText && !NOT_NAMES.test(text)) {
         push('character', text.replace(/:$/, '')); continue;
       }
       if (/^\(.*\)?$/.test(text) && prev && (prev.t === 'character' || prev.t === 'dialogue')) { pushTyped('paren', text); continue; }
@@ -694,7 +724,8 @@
   function looksLikeCast(text) {
     if (/[.!?:;]/.test(text) || text.length > 160) return false;
     const items = text.split(',').map(clean).filter(Boolean);
-    if (items.length < 2) return items.length === 1 && /^[А-ЯЁа-яёA-Za-z\- ]{2,25}$/.test(text) && text.split(' ').length <= 2;
+    // a single item must be in caps: a lone lower-case word ("Тишина") is action and must stay in the text
+    if (items.length < 2) return items.length === 1 && isCaps(text) && /^[А-ЯЁа-яёA-Za-z\- ]{2,25}$/.test(text) && text.split(' ').length <= 2;
     return items.every((it) => /^[А-ЯЁа-яёA-Za-z\- ]{2,30}$/.test(it) && it.split(' ').length <= 3);
   }
   const EXT_RE = /(^|[^А-ЯЁA-Z])(З\.?\s?К\.?|ЗА КАДРОМ|ПРОД\.?|ПО ТЕЛЕФОНУ|ТИТР|В КАДРЕ|V\.?O\.?|O\.?S\.?|CONT'?D)(?![А-ЯЁA-Z])/g;
@@ -726,7 +757,8 @@
   function styleToType(s) {
     if (!s) return null;
     s = s.toLowerCase();
-    if (/cast|действующ|участ|персонажи в сцене/.test(s)) return 'cast';
+    // KIT Сценарист names its cast block "Scene Characters" / "Персонажи сцены": test it before the scene heading pattern
+    if (/cast|scene[ _-]?char|действующ|участ|персонажи (в )?сцен/.test(s)) return 'cast';
     if (/scene|сцен|заголов|slug/.test(s)) return 'scene';
     if (/charact|персонаж|имя/.test(s)) return 'character';
     if (/paren|ремарк/.test(s)) return 'paren';
@@ -754,10 +786,39 @@
   }
 
   function importText(txt) {
-    txt = txt.replace(/\r/g, '').replace(/^(?:(?:Title|Credit|Author|Authors|Episode|Source|Draft date|Contact|Notes):.*\n)+/i, '');
-    const lines = txt.split('\n').map((s) => ({ text: s.replace(/^\s*[>]?\s*/, '').replace(/^[.!@~]/, ''), joinable: true }));
-    // Fountain forced elements and centered text are reduced to plain text
-    return classifyLines(lines);
+    txt = txt.replace(/\r/g, '');
+    // a Fountain title page marks the file as Fountain: only then '!' (forced action) and '~' (lyrics) are markup, not text
+    const TITLE_RE = /^(?:(?:Title|Credit|Author|Authors|Episode|Source|Draft date|Contact|Notes):.*\n)+/i;
+    const fountain = TITLE_RE.test(txt);
+    txt = txt.replace(TITLE_RE, '');
+    // Fountain forced elements and centered text are reduced to plain text; ordinary text ("...Ну да.", "> стрелка") is kept as is
+    // in a Fountain file any '.X' is a forced heading («.«СОН»», ".2 ГОДА СПУСТЯ"); in plain text only before a capital
+    const FORCED_RE = fountain ? /^\.(?=[^.\s])/ : /^\.(?=[A-ZА-ЯЁ])/;
+    const unforce = (s) => {
+      const t = s.replace(/^\s+/, '');
+      if (/^>.*<\s*$/.test(t)) return t.replace(/^>\s*/, '').replace(/\s*<\s*$/, '');
+      if (/^>\s*[A-ZА-ЯЁ0-9 .:()\-]+:?\s*$/.test(t)) return t.replace(/^>\s*/, '');
+      if (fountain && /^[!~](?=[^!\s])/.test(t)) return t.slice(1);
+      // a forced heading left empty (a new scene exported before it got a heading) is nothing, not an action ". #1#"
+      if (fountain && /^\.\s*(?:#[^#\s]+#)?\s*$/.test(t)) return '';
+      return t.replace(FORCED_RE, '').replace(/^@(?=[A-ZА-ЯЁ])/, '');
+    };
+    const nums = [];
+    const lines = txt.split('\n').map((s) => {
+      let text = unforce(s);
+      const forced = FORCED_RE.test(s.replace(/^\s+/, ''));
+      const action = fountain && /^\s*!(?=[^!\s])/.test(s);
+      // Fountain scene number "#12А#" at the end of a heading
+      const m = text.match(/^(.*?)\s*#([^#\s]+)#\s*$/);
+      const head = forced || HEADING_START.test(m ? m[1] : text);
+      if (head && m) text = m[1];
+      if (head && clean(text)) nums.push(m ? m[2] : '');
+      return { text, joinable: true, style: forced ? 'Scene Heading' : action ? 'Action' : undefined };
+    });
+    const blocks = classifyLines(lines);
+    let k = 0;
+    for (const b of blocks) if (b.t === 'scene') { const n = nums[k++]; if (n) b.num = n; }
+    return blocks;
   }
   function importFDX(xml, DOMParserImpl) {
     const doc = new (DOMParserImpl || DOMParser)().parseFromString(xml, 'application/xml');
@@ -783,11 +844,13 @@
       if (hasOmitted && !text) { text = 'OMITTED'; t = 'scene'; }
       if (!text) continue;
       const fdxNum = (p.getAttribute('Number') || '').trim();
+      const fdxDay = t === 'scene' ? parseHeading(text).day : '';
       if (t === 'scene') text = normalizeHeadingText(text);
       if (t === 'character') text = normalizeCharacter(text);
       if (t === 'paren' && !/^\(/.test(text)) text = '(' + text + ')';
       const nb = { id: uid(), t, x: text };
       if (t === 'scene' && fdxNum) nb.num = fdxNum;
+      if (fdxDay) nb.day = fdxDay;
       if (t === 'scene' && (hasOmitted || OMIT_RE.test(text))) { nb.x = omittedHeading(fdxNum); nb.omitted = true; }
       blocks.push(nb);
     }
@@ -805,7 +868,9 @@
         const h = parseHeading(b.x);
         // numbering, script day and flashback marks come from the file and are kept in the scene card
         const num = h.num || b.num || '';
-        if (h.day || h.flash || num) report.sceneMeta[b.id] = { day: h.day, tags: h.flash ? ['flashback'] : [], num };
+        const day = h.day || b.day || '';
+        delete b.day;
+        if (day || h.flash || num) report.sceneMeta[b.id] = { day, tags: h.flash ? ['flashback'] : [], num };
         if (b.omitted || OMIT_RE.test(b.x)) { (report.sceneMeta[b.id] = report.sceneMeta[b.id] || { num }).omitted = true; b.x = omittedHeading(num); delete b.omitted; continue; }
         delete b.num;
         if (h.guessed || b.guessed) { report.guessed.push(b.x); delete b.guessed; }
@@ -862,10 +927,10 @@
       const s = sceneByIdx[i];
       const num = s ? (opts.episodePrefix && !/-/.test(s.num) ? (ep.number || 1) + '-' + s.num : s.num) : '';
       const props = s ? '<SceneProperties Length="' + fmtPages(s.pages) + '" Page="' + (pageOf[i] || 1) + '" Title="' + xmlEsc(s.synopsis || '') + '"/>' : '';
-      const text = s && s.omitted ? 'OMITTED' : displayText(b);
+      const text = s && s.omitted ? 'OMITTED' : displayText(b) + headingDay(s, b);
       return '    <Paragraph' + (s ? ' Number="' + num + '"' : '') + ' Type="' + FDX_TYPE[b.t] + '">' + props + '<Text>' + xmlEsc(text) + '</Text></Paragraph>';
     });
-    const el = (name, f, behavior) => '    <ElementSettings Type="' + name + '"><FontSpec AdornmentStyle="0" Background="#FFFFFFFFFFFF" Color="#000000000000" Font="Courier New" RevisionID="0" Size="12" Style=""/><ParagraphSpec Alignment="' + (f.right ? 'Right' : 'Left') + '" FirstIndent="0.00" Leading="Regular" LeftIndent="' + f.indent.toFixed(2) + '" RightIndent="' + (f.right ? paper.w - paper.right : f.indent + f.width / 10).toFixed(2) + '" SpaceBefore="' + (f.sb * 12) + '" Spacing="1" StartsNewPage="No"/><Behavior PaginateAs="' + name + '" ReturnKey="' + behavior + '" Shortcut=""/></ElementSettings>';
+    const el = (name, f, behavior) => '    <ElementSettings Type="' + name + '"><FontSpec AdornmentStyle="0" Background="#FFFFFFFFFFFF" Color="#000000000000" Font="Courier New" RevisionID="0" Size="12" Style=""/><ParagraphSpec Alignment="' + (f.right ? 'Right' : 'Left') + '" FirstIndent="0.00" Leading="Regular" LeftIndent="' + f.indent.toFixed(2) + '" RightIndent="' + (f.right ? rightEdge(f, paper) : f.indent + f.width / 10).toFixed(2) + '" SpaceBefore="' + (f.sb * 12) + '" Spacing="1" StartsNewPage="No"/><Behavior PaginateAs="' + name + '" ReturnKey="' + behavior + '" Shortcut=""/></ElementSettings>';
     const chars = Object.keys(project.chars || {}).sort();
     const locs = new Set();
     st.scenes.filter((s) => !s.omitted).forEach((s) => { const h = s.h; if (h.object) locs.add(h.object + (h.sub ? '. ' + h.sub : '')); });
@@ -881,17 +946,27 @@
       '    <TimesOfDay Separator=" - ">\n' + TIMES.map((x) => '      <TimeOfDay>' + x + '</TimeOfDay>').join('\n') + '\n    </TimesOfDay>\n' +
       '    <Transitions>\n' + TRANSITIONS.map((x) => '      <Transition>' + xmlEsc(x) + '</Transition>').join('\n') + '\n    </Transitions>\n  </SmartType>\n</FinalDraft>\n';
   }
-  function exportFountain(ep, project) {
+  // a script day kept only in the scene card goes into the heading text ("ИНТ. КУХНЯ - ДЕНЬ 2"), where Final Draft, FilmToolz and our import read it
+  function headingDay(s, b) {
+    const d = s && !s.omitted && b.t === 'scene' ? String(s.day || '').replace(/\D/g, '') : '';
+    return d && !parseHeading(b.x).day && parseHeading(b.x + ' ' + d).day === d ? ' ' + d : '';
+  }
+  function exportFountain(ep, project, st) {
+    st = st || analyzeEpisode(ep, project);
     const out = ['Title: ' + (project.name || ''), 'Episode: ' + (ep.number || '') + (ep.title ? ' ' + ep.title : ''), ''];
-    for (const b of ep.blocks || []) {
+    const sceneByIdx = {}; st.scenes.forEach((s) => { sceneByIdx[s.from] = s; });
+    const blocks = ep.blocks || [];
+    blocks.forEach((b, i) => {
       const t = displayText(b);
-      if (b.t === 'scene') out.push('', '.' + t, '');
+      const s = sceneByIdx[i];
+      const next = blocks[i + 1];
+      // Fountain scene number "#12А#"; a blank line ends a speech, so it comes only after its last paren or dialogue
+      if (b.t === 'scene') out.push('', '.' + (s && s.omitted ? omittedHeading(s.num) : t + headingDay(s, b)) + (s && s.num ? ' #' + s.num + '#' : ''), '');
       else if (b.t === 'character') out.push('@' + t);
-      else if (b.t === 'paren') out.push(t);
-      else if (b.t === 'dialogue') out.push(t, '');
+      else if (b.t === 'paren' || b.t === 'dialogue') { out.push(t); if (!next || (next.t !== 'paren' && next.t !== 'dialogue')) out.push(''); }
       else if (b.t === 'transition') out.push('> ' + t, '');
       else out.push(t, '');
-    }
+    });
     return out.join('\n').replace(/\n{3,}/g, '\n\n');
   }
   // FilmToolz Word import: "1-3. ИНТ. ОБЪЕКТ. ПОДОБЪЕКТ ДЕНЬ 2." + line break + characters + (мм:сс)
@@ -959,6 +1034,13 @@
     const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
     const ps = doc.getElementsByTagNameNS(W, 'p');
     const out = [];
+    // a hand-formatted script indents only cues, parentheticals and dialogue: then an unindented paragraph sits at the page margin
+    // (a stray indented paragraph or two does not count, the plain-text heuristics stay for such a document)
+    const leftOf = (p) => { const ind = p.getElementsByTagNameNS(W, 'ind')[0]; const st = p.getElementsByTagNameNS(W, 'pStyle')[0]; const sd = styles[st ? st.getAttributeNS(W, 'val') : ''] || {};
+      return ind ? parseInt(ind.getAttributeNS(W, 'left') || ind.getAttributeNS(W, 'start') || '0', 10) / 1440 : sd.indent; };
+    let nonEmpty = 0, indented = 0;
+    for (let i = 0; i < ps.length; i++) { if (!ps[i].textContent.trim()) continue; nonEmpty++; if (leftOf(ps[i]) >= 0.5) indented++; }
+    const marginKnown = indented >= Math.max(3, nonEmpty * 0.1);
     for (let i = 0; i < ps.length; i++) {
       const p = ps[i];
       const ind = p.getElementsByTagNameNS(W, 'ind')[0];
@@ -967,13 +1049,15 @@
       const styleId = st ? st.getAttributeNS(W, 'val') : '';
       const sdef = styles[styleId] || {};
       let left = ind ? parseInt(ind.getAttributeNS(W, 'left') || ind.getAttributeNS(W, 'start') || '0', 10) / 1440 : (sdef.indent != null ? sdef.indent : 0);
-      const hasIndent = !!ind || sdef.indent != null;
+      const hasIndent = !!ind || sdef.indent != null || marginKnown;
       let parts = [''];
       const walk = (n) => {
         for (let c = n.firstChild; c; c = c.nextSibling) {
           if (c.nodeType !== 1) continue;
           if (c.localName === 't') parts[parts.length - 1] += c.textContent;
           else if (c.localName === 'tab') parts[parts.length - 1] += ' ';
+          // Ctrl+Shift+- in Word: "кто-то", "САНКТ-ПЕТЕРБУРГ" (a plain hyphen, so names match those typed in the app)
+          else if (c.localName === 'noBreakHyphen') parts[parts.length - 1] += '-';
           else if (c.localName === 'br' || c.localName === 'cr') parts.push('');
           else if (c.localName !== 'pPr') walk(c);
         }
@@ -1010,9 +1094,10 @@
       let prevY = null;
       for (const r of rows) {
         r.parts.sort((a, b) => a.x - b.x);
-        // scene numbers printed in the margins are not part of the text
-        const num = /^\s*\d+[A-ZА-Я]?\.?\s*$/;
-        while (r.parts.length > 1 && num.test(r.parts[0].str)) r.parts.shift();
+        // scene numbers printed in the margins (12, 12А, 51-12, A1) are not part of the text, but the left one is the scene's number
+        const num = /^\s*(?:\d+-)?[A-ZА-Я]?\d+(?:[\-–.]\d+)*[A-ZА-Я]?\.?\s*$/;
+        let lnum = '';
+        while (r.parts.length > 1 && num.test(r.parts[0].str)) lnum = lnum || clean(r.parts.shift().str).replace(/\.$/, '');
         while (r.parts.length > 1 && num.test(r.parts[r.parts.length - 1].str)) r.parts.pop();
         let text = '';
         let endX = null;
@@ -1024,9 +1109,14 @@
         if (/^\d+\.?$/.test(text) && r === rows[0]) { prevY = null; continue; }
         if (/^\(?(ДАЛЬШЕ|MORE)\)?$/i.test(text)) continue;
         text = text.replace(/\s*\((ПРОД|CONT'?D)\.?\)\s*$/i, '');
-        if (/^\d+[A-ZА-Я]?\.?$/.test(text)) continue;
+        if (num.test(text)) continue;
         const gapBefore = prevY != null && prevY - r.y > 18;
-        lines.push({ text: text.replace(/^\d+[A-ZА-Я]?\.?\s+(?=(ИНТ|НАТ|ПАВ|INT|EXT))/i, '').replace(/\s+\d+[A-ZА-Я]?\.?$/, (m) => HEADING_START.test(text) ? '' : m), indent: r.parts[0].x / 72, gapBefore, joinable: !gapBefore });
+        // only the right copy of the left number is dropped: a lone trailing number is the script day ("ДЕНЬ 2")
+        let out = text.replace(/^(?:\d+-)?[A-ZА-Я]?\d+(?:[\-–.]\d+)*[A-ZА-Я]?\.?\s+(?=(ИНТ|НАТ|ПАВ|INT|EXT))/i, (m) => { lnum = lnum || m.trim().replace(/\.$/, ''); return ''; })
+          .replace(/\s+(?:\d+-)?[A-ZА-Я]?\d+(?:[\-–.]\d+)*[A-ZА-Я]?\.?$/, (m) => HEADING_START.test(text) && lnum && clean(m).replace(/\.$/, '') === lnum ? '' : m);
+        // the heading carries its number into classifyLines, which keeps it as the scene's number
+        if (lnum && HEADING_START.test(out)) out = lnum + '. ' + out;
+        lines.push({ text: out, indent: r.parts[0].x / 72, gapBefore, joinable: !gapBefore });
         prevY = r.y;
       }
     }
@@ -1195,7 +1285,7 @@
   root.Core = {
     parseLines, LINE_COLORS, autoLine, listOf, paperOf, FMT_RU, lockAssign, lockMissing, lockInsertIndex, omittedHeading, OMIT_RE, numParts,
     TYPES, TYPE_LABEL, FMT, PAPER, TIMES, PREFIXES, TRANSITIONS, EXTENSIONS, TAGS, SPECIAL_TAGS, DEFAULT_RULES, MANUAL_CHECKS,
-    uid, up, clean, parseHeading, formatHeading, charName, wrap, paginate, displayText, analyzeEpisode, evalRules, fmtPages, fmtTime,
+    uid, up, clean, parseHeading, formatHeading, charName, wrap, paginate, rightEdge, displayText, analyzeEpisode, evalRules, fmtPages, fmtTime,
     namingIssues, fixHomoglyphs, classifyLines, importText, importFDX, absorb, exportFDX, exportFountain, docxDocumentXML, DOCX_STATIC,
     docxParagraphs, docxStyles, splitCast, splitCue, finalizeImport, numberingCheck, pdfLines, demoProject, sceneSplit, thinHistory, restoreScene, HIST, normalizeHeadingText, normalizeCharacter, filmtoolzHeading, HEADING_START,
   };

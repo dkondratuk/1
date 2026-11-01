@@ -5,7 +5,7 @@
   const $ = (s, r) => (r || document).querySelector(s);
   const $$ = (s, r) => [...(r || document).querySelectorAll(s)];
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-  const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
+  const debounce = (fn, ms) => { let t; const d = (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; d.cancel = () => clearTimeout(t); return d; };
   const fmtDate = (t) => new Date(t).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 
   // embedded FreeMono as a fallback for machines without Courier New
@@ -32,20 +32,70 @@
       const db = await this.dbp; if (!db) return null;
       return new Promise((res) => { try { const q = db.transaction('kv').objectStore('kv').get(k); q.onsuccess = () => res(q.result || null); q.onerror = () => res(null); } catch (e) { res(null); } });
     },
+    // the project, its trash and its snapshots are shared by every tab: a write goes through only if no other tab
+    // wrote since this one loaded (the 'rev' record, checked in the same transaction), otherwise the tab turns stale
     async put(k, v) {
+      // the per-episode analysis cache (_st) is derived data: never stored, so a stale one cannot survive a reload
+      if (k === 'db') v = JSON.parse(JSON.stringify(v, (kk, x) => (kk === '_st' ? undefined : x)));
       const db = await this.dbp; if (!db) return false;
-      return new Promise((res) => { try { const tx = db.transaction('kv', 'readwrite'); tx.objectStore('kv').put(v, k); tx.oncomplete = () => res(true); tx.onerror = () => res(false); } catch (e) { res(false); } });
+      const shared = k === 'db' || k === 'trash' || String(k).startsWith('hist:');
+      if (shared && TAB.stale) return false;
+      const t0 = Date.now();
+      return new Promise((res) => {
+        let lost = false, n = 0;
+        try {
+          const tx = db.transaction('kv', 'readwrite'), os = tx.objectStore('kv');
+          tx.oncomplete = () => { res(true); if (!shared) return; TAB.last = Math.max(TAB.last, n); if (k === 'db') TAB.savedAt = t0; TAB.told(n); };
+          tx.onerror = () => res(false);
+          // a commit that fails on quota aborts the transaction without an error event
+          tx.onabort = () => { res(false); if (lost) TAB.conflict(); };
+          if (!shared) { os.put(v, k); return; }
+          const q = os.get('rev');
+          q.onsuccess = () => {
+            const r = q.result || { n: 0 };
+            if (r.tab !== TAB.id && (r.n || 0) !== TAB.rev) { lost = true; tx.abort(); return; }
+            n = (r.n || 0) + 1;
+            try { os.put(v, k); os.put({ n, tab: TAB.id, at: Date.now() }, 'rev'); } catch (e) { try { tx.abort(); } catch (e2) { /* already over */ } }
+          };
+        } catch (e) { res(false); }
+      });
     },
     async del(k) {
       const db = await this.dbp; if (!db) return false;
-      return new Promise((res) => { try { const tx = db.transaction('kv', 'readwrite'); tx.objectStore('kv').delete(k); tx.oncomplete = () => res(true); tx.onerror = () => res(false); } catch (e) { res(false); } });
+      return new Promise((res) => { try { const tx = db.transaction('kv', 'readwrite'); tx.objectStore('kv').delete(k); tx.oncomplete = () => res(true); tx.onerror = () => res(false); tx.onabort = () => res(false); } catch (e) { res(false); } });
     },
   };
   DB.dbp = DB.open();
+  // Two tabs on one computer: the tab that wrote last owns the data. The other one learns it from the channel or from a
+  // refused write, keeps its unsaved text aside (see rescueTab) and becomes read-only until reloaded.
+  // rev: the record this tab loaded; last: the newest record it knows of (a late message from a closed tab is older)
+  const TAB = { id: Math.random().toString(36).slice(2) + Date.now().toString(36), rev: 0, last: 0, savedAt: 0, stale: false, ch: null };
+  try { TAB.ch = new BroadcastChannel('draft-app'); TAB.ch.onmessage = (e) => { if (e.data && e.data.tab !== TAB.id && (e.data.n || 0) > TAB.last) TAB.conflict(); }; } catch (e) { /* the write check still guards */ }
+  TAB.told = (n) => { try { if (TAB.ch) TAB.ch.postMessage({ tab: TAB.id, n }); } catch (e) { /* ignore */ } };
+  TAB.conflict = async () => {
+    if (TAB.stale || TAB.adopting || !S.db) return;
+    // a tab with nothing unsaved simply takes the newer data: a second tab that was only opened or looked at, or the
+    // tail write of this same page before a reload, must not lock anyone out
+    TAB.adopting = true;
+    try { if (await adoptNewer()) return; } catch (e) { /* fall back to read-only below */ } finally { TAB.adopting = false; }
+    TAB.stale = true;
+    rescueTab();
+    if (S.ep) applyRole();
+    banner('Драфт изменён в другой вкладке. Здесь теперь только чтение, чтобы не затереть те правки. Обновите страницу — несохранённый текст этой вкладки появится в драфтах серии.', true);
+  };
   const ls = { get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } }, set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* ignore */ } } };
 
   const S = { db: null, project: null, ep: null, st: null, rulesRes: [], me: ls.get('draft.me', { name: 'Сценарист', role: 'writer' }), activeComment: null, curScene: null, ltab: 'episodes', rtab: ls.get('draft.rtab', 'stats'), graphScope: 'project', selChar: null };
-  const persist = debounce(() => { if (S.db) DB.put('db', S.db); }, 700);
+  const persist = debounce(() => { if (S.db) DB.put('db', S.db).then(saved); }, 700);
+  // a failed save is never silent: the bar stays until a later save goes through
+  function saved(ok) { if (!TAB.stale) banner(ok ? '' : 'Не удалось сохранить в браузере (нет места или хранилище недоступно). Сохраните файл проекта: «Экспорт → Файл проекта».'); return ok; }
+  function banner(msg, reload) {
+    let b = document.getElementById('saveBar');
+    if (!b) { b = document.createElement('div'); b.id = 'saveBar'; b.className = 'savebar'; b.setAttribute('role', 'alert'); document.body.appendChild(b); }
+    b.hidden = !msg;
+    b.innerHTML = esc(msg) + (reload ? ' <button class="btn small" type="button">Обновить</button>' : '');
+    if (reload) b.querySelector('button').onclick = () => location.reload();
+  }
 
   // ---------- downloads (artifact viewer capability or a plain link) ----------
   let dlP = null;
@@ -104,13 +154,13 @@
   function sortEpisodes(p) { p.episodes.sort((a, b) => (a.season - b.season) || (a.number - b.number)); }
   function newEpisode(p, season, title, blocks) {
     const same = p.episodes.filter((e) => e.season === season);
-    const ep = { id: C.uid(), season, number: same.length ? Math.max(...same.map((e) => e.number)) + 1 : 1, title: title || '', blocks: blocks || [{ id: C.uid(), t: 'scene', x: '' }], sceneMeta: {}, comments: [], drafts: [], checks: {}, updated: Date.now() };
+    const ep = { id: C.uid(), season, number: same.length ? Math.max(...same.map((e) => e.number)) + 1 : 1, title: title || '', blocks: blocks || [{ id: C.uid(), t: 'scene', x: '' }], sceneMeta: {}, comments: [], drafts: [], checks: {}, updated: Date.now(), textAt: Date.now() };
     p.episodes.push(ep); sortEpisodes(p); return ep;
   }
   function openEpisode(id) {
     const ep = P().episodes.find((e) => e.id === id) || P().episodes[0];
     if (S.ep && S.ep !== ep && (S.ep.updated || 0) > (S.ep.histAt || 0)) histAdd(S.ep, 'при переключении серии');
-    S.ep = ep; S.db.currentEpId = ep.id; S.undo = []; S.redo = []; S.activeComment = null;
+    S.ep = ep; S.db.currentEpId = ep.id; S.undo = []; S.redo = []; S.activeComment = null; S.textSig = null;
     renderEditor(); recompute(true); renderEpisodes(); persist();
   }
   function openProject(id) {
@@ -209,13 +259,25 @@
   }
   const NEXT = { scene: 'action', action: 'action', character: 'dialogue', paren: 'dialogue', dialogue: 'action', transition: 'scene' };
   const EMPTY_ENTER = { action: 'scene', dialogue: 'action', character: 'action', paren: 'dialogue', scene: 'action', transition: 'scene' };
+  // deletes the selection and joins its first and last elements, as a word processor does; the caret stays at the join
+  function deleteSelection() {
+    const sel = window.getSelection(); if (!sel.rangeCount || sel.isCollapsed) return;
+    const blk = (n) => { while (n && n !== ed) { if (n.nodeType === 1 && n.classList.contains('b')) return n; n = n.parentNode; } return null; };
+    const r = sel.getRangeAt(0), a = blk(r.startContainer), z = blk(r.endContainer);
+    r.deleteContents();
+    if (!a) return;
+    if (z && z !== a) { const off = a.textContent.length; a.textContent += z.textContent; z.remove(); setCaret(a.dataset.id, off); }
+    if (!a.textContent) { a.innerHTML = '<br>'; setCaret(a.dataset.id, 0); }
+  }
   function onEnter() {
+    const sel = window.getSelection(), wasSel = sel.rangeCount && !sel.isCollapsed;
+    // Enter over a selection replaces it with a split at the join, so the tail takes the first element's type
+    if (wasSel) { pushUndo(); deleteSelection(); }
     const el = curBlockEl(); if (!el) return;
     const t = el.dataset.t;
     const text = el.textContent;
-    if (!text.trim() || (t === 'paren' && text.trim() === '()')) { el.textContent = ''; setType(el, EMPTY_ENTER[t]); return; }
-    pushUndo();
-    const sel = window.getSelection(); if (!sel.isCollapsed) sel.deleteFromDocument();
+    if (!wasSel && (!text.trim() || (t === 'paren' && text.trim() === '()'))) { el.textContent = ''; setType(el, EMPTY_ENTER[t]); return; }
+    if (!wasSel) pushUndo();
     const off = caretOffset(el);
     const full = el.textContent;
     if (off === 0) { const id = C.uid(); el.insertAdjacentHTML('beforebegin', blockHTML({ id, t, x: '' })); scheduleRecompute(); return; }
@@ -268,9 +330,11 @@
     if (Date.now() - lastEdit > 900 || /delete/.test(e.inputType) && !window.getSelection().isCollapsed) pushUndo();
     lastEdit = Date.now();
   });
-  ed.addEventListener('input', () => {
+  ed.addEventListener('input', (e) => {
     normalizeDom();
     const el = curBlockEl();
+    // Chrome's own join of two elements wraps the moved text in style spans (caps, white-space): the element keeps plain text only
+    if (el && !e.isComposing && el.querySelector('*:not(br)')) { const off = caretOffset(el), txt = el.textContent; if (txt) el.textContent = txt; else el.innerHTML = '<br>'; setCaret(el.dataset.id, off); }
     if (el && el.dataset.t === 'action' && /^(ИНТ|НАТ|ПАВ)[.\s]/i.test(el.textContent) && el.textContent.length < 8) { el.dataset.t = 'scene'; el.className = 'b t-scene'; $('#elemSelect').value = 'scene'; }
     scheduleRecompute(); acUpdate();
   });
@@ -279,7 +343,9 @@
     if (!$('#ac').hidden) {
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); acMove(e.key === 'ArrowDown' ? 1 : -1); return; }
       if (e.key === 'Escape') { e.preventDefault(); acHide(); return; }
-      if (e.key === 'Tab' || e.key === 'Enter') {
+      // on an empty element (or with Shift+Tab) Tab and Enter cycle element types, as in Final Draft, instead of inserting the first suggestion
+      if ((e.key === 'Tab' || e.key === 'Enter') && (e.shiftKey || !(AC.el && AC.el.textContent.trim()))) acHide();
+      else if (e.key === 'Tab' || e.key === 'Enter') {
         const acceptedEnter = e.key === 'Enter' && AC.ctx === 'character';
         if (acAccept()) { e.preventDefault(); if (acceptedEnter) onEnter(); return; }
       }
@@ -287,10 +353,11 @@
     if (e.key === 'Enter') { e.preventDefault(); acHide(); onEnter(); return; }
     if (e.key === 'Tab') { e.preventDefault(); onTab(e.shiftKey); return; }
     if (mod && !e.altKey && /^[1-6]$/.test(e.key)) { e.preventDefault(); setType(curBlockEl(), C.TYPES[+e.key - 1]); return; }
-    if (mod && (e.key === 'z' || e.key === 'я') && !e.shiftKey) { e.preventDefault(); undo(); return; }
-    if (mod && ((e.key === 'z' || e.key === 'я') && e.shiftKey || e.key === 'y' || e.key === 'н')) { e.preventDefault(); redo(); return; }
+    // with Shift held e.key is 'Z'/'Я', and on a non-Latin layout other than Russian the physical key decides
+    const kz = e.code === 'KeyZ' && !/^[a-z]$/i.test(e.key) || /^[zя]$/i.test(e.key), ky = e.code === 'KeyY' && !/^[a-z]$/i.test(e.key) || /^[yн]$/i.test(e.key);
+    if (mod && kz && !e.shiftKey) { e.preventDefault(); undo(); return; }
+    if (mod && (kz && e.shiftKey || ky)) { e.preventDefault(); redo(); return; }
     if (mod && e.altKey && (e.code === 'KeyM')) { e.preventDefault(); startComment(); return; }
-    if (mod && (e.key === 's' || e.key === 'ы')) { e.preventDefault(); recompute(); DB.put('db', S.db).then(() => toast('Сохранено на этом компьютере')); }
   });
   ed.addEventListener('paste', (e) => {
     e.preventDefault();
@@ -302,11 +369,16 @@
     const fin = C.finalizeImport(C.importText(text), P());
     const blocks = fin.blocks, rep = fin.report;
     Object.assign(S.ep.sceneMeta, fin.sceneMeta);
-    const el = curBlockEl();
-    let anchor = el;
-    if (el && !el.textContent.trim()) { el.insertAdjacentHTML('afterend', blocks.map(blockHTML).join('')); anchor = el.nextSibling; el.remove(); }
-    else if (el) el.insertAdjacentHTML('afterend', blocks.map(blockHTML).join(''));
-    else ed.insertAdjacentHTML('beforeend', blocks.map(blockHTML).join(''));
+    // the pasted elements replace the selection and go in at the caret: the element is split there, like typing would
+    if (!window.getSelection().isCollapsed) deleteSelection();
+    const el = curBlockEl(), html = blocks.map(blockHTML).join('');
+    if (!el) ed.insertAdjacentHTML('beforeend', html);
+    else {
+      const full = el.textContent, off = caretOffset(el), before = full.slice(0, off), after = full.slice(off).replace(/^\s+/, '');
+      if (!before.trim() && !after.trim()) { el.insertAdjacentHTML('afterend', html); el.remove(); }
+      else if (!before.trim()) { el.insertAdjacentHTML('beforebegin', html); el.textContent = after; }
+      else { el.textContent = before; el.insertAdjacentHTML('afterend', html + (after.trim() ? blockHTML({ id: C.uid(), t: el.dataset.t, x: after }) : '')); }
+    }
     const last = blocks[blocks.length - 1]; if (last) setCaret(last.id, last.x.length);
     if (rep.newChars.length || rep.newLocs.length) toast('Вставлено ' + blocks.length + ' элементов. Новые персонажи: ' + rep.newChars.length + ', объекты: ' + rep.newLocs.length);
     recompute();
@@ -358,10 +430,13 @@
         const part = U.slice(U.lastIndexOf('('));
         items = C.EXTENSIONS.filter((x) => x.startsWith(part)).map((x) => ({ label: x, value: U.slice(0, U.lastIndexOf('(')).trimEnd() + ' ' + x }));
         hint = 'Расширение имени';
-      } else if (q) {
-        const dc = dictChars();
-        items = Object.keys(dc).filter((n) => startsWord(n, q) && n !== q).sort((a, b) => dc[b] - dc[a] || a.localeCompare(b)).slice(0, 8)
-          .map((n) => ({ label: n, value: n, note: dc[n] ? dc[n] + ' репл.' : 'из библии' }));
+      } else if (q && !/\(/.test(U)) {
+        // a cue that already has an extension is finished: no name list, so Enter never rewrites «ИВАН (ЗК)»
+        const dc = dictChars(), rest = C.up(text.slice(off)), keep = /^\s*\(/.test(rest) ? rest : '';
+        const names = Object.keys(dc).filter((n) => startsWord(n, q) && n !== q).sort((a, b) => dc[b] - dc[a] || a.localeCompare(b)).slice(0, 8);
+        // an exact existing name stays first, so Enter keeps «ИВАН» rather than «ИВАН ПЕТРОВИЧ» (the cue being typed does not count)
+        if (names.length && (q in (P().chars || {}) || (dc[q] || 0) > (C.charName(C.up(text)) === q ? 1 : 0))) names.unshift(q);
+        items = names.map((n) => ({ label: n, value: n + keep, note: dc[n] ? dc[n] + ' репл.' : 'из библии' }));
         hint = 'Tab или Enter — выбрать';
       }
     } else if (t === 'scene') {
@@ -423,12 +498,18 @@
   const scheduleRecompute = debounce(() => recompute(), 250);
   function recompute(full) {
     if (!S.ep) return;
-    S.ep.blocks = readBlocks();
+    const nb = readBlocks(), sig = JSON.stringify(nb);
+    // 'updated' moves on every recompute; textAt only when the words change, so merging two copies can tell which text is newer
+    if (S.textSig && S.textSig.id === S.ep.id && S.textSig.sig !== sig) S.ep.textAt = Date.now();
+    S.textSig = { id: S.ep.id, sig };
+    S.ep.blocks = nb;
     S.ep.updated = Date.now();
     S.st = C.analyzeEpisode(S.ep, P());
     // under a numbering lock every new scene gets its A-number at once, so it never shifts the others
     // a lock with no frozen number on any scene is stale state (it would renumber everything 1, 1A, 1B…): leave it alone
     if (S.ep.lock && S.st.scenes.some((s) => s.fileNum) && C.lockAssign(S.st.scenes, S.ep.sceneMeta).length) S.st = C.analyzeEpisode(S.ep, P());
+    // the open episode's text changed: its cached analysis is stale for the episode list and the bible once it is left
+    delete S.ep._st;
     S.rulesRes = C.evalRules(S.ep, P(), S.st, seasonContext());
     decorateEditor();
     if (S.zoom && S.zoom !== 1) sizePage();
@@ -459,6 +540,23 @@
       const om = el.dataset.t === 'scene' && !!(S.ep.sceneMeta[el.dataset.id] || {}).omitted;
       if (om !== el.classList.contains('omit')) el.classList.toggle('omit', om);
     });
+    // a page that ends inside a block: a dashed line under the line where it ends, outside the editable text
+    const pg = $('#page');
+    pg.querySelectorAll(':scope > .pbin').forEach((m) => m.remove());
+    const inner = S.st.lay.inner || {};
+    for (const k of Object.keys(inner)) {
+      const el = els[k];
+      if (!el) continue;
+      const lh = parseFloat(getComputedStyle(el).lineHeight) || 16;
+      // measured from the block's bottom, so a 'стр. N' label above the block does not shift it
+      const top = el.offsetTop + el.offsetHeight - S.st.lay.info[k].L * lh;
+      for (const b of inner[k]) {
+        const m = document.createElement('div');
+        m.className = 'pbin'; m.setAttribute('aria-hidden', 'true'); m.dataset.page = b.page;
+        m.textContent = 'стр. ' + b.page; m.style.top = (top + b.line * lh) + 'px';
+        pg.appendChild(m);
+      }
+    }
   }
   function renderRuler() {
     const st = S.st;
@@ -520,7 +618,7 @@
         closeModal(); recompute();
         const ep = S.ep;
         await histAdd(ep, 'перед удалением', true);
-        await trashEpisode(p, ep);
+        if (!(await trashEpisode(p, ep))) { toast('Серия не удалена: не удалось положить её в корзину (нет места в браузере или Драфт изменён в другой вкладке).'); return; }
         p.episodes = p.episodes.filter((e) => e !== ep);
         if (!p.episodes.length) newEpisode(p, 1, '');
         S.ep = null; openEpisode(p.episodes[0].id); toast('Серия в корзине: ' + TRASH_DAYS + ' дней её можно вернуть');
@@ -528,17 +626,18 @@
     });
   }
   function projectModal() {
+    if (readOnly('Изменение проекта')) return;
     const p = P();
     modal('<h2>Проект</h2><div class="form-grid"><label>Название<input type="text" id="pmName" value="' + esc(p.name) + '"></label><label>Автор (титульный лист)<input type="text" id="pmAuthor" value="' + esc(p.author || '') + '"></label></div>' +
       '<p class="note">Серий: ' + p.episodes.length + ' · персонажей в справочнике: ' + Object.keys(p.chars || {}).length + ' · объектов: ' + Object.keys(p.locs || {}).length + '. Правила студии и линии — в «Настройках».</p>' +
       '<div class="actions">' + (canDelete() ? '<button class="btn danger" id="pmDel">Удалить проект</button>' : '<span class="small muted">Удалить проект может только продюсер</span>') + '<button class="btn" id="pmC">Отмена</button><button class="btn primary" id="pmOk">Сохранить</button></div>', (m) => {
       $('#pmC', m).onclick = closeModal;
-      $('#pmOk', m).onclick = () => { p.name = $('#pmName', m).value.trim() || p.name; p.author = $('#pmAuthor', m).value.trim(); closeModal(); renderProjectSelect(); renderEpisodes(); persist(); };
+      $('#pmOk', m).onclick = () => { if (readOnly('Изменение проекта')) return; p.name = $('#pmName', m).value.trim() || p.name; p.author = $('#pmAuthor', m).value.trim(); closeModal(); renderProjectSelect(); renderEpisodes(); persist(); };
       if ($('#pmDel', m)) $('#pmDel', m).onclick = () => {
         $('#pmDel', m).outerHTML = '<span class="small">Проект «' + esc(p.name) + '» со всеми сериями уйдёт в корзину на ' + TRASH_DAYS + ' дней.</span> <button class="btn danger" id="pmDel2">Да, в корзину</button>';
         $('#pmDel2', m).onclick = async () => {
           closeModal(); recompute();
-          await trashProject(p);
+          if (!(await trashProject(p))) { toast('Проект не удалён: не удалось положить его в корзину (нет места в браузере или Драфт изменён в другой вкладке).'); return; }
           S.ep = null;
           S.db.projects = S.db.projects.filter((x) => x !== p);
           if (!S.db.projects.length) { const np = { id: C.uid(), name: 'Новый сериал', author: '', rules: Object.assign({}, C.DEFAULT_RULES), chars: {}, locs: {}, relations: [], episodes: [], created: Date.now() }; newEpisode(np, 1, ''); S.db.projects.push(np); }
@@ -785,7 +884,8 @@
             // "ТРЕШКА ЗАЛ" -> "ТРЕШКА. ЗАЛ": the remainder becomes the sub-object
             const rest = from.startsWith(to + ' ') ? from.slice(to.length + 1) : '';
             h.object = to; if (rest) h.sub = rest + (h.sub ? '. ' + h.sub : '');
-            b.x = C.formatHeading(h);
+            // formatHeading drops a typed number and script day: keep them in the heading text
+            b.x = (h.num ? h.num + '. ' : '') + C.formatHeading(h) + (h.day ? ' ' + h.day : '');
           }
         }
         if (kind === 'char' && b.t === 'character' && C.charName(b.x) === from) b.x = C.up(b.x).replace(from, to);
@@ -800,10 +900,16 @@
 
   // ---------- comments ----------
   function startComment() {
+    if (readOnly('Комментарий')) return;
     const sel = window.getSelection();
     const el = curBlockEl();
     if (!el || sel.isCollapsed) { toast('Выделите фрагмент текста, к которому нужен комментарий.'); return; }
-    const quote = sel.toString().replace(/\s+/g, ' ').trim().slice(0, 200);
+    // a comment is anchored to one element: a selection that runs into the next ones is clipped to it, so the quote is found there
+    const r0 = sel.getRangeAt(0).cloneRange();
+    if (!el.contains(r0.startContainer)) r0.setStart(el, 0);
+    if (!el.contains(r0.endContainer)) r0.setEnd(el, el.childNodes.length);
+    const quote = r0.toString().replace(/\s+/g, ' ').trim().slice(0, 200);
+    if (!quote) { toast('Выделите фрагмент текста, к которому нужен комментарий.'); return; }
     const blockId = el.dataset.id;
     modal('<h2>Комментарий</h2><div class="cm"><div class="q">' + esc(quote) + '</div></div><textarea id="cmText" rows="4" placeholder="Что поправить и почему"></textarea>' +
       '<div class="row small muted">Автор: <b>' + esc(S.me.name) + '</b> <span class="role-badge' + (S.me.role === 'producer' ? ' prod' : '') + '">' + roleName(S.me.role) + '</span> · сменить в «Настройках»</div>' +
@@ -819,16 +925,25 @@
     });
   }
   const roleName = (r) => ({ producer: 'Продюсер', editor: 'Редактор', writer: 'Сценарист', reader: 'Читатель' }[r] || 'Сценарист');
-  const canEdit = () => S.me.role === 'writer' || S.me.role === 'editor';
+  const canEdit = () => !TAB.stale && (S.me.role === 'writer' || S.me.role === 'editor');
   const canLock = () => S.me.role === 'producer' || S.me.role === 'editor';
   // a reader only reads and prints a watermarked PDF: every path that changes the project checks this
-  const readOnly = (what) => { if (S.me.role !== 'reader') return false; toast('Роль «Читатель»: только чтение' + (what ? '. ' + what + ' недоступно' : '')); return true; };
+  const readOnly = (what) => { if (TAB.stale) { toast('Драфт изменён в другой вкладке: здесь только чтение. Обновите страницу.'); return true; } if (S.me.role !== 'reader') return false; toast('Роль «Читатель»: только чтение' + (what ? '. ' + what + ' недоступно' : '')); return true; };
   function renderComments() {
     const marks = $('#cmarks'); marks.innerHTML = '';
     const ranges = [], active = [];
     const used = [];
+    let all = null;
     for (const c of S.ep.comments || []) {
-      const el = ed.querySelector('[data-id="' + c.blockId + '"]');
+      let el = ed.querySelector('[data-id="' + c.blockId + '"]');
+      // joining or splitting elements moves the quoted text to another element: follow it, nearest to the old place first
+      if ((!el || el.textContent.indexOf(c.quote) < 0) && c.quote) {
+        all = all || [...ed.querySelectorAll('.b[data-id]')];
+        const start = Math.max(0, Math.min(el ? all.indexOf(el) : blockIndex(c.blockId), all.length - 1));
+        let hit = null;
+        for (let d = 0; d < all.length && !hit; d++) for (const k of d ? [start - d, start + d] : [start]) if (all[k] && all[k].textContent.indexOf(c.quote) >= 0) { hit = all[k]; break; }
+        if (hit) { el = hit; c.blockId = hit.dataset.id; }
+      }
       c.lost = !el;
       if (!el) continue;
       const i = el.textContent.indexOf(c.quote);
@@ -861,20 +976,40 @@
         (c.replies || []).map((r) => '<div class="reply"><div class="who"><b>' + esc(r.author) + '</b> <span class="role-badge' + (r.role === 'producer' ? ' prod' : '') + '">' + roleName(r.role) + '</span> · ' + fmtDate(r.date) + '</div><div class="txt">' + esc(r.text) + '</div></div>').join('') +
         '<div class="row"><input type="text" class="grow" placeholder="Ответить…" data-reply="' + c.id + '"><button class="btn small" data-res="' + c.id + '">' + (c.resolved ? 'Открыть' : 'Решено') + '</button><button class="btn small ghost danger" data-del="' + c.id + '" title="Удалить">×</button></div></div>').join('')
         : '<p class="note">Выделите фрагмент в тексте и нажмите «Комментарий» (Ctrl+Alt+M). Комментарий не меняет текст сценария: фрагмент подсвечивается, а на полях появляется метка.</p>') +
+      ((S.ep.deletedComments || []).length ? '<div class="row"><button class="btn small ghost" id="cmDeleted">Удалённые (' + S.ep.deletedComments.length + ')</button></div>' +
+        (S.cmDeletedOpen ? S.ep.deletedComments.map((c) => '<div class="cm resolved"><div class="who"><b>' + esc(c.author) + '</b> <span class="role-badge' + (c.role === 'producer' ? ' prod' : '') + '">' + roleName(c.role) + '</span> · удалил ' + esc(c.deletedBy || '') + ' ' + fmtDate(c.deleted) + '</div><div class="q">' + esc(c.quote) + '</div><div class="txt">' + esc(c.text) + '</div><div class="row"><button class="btn small" data-undel="' + c.id + '">Вернуть</button></div></div>').join('') : '') : '') +
       '<p class="note">Чтобы передать замечания: «Экспорт → Файл проекта». Сценарист открывает файл, и комментарии продюсера встают на свои места.</p>';
     $('#cmNew', pane).onclick = startComment;
-    $$('.cm', pane).forEach((x) => x.addEventListener('click', (e) => {
+    $$('.cm[data-c]', pane).forEach((x) => x.addEventListener('click', (e) => {
       if (e.target.closest('input,button')) return;
       const c = S.ep.comments.find((k) => k.id === x.dataset.c); S.activeComment = c.id; renderComments(); $$('.cm', pane).forEach((y) => y.classList.toggle('active', y === x));
       jumpTo(c.blockId, false);
     }));
     $$('[data-reply]', pane).forEach((inp) => inp.onkeydown = (e) => {
       if (e.key !== 'Enter' || !inp.value.trim()) return;
+      if (readOnly('Ответ на замечание')) return;
       const c = S.ep.comments.find((k) => k.id === inp.dataset.reply);
       c.replies.push({ author: S.me.name, role: S.me.role, text: inp.value.trim(), date: Date.now() }); inp.blur(); renderCommentList(pane); renderComments(); persist();
     });
     $$('[data-res]', pane).forEach((b) => b.onclick = () => { if (readOnly()) return; const c = S.ep.comments.find((k) => k.id === b.dataset.res); c.resolved = !c.resolved; renderCommentList(pane); renderComments(); persist(); });
-    $$('[data-del]', pane).forEach((b) => b.onclick = () => { if (readOnly('Удаление замечания')) return; S.ep.comments = S.ep.comments.filter((k) => k.id !== b.dataset.del); renderCommentList(pane); renderComments(); persist(); });
+    // only the author or a producer removes a remark, and it goes to the 'deleted' list, where anyone can put it back
+    $$('[data-del]', pane).forEach((b) => b.onclick = () => {
+      if (readOnly('Удаление замечания')) return;
+      const c = S.ep.comments.find((k) => k.id === b.dataset.del); if (!c) return;
+      if (!canDelete() && !(c.author === S.me.name && c.role !== 'producer')) return needProducer('Замечание удаляет только его автор (' + c.author + ') или продюсер. Если оно учтено, отметьте его «Решено».');
+      S.ep.comments = S.ep.comments.filter((k) => k !== c);
+      (S.ep.deletedComments = S.ep.deletedComments || []).push(Object.assign(c, { deleted: Date.now(), deletedBy: S.me.name }));
+      renderCommentList(pane); renderComments(); persist();
+      toast('Замечание удалено. Вернуть его можно в списке «Удалённые» под замечаниями.');
+    });
+    if ($('#cmDeleted', pane)) $('#cmDeleted', pane).onclick = () => { S.cmDeletedOpen = !S.cmDeletedOpen; renderCommentList(pane); };
+    $$('[data-undel]', pane).forEach((b) => b.onclick = () => {
+      if (readOnly('Возврат замечания')) return;
+      const c = (S.ep.deletedComments || []).find((k) => k.id === b.dataset.undel); if (!c) return;
+      S.ep.deletedComments = S.ep.deletedComments.filter((k) => k !== c);
+      delete c.deleted; delete c.deletedBy; S.ep.comments.push(c);
+      renderCommentList(pane); renderComments(); persist(); toast('Замечание возвращено');
+    });
   }
   const blockIndex = (id) => { const i = S.ep.blocks.findIndex((b) => b.id === id); return i < 0 ? 1e9 : i; };
   $('#btnComment').onclick = startComment;
@@ -909,7 +1044,7 @@
         const rel = (P().relations || []).filter((r) => r.a === n || r.b === n);
         return '<div class="chr"><div class="row between"><span class="nm">' + esc(n) + '</span><span class="small muted mono">' + (s ? s.scenes + ' сц · ' + C.fmtTime(s.min) : 'нет в тексте') + '</span></div>' +
           (c.desc ? '<div class="small">' + esc(c.desc) + (c.age ? ', ' + esc(c.age) : '') + '</div>' : '') +
-          (s ? '<div class="small muted">Впервые: серия ' + s.first.ep.number + ', сц. ' + s.first.s.n + ' · серии: ' + [...s.episodes].join(', ') + ' · реплик ' + s.replicas + ', слов ' + s.words + '</div>' : '') +
+          (s ? '<div class="small muted">Впервые: серия ' + s.first.ep.number + ', сц. ' + esc(s.first.s.num) + ' · серии: ' + [...s.episodes].join(', ') + ' · реплик ' + s.replicas + ', слов ' + s.words + '</div>' : '') +
           (partners.length ? '<div class="small muted">Чаще всего с: ' + partners.map(([k, v]) => esc(k) + ' (' + v + ')').join(', ') + '</div>' : '') +
           (rel.length ? '<div class="small">' + rel.map((r) => esc(r.a === n ? r.b : r.a) + ' — ' + esc(r.label)).join('; ') + '</div>' : '') +
           (objs.length ? '<div class="small muted">Где бывает: ' + objs.map(([k]) => esc(k)).join(', ') + '</div>' : '') +
@@ -1058,14 +1193,15 @@
   function setLock(ep, sn) { if (!sn || !('lock' in sn)) return; if (sn.lock) ep.lock = JSON.parse(JSON.stringify(sn.lock)); else delete ep.lock; }
   async function histAdd(ep, reason, keep) {
     if (!ep) return null;
-    if (ep === S.ep && S.ep.blocks) { /* S.ep.blocks is refreshed by recompute on every edit */ }
-    const list = await histLoad(ep);
-    const last = list[list.length - 1];
+    // the state is copied before the first await: callers change the episode right after calling histAdd
     const copy = epCopy(ep);
     const sig = JSON.stringify(copy);
-    if (last && last.sig === sig) { ep.histAt = Date.now(); return last; }
     const st = ep === S.ep && S.st ? S.st : C.analyzeEpisode(ep, P());
-    const h = { id: C.uid(), date: Date.now(), author: S.me.name, reason: reason || 'автоснимок', keep: !!keep, pages: st.pages, scenes: st.scenes.length, sig, blocks: copy.blocks, sceneMeta: copy.sceneMeta, lock: copy.lock };
+    const pages = st.pages, scenes = st.scenes.length;
+    const list = await histLoad(ep);
+    const last = list[list.length - 1];
+    if (last && last.sig === sig) { ep.histAt = Date.now(); return last; }
+    const h = { id: C.uid(), date: Date.now(), author: S.me.name, reason: reason || 'автоснимок', keep: !!keep, pages, scenes, sig, blocks: copy.blocks, sceneMeta: copy.sceneMeta, lock: copy.lock };
     list.push(h);
     S.hist[ep.id] = C.thinHistory(list);
     ep.histAt = h.date;
@@ -1078,7 +1214,102 @@
     if ((ep.updated || 0) > (ep.histAt || 0) && Date.now() - (ep.histAt || 0) >= SNAP_EVERY) histAdd(ep, 'автоснимок');
   }
   setInterval(autoSnap, 60e3);
-  document.addEventListener('visibilitychange', () => { if (document.hidden && S.ep && (S.ep.updated || 0) > (S.ep.histAt || 0)) { recompute(); histAdd(S.ep, 'автоснимок'); } });
+  // leaving the page: the debounced save would never run, so write at once; the localStorage copy is the only write
+  // sure to land during unload, and boot() puts it back if the database missed it
+  function saveNow() {
+    if (!S.ep || !S.db) return;
+    scheduleRecompute.cancel(); recompute(); persist.cancel();
+    // a stale tab cannot edit, and rescueTab already set aside what it had not saved
+    if (TAB.stale) return;
+    const pend = { tab: TAB.id, at: Date.now(), epId: S.ep.id, blocks: S.ep.blocks, sceneMeta: S.ep.sceneMeta || {}, lock: S.ep.lock || null, textAt: S.ep.textAt || 0, updated: S.ep.updated };
+    ls.set('draft.pending', pend);
+    DB.put('db', S.db).then((ok) => { saved(ok); if (ok && (ls.get('draft.pending', null) || {}).at === pend.at) try { localStorage.removeItem('draft.pending'); } catch (e) { /* ignore */ } });
+  }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden || !S.ep) return; saveNow(); if (!TAB.stale && (S.ep.updated || 0) > (S.ep.histAt || 0)) histAdd(S.ep, 'автоснимок'); });
+  window.addEventListener('pagehide', saveNow);
+  // text that would otherwise be dropped is kept as a named draft of its episode (the same text only once)
+  function keepDraft(ep, name, src) {
+    const c = epCopy(src), sig = JSON.stringify(c.blocks);
+    ep.drafts = ep.drafts || [];
+    if (ep.drafts.some((d) => JSON.stringify(d.blocks) === sig)) return false;
+    let st = { pages: 0, scenes: [] };
+    try { const p = S.db.projects.find((x) => x.episodes.includes(ep)) || P(); st = C.analyzeEpisode({ ...ep, blocks: c.blocks, sceneMeta: c.sceneMeta }, { ...p, rules: Object.assign({}, C.DEFAULT_RULES, p.rules || {}) }); } catch (e) { /* the counts are cosmetic */ }
+    ep.drafts.push({ id: C.uid(), name: name + ' ' + fmtDate(Date.now()), date: Date.now(), author: S.me.name, ...c, pages: st.pages, scenes: st.scenes.length });
+    return true;
+  }
+  // what this tab has not saved yet: episodes whose text changed since its last save, and new comments
+  async function unsavedItems() {
+    if (S.ep) { scheduleRecompute.cancel(); recompute(); }
+    const since = TAB.savedAt || 0;
+    const cur = (await DB.get('db')) || { projects: [] };
+    const curEp = {}; (cur.projects || []).forEach((p) => (p.episodes || []).forEach((e) => { curEp[e.id] = e; }));
+    const items = [];
+    for (const p of S.db.projects) for (const e of p.episodes) {
+      const o = curEp[e.id];
+      const text = (e.textAt || 0) > since && (!o || JSON.stringify(o.blocks) !== JSON.stringify(e.blocks));
+      const cms = (e.comments || []).filter((c) => (c.date || 0) > since || (c.replies || []).some((x) => (x.date || 0) > since));
+      if (text || cms.length) items.push({ at: Date.now(), projectId: p.id, projectName: p.name, ep: JSON.parse(JSON.stringify({ ...e, drafts: [], _st: undefined, comments: cms })), text });
+    }
+    return items;
+  }
+  // nothing unsaved here: load what the other tab stored and carry on editing it (same episode, caret kept)
+  async function adoptNewer() {
+    if ((await unsavedItems()).length) return false;
+    const rev = (await DB.get('rev')) || { n: 0 };
+    const db = await DB.get('db');
+    if (!db || !db.projects || !db.projects.length) return false;
+    db.projects.forEach((p) => (p.episodes || []).forEach((e) => delete e._st));
+    const epId = S.ep && S.ep.id, caret = document.activeElement === ed ? getCaret() : null;
+    TAB.rev = TAB.last = rev.n || 0; TAB.savedAt = Date.now();
+    S.db = db; S.ep = null;
+    if (epId && db.projects.some((p) => (p.episodes || []).some((e) => e.id === epId))) db.currentEpId = epId;
+    await trashLoad();
+    openProject(db.currentProjectId);
+    // adopting is not an edit: writing it back would bounce ownership between the tabs
+    persist.cancel();
+    if (caret) setCaret(caret.id, caret.off);
+    return true;
+  }
+  // a stale tab sets aside what it has not saved
+  async function rescueTab() {
+    const items = await unsavedItems();
+    if (!items.length) return;
+    ls.set('draft.rescue.' + TAB.id, items);
+    const all = (await DB.get('rescue')) || [];
+    if (await DB.put('rescue', all.concat(items))) try { localStorage.removeItem('draft.rescue.' + TAB.id); } catch (e) { /* ignore */ }
+  }
+  // boot: put back what an unloading or stale tab set aside
+  function restoreAside(db, rev, rescue) {
+    let n = 0;
+    const find = (id) => { for (const p of db.projects) { const e = (p.episodes || []).find((x) => x.id === id); if (e) return { p, e }; } return null; };
+    const pend = ls.get('draft.pending', null);
+    if (pend && pend.epId && pend.blocks) {
+      const f = find(pend.epId);
+      if (f && JSON.stringify(f.e.blocks) !== JSON.stringify(pend.blocks)) {
+        // the same tab wrote last and its unload copy is newer: that is just the tail the database missed
+        if (rev.tab === pend.tab && (pend.textAt || 0) >= (f.e.textAt || 0)) { f.e.blocks = pend.blocks; f.e.sceneMeta = pend.sceneMeta || {}; if ('lock' in pend) { if (pend.lock) f.e.lock = pend.lock; else delete f.e.lock; } f.e.textAt = pend.textAt; f.e.updated = Math.max(f.e.updated || 0, pend.updated || 0); }
+        else if (rev.tab !== pend.tab && keepDraft(f.e, 'Несохранённое из другой вкладки', pend)) n++;
+      }
+    }
+    const list = (rescue || []).slice();
+    try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && k.startsWith('draft.rescue.')) list.push(...(ls.get(k, []) || [])); } } catch (e) { /* storage blocked */ }
+    for (const it of list) {
+      const e2 = it.ep; if (!e2 || !e2.id) continue;
+      let f = find(e2.id);
+      if (!f) {
+        let p = db.projects.find((x) => x.id === it.projectId);
+        if (!p) { p = { id: it.projectId, name: it.projectName || 'Восстановленный проект', author: '', rules: Object.assign({}, C.DEFAULT_RULES), chars: {}, locs: {}, relations: [], episodes: [], created: Date.now() }; db.projects.push(p); }
+        p.episodes.push(Object.assign(e2, { drafts: [], comments: e2.comments || [] })); sortEpisodes(p); n++; continue;
+      }
+      if (it.text && JSON.stringify(f.e.blocks) !== JSON.stringify(e2.blocks) && keepDraft(f.e, 'Из другой вкладки', e2)) n++;
+      for (const c of e2.comments || []) {
+        if ((f.e.deletedComments || []).some((x) => x.id === c.id)) continue;
+        const c1 = (f.e.comments = f.e.comments || []).find((x) => x.id === c.id);
+        if (!c1) { f.e.comments.push(c); n++; } else for (const x of c.replies || []) if (!c1.replies.some((y) => y.date === x.date && y.text === x.text)) { c1.replies.push(x); n++; }
+      }
+    }
+    return n;
+  }
 
   function sceneLabel(b, i) { const h = C.parseHeading(b.x || ''); return (h.num ? h.num + '. ' : (i + 1) + '. ') + C.up(C.formatHeading(h) || b.x || '(без заголовка)'); }
   async function showHistory(openId) {
@@ -1137,13 +1368,16 @@
     const hist = await histLoad(ep);
     S.trash.items.unshift({ id: C.uid(), kind: 'episode', deleted: Date.now(), by: S.me.name, projectId: p.id, projectName: p.name, label: 'С' + ep.season + 'Е' + ep.number + (ep.title ? ' «' + ep.title + '»' : ''), data: JSON.parse(JSON.stringify(ep, (k, v) => (k === '_st' ? undefined : v))), hist: { [ep.id]: hist } });
     delete S.hist[ep.id];
-    await trashSave();
+    // without a trash copy the episode must not go away
+    if (await trashSave()) return true;
+    S.trash.items.shift(); S.hist[ep.id] = hist; return false;
   }
   async function trashProject(p) {
     const hist = {};
     for (const ep of p.episodes) { hist[ep.id] = await histLoad(ep); delete S.hist[ep.id]; }
     S.trash.items.unshift({ id: C.uid(), kind: 'project', deleted: Date.now(), by: S.me.name, projectId: p.id, projectName: p.name, label: 'Проект «' + p.name + '», серий: ' + p.episodes.length, data: stripCache(p), hist });
-    await trashSave();
+    if (await trashSave()) return true;
+    S.trash.items.shift(); Object.assign(S.hist, hist); return false;
   }
   async function trashRestore(item) {
     for (const [id, list] of Object.entries(item.hist || {})) { S.hist[id] = list; await DB.put('hist:' + id, list); }
@@ -1275,18 +1509,26 @@
       if (!proj.episodes) throw new Error('Это не файл проекта Драфта.');
       const ex = S.db.projects.find((p) => p.id === proj.id);
       if (ex) {
-        // merge: keep local text, add comments and drafts that are new
-        let added = 0;
+        // merge: add comments and drafts that are new; the text is taken only from a copy whose words changed later,
+        // and the local text is kept as a draft first
+        if (S.ep) recompute();
+        let added = 0, replaced = 0;
         for (const e2 of proj.episodes) {
           const e1 = ex.episodes.find((e) => e.id === e2.id);
           if (!e1) { ex.episodes.push(e2); added++; continue; }
           for (const c of e2.comments || []) {
             const c1 = e1.comments.find((x) => x.id === c.id);
+            if (!c1 && (e1.deletedComments || []).some((x) => x.id === c.id)) continue;
             if (!c1) { e1.comments.push(c); added++; }
             else { for (const r of c.replies || []) if (!c1.replies.some((x) => x.date === r.date && x.text === r.text)) { c1.replies.push(r); added++; } c1.resolved = c1.resolved || c.resolved; }
           }
           for (const d of e2.drafts || []) if (!e1.drafts.some((x) => x.id === d.id)) { e1.drafts.push(d); added++; }
-          if ((e2.updated || 0) > (e1.updated || 0)) { e1.blocks = e2.blocks; e1.sceneMeta = e2.sceneMeta; e1.updated = e2.updated; }
+          // files from before textAt existed fall back to 'updated', which also moves when a copy is only opened
+          const newer = (e1.textAt || e2.textAt) ? (e2.textAt || 0) > (e1.textAt || 0) : (e2.updated || 0) > (e1.updated || 0);
+          if (newer && JSON.stringify(e1.blocks) !== JSON.stringify(e2.blocks)) {
+            keepDraft(e1, 'Авто: перед открытием файла проекта', e1);
+            e1.blocks = e2.blocks; e1.sceneMeta = e2.sceneMeta; e1.updated = e2.updated; e1.textAt = e2.textAt; replaced++;
+          }
           // the numbering lock is production state, not text: the newest lock or unlock event wins whichever text copy won
           const lockAt = (e) => Math.max(e.lock ? e.lock.at || 0 : 0, ...(e.lockLog || []).map((l) => l.at || 0), 0);
           if (lockAt(e2) > lockAt(e1)) {
@@ -1304,7 +1546,7 @@
         }
         if (proj.secret && !ex.secret) ex.secret = proj.secret;
         Object.assign(ex.chars, Object.assign({}, proj.chars, ex.chars)); Object.assign(ex.locs, Object.assign({}, proj.locs, ex.locs));
-        toast('Проект обновлён: добавлено ' + added + ' комментариев, ответов и драфтов');
+        toast('Проект обновлён: добавлено ' + added + ' комментариев, ответов и драфтов' + (replaced ? '; текст серий (' + replaced + ') заменён более новым из файла, прежний сохранён в драфтах' : ''));
         openProject(ex.id);
       } else { S.db.projects.push(proj); S.db.currentEpId = null; openProject(proj.id); toast('Проект «' + proj.name + '» открыт'); }
       persist();
@@ -1312,7 +1554,7 @@
   }
 
   // ---------- export ----------
-  $('#btnExport').onclick = (e) => { e.stopPropagation(); $('#exportMenu').hidden = !$('#exportMenu').hidden; };
+  $('#btnExport').onclick = (e) => { e.stopPropagation(); const show = $('#exportMenu').hidden; closeMenus(); $('#exportMenu').hidden = !show; if (show) clampMenu($('#exportMenu')); };
   document.addEventListener('click', () => { $('#exportMenu').hidden = true; });
   const fileBase = () => (P().name + ' С' + S.ep.season + 'Е' + String(S.ep.number).padStart(2, '0') + (S.ep.title ? ' ' + S.ep.title : '')).replace(/[\\/:*?"<>|«»]/g, '').trim();
   $$('[data-exp]').forEach((b) => b.onclick = async () => {
@@ -1323,7 +1565,7 @@
         $('#fxC', m).onclick = closeModal;
         $('#fxOk', m).onclick = () => { const x = C.exportFDX(S.ep, P(), S.st, { episodePrefix: $('#fxNum', m).checked }); closeModal(); saveFile(fileBase() + '.fdx', x, 'application/xml'); };
       });
-      if (k === 'fountain') saveFile(fileBase() + '.txt', C.exportFountain(S.ep, P()), 'text/plain');
+      if (k === 'fountain') saveFile(fileBase() + '.txt', C.exportFountain(S.ep, P(), S.st), 'text/plain');
       if (k === 'project') saveFile(P().name.replace(/[\\/:*?"<>|«»]/g, '') + '.json', JSON.stringify({ app: 'draft', version: 1, project: stripCache(P()) }, null, 1), 'application/json');
       if (k === 'openproject') { $('#fileInput').dataset.mode = 'project'; $('#fileInput').click(); }
       if (k === 'docx') {
@@ -1407,7 +1649,7 @@
         const f = F[it.t] || F.action;
         it.lines.forEach((tx, j) => {
           const y = base + (line + j) * 12;
-          if (f.right) doc.text(tx, (paper.w - paper.right) * 72, y, { align: 'right' });
+          if (f.right) doc.text(tx, C.rightEdge(f, paper) * 72, y, { align: 'right' });
           else doc.text(tx, f.indent * 72, y);
           if (j === 0 && it.t === 'scene' && sceneN[it.i] && !it.contd) { doc.text(String(sceneN[it.i]), (paper.left - 0.75) * 72, y); doc.text(String(sceneN[it.i]), Math.min(paper.w - paper.right + 0.3, paper.w - 0.35) * 72, y, { align: 'right' }); }
         });
@@ -1434,7 +1676,11 @@
   $('#btnSeason').onclick = () => {
     recompute();
     const eps = P().episodes.filter((e) => e.season === S.ep.season);
-    const rows = eps.map((e) => { const st = e === S.ep ? S.st : C.analyzeEpisode(e, P()); const rr = C.evalRules(e, P(), st); return { e, st, fails: rr.filter((x) => x.status === 'fail').length }; });
+    const sts = eps.map((e) => (e === S.ep ? S.st : C.analyzeEpisode(e, P())));
+    // the same season context as the Rules tab: an object short in one episode but long enough over the season is only a warning
+    const objPages = {};
+    sts.forEach((st) => st.objects.forEach((o) => { objPages[o.name] = (objPages[o.name] || 0) + o.pages; }));
+    const rows = eps.map((e, i) => { const st = sts[i]; const rr = C.evalRules(e, P(), st, { objPages }); return { e, st, fails: rr.filter((x) => x.status === 'fail').length }; });
     const objs = {};
     rows.forEach(({ e, st }) => st.objects.forEach((o) => { const x = objs[o.name] || (objs[o.name] = { name: o.name, pages: 0, eps: [], pav: o.pav }); x.pages += o.pages; x.eps.push(e.number); }));
     const totalPages = rows.reduce((a, r) => a + r.st.pages, 0) || 1;
@@ -1528,6 +1774,7 @@
     // menu and toolbar entries that change the project are hidden for a reader, so the menus only offer what works
     ['#tbImport', '#tbDraft', '#tbHistory', '#mNewEp', '#mNewSeason', '#mTrash', '#mExportFt', '#mLock', '#mRenum', '#mUndo', '#mRedo', '#tbUndo', '#tbRedo'].forEach((q) => { const x = $(q); if (x) x.hidden = reader; });
     $$('[data-type]').forEach((b) => { b.disabled = ro; });
+    $$('[data-paper]').forEach((b) => { b.disabled = reader; });
     applyWatermark();
   }
   function applyTheme() { const th = ls.get('draft.theme', ''); if (th) document.documentElement.dataset.theme = th; else delete document.documentElement.dataset.theme; }
@@ -1539,12 +1786,13 @@
     st.setProperty('--pg-w', paper.w + 'in'); st.setProperty('--pg-h', paper.h + 'in');
     st.setProperty('--pg-top', paper.top + 'in'); st.setProperty('--pg-bottom', paper.bottom + 'in');
     st.setProperty('--pg-left', paper.left + 'in'); st.setProperty('--pg-right', paper.right + 'in');
-    // the text column is the action width (10 chars per inch), exactly what pagination wraps at
-    st.setProperty('--tx-w', (F.action.width / 10) + 'in');
+    // columns are exactly the characters pagination wraps at: in ch, since Courier's advance (0.60009 em) makes
+    // 60 characters a fraction of a pixel wider than 6in and a full line would wrap on screen only
+    st.setProperty('--tx-w', F.action.width + 'ch');
     for (const [t, k] of [['character', 'char'], ['paren', 'paren'], ['dialogue', 'dial'], ['transition', 'tr']]) {
       st.setProperty('--in-' + k, (F[t].indent - paper.left) + 'in');
-      // a right-aligned transition ends flush with the right margin, as on paper
-      st.setProperty('--w-' + k, (F[t].right ? paper.w - paper.right - F[t].indent : F[t].width / 10) + 'in');
+      // a right-aligned transition ends at its edge (Final Draft 7.10 in) or flush with the right margin, as on paper
+      st.setProperty('--w-' + k, F[t].right ? 'calc(' + (C.rightEdge(F[t], paper) - F[t].indent) + 'in + 1px)' : F[t].width + 'ch');
     }
   }
   const FONTS = { courier: '"Courier New", Courier, "Liberation Mono", "FreeMonoEmb", monospace', liberation: '"Liberation Mono", "Courier New", "FreeMonoEmb", monospace', ptmono: '"PT Mono", "Courier New", "FreeMonoEmb", monospace', freemono: '"FreeMonoEmb", "FreeMono", "Courier New", monospace' };
@@ -1565,26 +1813,78 @@
     pg.style.setProperty('--wm-img', 'url("data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg) + '")');
   }
   $('#elemSelect').onchange = (e) => { const el = ed.querySelector('.b.cur') || curBlockEl(); if (el) { setType(el, e.target.value); setCaret(el.dataset.id, el.textContent.length); } };
-  $('#btnFocus').onclick = () => { document.body.classList.toggle('focus'); syncViewMenu(); };
+  $('#btnFocus').onclick = () => { document.body.classList.toggle('focus'); document.body.classList.remove('show-left', 'show-right'); syncViewMenu(); setTimeout(fitPage, 30); };
 
   // narrow screens: a button to open the production panel
   const panelBtn = document.createElement('button'); panelBtn.className = 'tb'; panelBtn.id = 'btnPanel'; panelBtn.textContent = 'Панель';
-  panelBtn.onclick = () => document.body.classList.toggle('show-right');
+  panelBtn.onclick = () => { document.body.classList.toggle('show-right'); syncViewMenu(); };
   $('.tb-group').appendChild(panelBtn);
 
   // ---------- classic chrome: menu bar, toolbar, status bar ----------
   // Menus open on click and switch on hover while one is open, like a desktop application.
   const menus = $$('.mb');
   const closeMenus = () => menus.forEach((m) => { m.classList.remove('open'); $('.mm', m).hidden = true; });
-  const openMenu = (m) => { closeMenus(); m.classList.add('open'); $('.mm', m).hidden = false; syncViewMenu(); };
+  // a dropdown is shifted back inside the window when its button sits near the right edge (phones, wrapped menubar)
+  function clampMenu(mm) {
+    mm.style.transform = ''; mm.style.maxHeight = ''; mm.style.overflowY = '';
+    const r = mm.getBoundingClientRect(), W = document.documentElement.clientWidth;
+    const dx = r.left < 4 ? 4 - r.left : r.right > W - 4 ? Math.max(4 - r.left, W - 4 - r.right) : 0;
+    if (dx) mm.style.transform = 'translateX(' + Math.round(dx) + 'px)';
+    if (r.bottom > innerHeight - 4) { mm.style.maxHeight = Math.max(120, innerHeight - 4 - r.top) + 'px'; mm.style.overflowY = 'auto'; }
+  }
+  const openMenu = (m) => { closeMenus(); $('#exportMenu').hidden = true; m.classList.add('open'); $('.mm', m).hidden = false; syncViewMenu(); clampMenu($('.mm', m)); };
   menus.forEach((m) => {
     const btn = $('.mb-btn', m);
     btn.onclick = (e) => { e.stopPropagation(); if (m.classList.contains('open')) closeMenus(); else openMenu(m); };
     btn.onmouseenter = () => { if (menus.some((x) => x.classList.contains('open')) && !m.classList.contains('open')) openMenu(m); };
-    $('.mm', m).addEventListener('click', (e) => { if (e.target.closest('button')) setTimeout(closeMenus, 0); e.stopPropagation(); });
+    $('.mm', m).addEventListener('click', (e) => { if (e.target.closest('button')) setTimeout(leaveMenus, 0); e.stopPropagation(); });
   });
   document.addEventListener('click', closeMenus);
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeMenus(); $('#exportMenu').hidden = true; } });
+  // keyboard: F10 or a lone Alt puts focus on the menubar, arrows walk menus and items, Enter runs, Escape returns to the text
+  let menuReturn = null, altAlone = false;
+  const mbBtns = () => menus.map((m) => $('.mb-btn', m));
+  const mmItems = (m) => $$('.mm button', m).filter((b) => !b.disabled && b.offsetParent);
+  const enterMenubar = () => {
+    const a = document.activeElement, sel = window.getSelection();
+    menuReturn = { el: a && a !== document.body ? a : ed, range: sel.rangeCount && ed.contains(sel.anchorNode) ? sel.getRangeAt(0).cloneRange() : null };
+    mbBtns()[0].focus();
+  };
+  const leaveMenus = () => {
+    closeMenus();
+    if (!menuReturn || !$('#menubar').contains(document.activeElement)) { menuReturn = null; return; }
+    const { el, range } = menuReturn; menuReturn = null;
+    if (!document.contains(el)) return;
+    el.focus({ preventScroll: true });
+    if (range) { const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range); }
+  };
+  const openAndFocus = (m, last) => { openMenu(m); const it = mmItems(m); if (it.length) it[last ? it.length - 1 : 0].focus(); };
+  $('#menubar').addEventListener('keydown', (e) => {
+    const open = menus.find((x) => x.classList.contains('open'));
+    const m = open || menus.find((x) => x.contains(document.activeElement)); if (!m || e.ctrlKey || e.metaKey || e.altKey) return;
+    const j = menus.indexOf(m), onBtn = document.activeElement === $('.mb-btn', m);
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault(); const n = menus[(j + (e.key === 'ArrowRight' ? 1 : -1) + menus.length) % menus.length];
+      if (open) openAndFocus(n); else $('.mb-btn', n).focus();
+    } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault(); const up = e.key === 'ArrowUp';
+      if (!open || onBtn) { openAndFocus(m, up); return; }
+      const it = mmItems(m), i = it.indexOf(document.activeElement);
+      if (it.length) it[(i + (up ? -1 : 1) + it.length) % it.length].focus();
+    } else if ((e.key === 'Enter' || e.key === ' ') && onBtn) { e.preventDefault(); openAndFocus(m); }
+    else if (e.key === 'Escape') { e.preventDefault(); if (open && !onBtn) { closeMenus(); $('.mb-btn', m).focus(); } else leaveMenus(); }
+  });
+  document.addEventListener('keydown', (e) => {
+    // capture phase: editor handlers that stop a key must still cancel the lone-Alt gesture (Alt+Shift switches the layout)
+    altAlone = e.key === 'Alt' && !e.ctrlKey && !e.shiftKey && !e.metaKey;
+    if (e.key === 'F10' && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) { e.preventDefault(); if ($('#menubar').contains(document.activeElement)) leaveMenus(); else if ($('#modalBack').hidden) enterMenubar(); }
+  }, true);
+  document.addEventListener('keyup', (e) => {
+    if (e.key !== 'Alt' || !altAlone) return; altAlone = false; e.preventDefault();
+    if ($('#menubar').contains(document.activeElement)) leaveMenus(); else if ($('#modalBack').hidden) enterMenubar();
+  });
+  document.addEventListener('mousedown', () => { altAlone = false; menuReturn = null; });
+  window.addEventListener('blur', () => { altAlone = false; });
   // toolbar buttons repeat the most used menu commands
   const same = (from, to) => { $(from).onclick = () => $(to).click(); };
   same('#tbUndo', '#mUndo'); same('#tbRedo', '#mRedo'); same('#tbComment', '#btnComment'); same('#tbDraft', '#btnDraft'); same('#tbHistory', '#btnHistory'); same('#tbImport', '#btnImport');
@@ -1611,7 +1911,7 @@
   $('#mLock').onclick = () => { showLeft('scenes'); const b = $('#lockNum') || $('#unlockNum'); if (b) b.click(); else if (!canLock()) needProducer('Залочить номера сцен'); };
   $('#mExportFt').onclick = () => $('#exportMenu [data-exp=docx]').click();
   $$('[data-type]').forEach((b) => b.onclick = () => { const el = ed.querySelector('.b.cur') || curBlockEl(); if (el) { setType(el, b.dataset.type); setCaret(el.dataset.id, el.textContent.length); } });
-  $$('[data-paper]').forEach((b) => b.onclick = () => { P().rules.paper = b.dataset.paper; P().episodes.forEach((e) => delete e._st); applyPaper(); recompute(); fitPage(); persist(); syncViewMenu(); });
+  $$('[data-paper]').forEach((b) => b.onclick = () => { if (readOnly('Формат листа')) return; P().rules.paper = b.dataset.paper; P().episodes.forEach((e) => delete e._st); applyPaper(); recompute(); fitPage(); persist(); syncViewMenu(); });
   const setTheme = (t) => { ls.set('draft.theme', t); applyTheme(); syncViewMenu(); };
   $('#mThemeLight').onclick = () => setTheme('light'); $('#mThemeDark').onclick = () => setTheme('dark'); $('#mThemeAuto').onclick = () => setTheme('');
   $('#mZoomIn').onclick = () => setZoom((S.zoomUser || S.zoom) * 1.15);
@@ -1620,18 +1920,34 @@
   function setZoom(z) { S.zoomUser = z ? Math.max(0.4, Math.min(2, z)) : null; fitPage(); }
   // panels: toggled from the toolbar, the View menu and the panel headers
   const narrow = () => window.matchMedia('(max-width: 1180px)').matches;
-  function toggleLeft() { document.body.classList.toggle('hide-left'); ls.set('draft.hideLeft', document.body.classList.contains('hide-left')); syncViewMenu(); setTimeout(fitPage, 30); }
-  function toggleRight() { if (narrow()) document.body.classList.toggle('show-right'); else { document.body.classList.toggle('hide-right'); ls.set('draft.hideRight', document.body.classList.contains('hide-right')); } syncViewMenu(); setTimeout(fitPage, 30); }
-  function showLeft(tab) { document.body.classList.remove('hide-left', 'focus'); ls.set('draft.hideLeft', false); $$('[data-ltab]').find((b) => b.dataset.ltab === tab).click(); syncViewMenu(); }
+  const phone = () => window.matchMedia('(max-width: 760px)').matches;
+  // In focus mode a panel toggle leaves focus mode and shows the panel: flipping a flag that has no visible effect would only hide the panel later.
+  // Phones show both panels as drawers over the page (show-left / show-right) and do not save that state.
+  function toggleLeft() {
+    const b = document.body.classList, wasFocus = b.contains('focus'); b.remove('focus');
+    if (phone()) b.toggle('show-left', wasFocus || !b.contains('show-left'));
+    else { b.toggle('hide-left', !wasFocus && !b.contains('hide-left')); ls.set('draft.hideLeft', b.contains('hide-left')); }
+    syncViewMenu(); setTimeout(fitPage, 30);
+  }
+  function toggleRight() {
+    const b = document.body.classList, wasFocus = b.contains('focus'); b.remove('focus');
+    if (narrow()) { b.toggle('show-right', wasFocus || !b.contains('show-right')); if (b.contains('show-right') && b.contains('hide-right')) { b.remove('hide-right'); ls.set('draft.hideRight', false); } }
+    else { b.toggle('hide-right', !wasFocus && !b.contains('hide-right')); ls.set('draft.hideRight', b.contains('hide-right')); }
+    syncViewMenu(); setTimeout(fitPage, 30);
+  }
+  function showLeft(tab) { document.body.classList.remove('hide-left', 'focus'); ls.set('draft.hideLeft', false); if (phone()) document.body.classList.add('show-left'); $$('[data-ltab]').find((b) => b.dataset.ltab === tab).click(); syncViewMenu(); }
+  // on a phone the Navigator drawer covers the page, so picking an episode or a scene closes it
+  $('#leftPanel').addEventListener('click', (e) => { if (phone() && e.target.closest('.ep, .sc, li[data-scene]')) { document.body.classList.remove('show-left'); syncViewMenu(); } });
   function showRight(tab) { document.body.classList.remove('hide-right', 'focus'); ls.set('draft.hideRight', false); if (narrow()) document.body.classList.add('show-right'); $$('[data-rtab]').find((b) => b.dataset.rtab === tab).click(); syncViewMenu(); }
   $('#tbNav').onclick = toggleLeft; $('#mLeft').onclick = toggleLeft; $('#closeLeft').onclick = toggleLeft;
   $('#tbProd').onclick = toggleRight; $('#mRight').onclick = toggleRight; $('#closeRight').onclick = toggleRight;
   function syncViewMenu() {
     const b = document.body.classList;
-    $('#mLeft').classList.toggle('on', !b.contains('hide-left') && !b.contains('focus'));
-    $('#mRight').classList.toggle('on', !b.contains('hide-right') && !b.contains('focus'));
-    $('#tbNav').classList.toggle('on', !b.contains('hide-left') && !b.contains('focus'));
-    $('#tbProd').classList.toggle('on', !b.contains('hide-right') && !b.contains('focus'));
+    // the marks follow what is on screen: drawers count only while open
+    const leftOn = !b.contains('focus') && (phone() ? b.contains('show-left') : !b.contains('hide-left'));
+    const rightOn = !b.contains('focus') && !b.contains('hide-right') && (!narrow() || b.contains('show-right'));
+    $('#mLeft').classList.toggle('on', leftOn); $('#tbNav').classList.toggle('on', leftOn);
+    $('#mRight').classList.toggle('on', rightOn); $('#tbProd').classList.toggle('on', rightOn);
     const th = ls.get('draft.theme', '');
     $('#mThemeLight').classList.toggle('on', th === 'light'); $('#mThemeDark').classList.toggle('on', th === 'dark'); $('#mThemeAuto').classList.toggle('on', !th);
     $$('[data-paper]').forEach((x) => x.classList.toggle('on', x.dataset.paper === (P() && P().rules.paper)));
@@ -1667,7 +1983,7 @@
   }
   $('#mStart').onclick = showStart;
   $('#mKeys').onclick = () => modal('<h2>Клавиши</h2>' + KEYS_HTML + '<div class="actions"><button class="btn primary" id="kC">Закрыть</button></div>', (m) => { $('#kC', m).onclick = closeModal; });
-  $('#mFormatHelp').onclick = () => modal('<h2>Формат сценария</h2><p class="note">Страница: Courier 12, 54 строки (Letter, как в Final Draft) или 58 строк (A4). Поля 1,5" слева и 1" с остальных сторон. Персонаж от 3,7", ремарка от 3,1", реплика от 2,5" шириной 3,5". Русская «американка» на A4: поля 3,75 / 1,25 / 2,5 / 2,5 см, персонаж 6,75 см от поля, реплика 3,75 / 3,75 см, ремарка 5,5 / 4,5 см. Шаблон листа выбирается в меню Формат.</p>' +
+  $('#mFormatHelp').onclick = () => modal('<h2>Формат сценария</h2><p class="note">Страница: Courier 12, 54 строки (Letter, как в Final Draft) или 58 строк (A4). Поля 1,5" слева и 1" с остальных сторон. Персонаж от 3,5", ремарка от 3,0", реплика от 2,5" шириной 3,5", переход от 5,5" до 7,1" (вправо). Русская «американка» на A4: поля 3,75 / 1,25 / 2,5 / 2,5 см, персонаж 6,75 см от поля, реплика 3,75 / 3,75 см, ремарка 5,5 / 4,5 см. Шаблон листа выбирается в меню Формат.</p>' +
     '<p class="note">Заголовок сцены: ИНТ./НАТ./ПАВ. ОБЪЕКТ. ПОДОБЪЕКТ - ВРЕМЯ (ДЕНЬ, НОЧЬ, УТРО, ВЕЧЕР, РЕЖИМ). Номера сцен ставятся в сценарии автоматически; перед производством продюсер или редактор лочит номера, после чего вставка даёт 12A, а удаление оставляет «УДАЛЕНА».</p><div class="actions"><button class="btn primary" id="fhC">Закрыть</button></div>', (m) => { $('#fhC', m).onclick = closeModal; });
   $('#mAbout').onclick = () => modal('<h2>Драфт</h2><p class="note">Русскоязычный сценарный редактор в формате Final Draft: точная страница, нумерация и ревизии как в производстве, экспорт в FilmToolz, продюсерские замечания, история изменений и защита текста.</p><div class="actions"><button class="btn primary" id="abC">Закрыть</button></div>', (m) => { $('#abC', m).onclick = closeModal; });
   // global shortcuts that work outside the editor too
@@ -1675,6 +1991,8 @@
     const mod = e.ctrlKey || e.metaKey;
     if (mod && (e.key === 'p' || e.key === 'з')) { e.preventDefault(); $('#exportMenu [data-exp=pdf]').click(); }
     if (mod && e.shiftKey && (e.key === 'S' || e.key === 'Ы' || e.key === 's' || e.key === 'ы')) { e.preventDefault(); $('#btnDraft').click(); }
+    // Ctrl+S saves wherever the focus is (the editor's keydown bubbles here too), so the browser's «Save page as» never opens
+    if (mod && !e.shiftKey && !e.altKey && S.db && (e.code === 'KeyS' && !/^[a-z]$/i.test(e.key) || /^[sы]$/i.test(e.key))) { e.preventDefault(); recompute(); persist.cancel(); DB.put('db', S.db).then((ok) => toast(saved(ok) ? 'Сохранено на этом компьютере' : TAB.stale ? 'Не сохранено: Драфт изменён в другой вкладке. Обновите страницу.' : 'Не удалось сохранить в браузере. Сохраните файл проекта: «Экспорт → Файл проекта».')); }
     if (mod && (e.key === '=' || e.key === '+')) { e.preventDefault(); $('#mZoomIn').click(); }
     if (mod && e.key === '-') { e.preventDefault(); $('#mZoomOut').click(); }
     if (mod && e.key === '0') { e.preventDefault(); setZoom(null); }
@@ -1683,12 +2001,29 @@
   // ---------- boot ----------
   async function boot() {
     applyTheme();
+    // the revision is read before the project: a write in between makes this tab stale, never the other one
+    const rev = (await DB.get('rev')) || { n: 0 };
+    TAB.rev = TAB.last = rev.n || 0; TAB.savedAt = Date.now();
     let db = await DB.get('db');
     if (!db || !db.projects || !db.projects.length) {
       const p = C.demoProject();
       db = { projects: [p], currentProjectId: p.id, currentEpId: p.episodes[0].id };
     }
+    // drop analysis caches stored by older versions: they may predate the episode's last edits
+    db.projects.forEach((p) => (p.episodes || []).forEach((e) => delete e._st));
     S.db = db;
+    const rescue = await DB.get('rescue');
+    let aside = !!rescue;
+    try { aside = aside || localStorage.getItem('draft.pending') != null || Object.keys(localStorage).some((k) => k.startsWith('draft.rescue.')); } catch (e) { /* storage blocked */ }
+    if (aside) {
+      const n = restoreAside(db, rev, rescue);
+      // the copies set aside are dropped only once the project that took them in is stored
+      if (await DB.put('db', db)) {
+        try { Object.keys(localStorage).filter((k) => k === 'draft.pending' || k.startsWith('draft.rescue.')).forEach((k) => localStorage.removeItem(k)); } catch (e) { /* ignore */ }
+        if (rescue) await DB.del('rescue');
+      }
+      if (n) setTimeout(() => toast('Восстановлен несохранённый текст из другой вкладки: ' + n + ' — смотрите драфты и замечания серий.'), 800);
+    }
     await trashLoad();
     applyFont();
     openProject(db.currentProjectId);
@@ -1729,6 +2064,7 @@
     r.innerHTML = html;
   }
   window.addEventListener('resize', debounce(fitPage, 150));
+  window.addEventListener('resize', debounce(syncViewMenu, 150));
   $('#btnFocus').addEventListener('click', () => setTimeout(fitPage, 50));
   boot();
   window.__draft = { S, C, recompute, readBlocks, histAdd, histLoad, showHistory, showTrash, autoSnap, lockNumbers, omitScene, restoreScene, restoreMissing, exportPDF, applyRole, applyPaper, renderScenes };
