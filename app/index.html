@@ -1,35 +1,143 @@
 <title>Драфт</title>
 <meta name="claude:viewport-fit-sides" content="cover">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="styles.css">
 
-<header class="topbar" id="topbar">
-  <div class="brand" title="Драфт — сценарный редактор">Драфт</div>
-  <div class="crumbs">
-    <select id="projectSelect" aria-label="Проект"></select>
-    <span class="crumb-sep">/</span>
-    <span id="epTitle" class="ep-title">—</span>
+<!-- Classic editor chrome: menu bar, toolbar, document, status bar. Final Draft is the reference. -->
+<header class="chrome" id="topbar">
+  <div class="menubar" id="menubar" role="menubar">
+    <div class="mb" data-menu="file"><button class="mb-btn" role="menuitem" aria-haspopup="true">Файл</button>
+      <div class="menu mm" hidden>
+        <button id="mNewEp">Новая серия</button>
+        <button id="mNewSeason">Новый сезон</button>
+        <button id="btnImport">Загрузить сценарий…<kbd>Word · PDF · FDX</kbd></button>
+        <button data-exp="openproject">Открыть файл проекта…</button>
+        <hr>
+        <button id="btnDraft">Сохранить драфт…<kbd>Ctrl+Shift+S</kbd></button>
+        <button id="mDrafts">Все драфты…</button>
+        <button id="btnHistory">История изменений…</button>
+        <button id="mTrash">Корзина…</button>
+        <hr>
+        <div class="mh">Экспорт</div>
+        <button data-exp="pdf">PDF в формате Final Draft…<kbd>Ctrl+P</kbd></button>
+        <button data-exp="fdx">Final Draft (.fdx)…</button>
+        <button data-exp="docx">Word для FilmToolz (.docx)</button>
+        <button data-exp="fountain">Fountain / текст</button>
+        <button data-exp="bible">Библия персонажей (.html)</button>
+        <button data-exp="project">Файл проекта (.json)</button>
+        <hr>
+        <button id="btnSettings">Настройки…</button>
+      </div>
+    </div>
+    <div class="mb" data-menu="edit"><button class="mb-btn" role="menuitem" aria-haspopup="true">Правка</button>
+      <div class="menu mm" hidden>
+        <button id="mUndo">Отменить<kbd>Ctrl+Z</kbd></button>
+        <button id="mRedo">Повторить<kbd>Ctrl+Y</kbd></button>
+        <hr>
+        <button id="btnComment">Комментарий к выделенному…<kbd>Ctrl+Alt+M</kbd></button>
+        <hr>
+        <button id="mFind">Найти на странице<kbd>Ctrl+F</kbd></button>
+      </div>
+    </div>
+    <div class="mb" data-menu="view"><button class="mb-btn" role="menuitem" aria-haspopup="true">Вид</button>
+      <div class="menu mm" hidden>
+        <button id="mLeft" class="check">Навигатор</button>
+        <button id="mRight" class="check">Производство</button>
+        <button id="btnFocus">Режим фокуса<kbd>только страница</kbd></button>
+        <hr>
+        <button id="mZoomIn">Крупнее<kbd>Ctrl +</kbd></button>
+        <button id="mZoomOut">Мельче<kbd>Ctrl −</kbd></button>
+        <button id="mZoomFit">По ширине окна</button>
+        <hr>
+        <button id="mThemeLight" class="check">Светлая тема</button>
+        <button id="mThemeDark" class="check">Тёмная тема</button>
+        <button id="mThemeAuto" class="check">Как в системе</button>
+      </div>
+    </div>
+    <div class="mb" data-menu="format"><button class="mb-btn" role="menuitem" aria-haspopup="true">Формат</button>
+      <div class="menu mm" hidden>
+        <div class="mh">Элемент</div>
+        <button data-type="scene">Сцена<kbd>Ctrl+1</kbd></button>
+        <button data-type="action">Описание<kbd>Ctrl+2</kbd></button>
+        <button data-type="character">Персонаж<kbd>Ctrl+3</kbd></button>
+        <button data-type="paren">Ремарка<kbd>Ctrl+4</kbd></button>
+        <button data-type="dialogue">Реплика<kbd>Ctrl+5</kbd></button>
+        <button data-type="transition">Переход<kbd>Ctrl+6</kbd></button>
+        <hr>
+        <div class="mh">Лист</div>
+        <button data-paper="letter" class="check">Letter, как Final Draft (54 строки)</button>
+        <button data-paper="a4" class="check">A4, отступы Final Draft (58 строк)</button>
+        <button data-paper="a4ru" class="check">A4 «американка» (58 строк)</button>
+        <hr>
+        <button id="mFont">Шрифт на экране…</button>
+      </div>
+    </div>
+    <div class="mb" data-menu="doc"><button class="mb-btn" role="menuitem" aria-haspopup="true">Документ</button>
+      <div class="menu mm" hidden>
+        <button id="mEpisode">Серия: сезон, номер, название…</button>
+        <button id="mProject">Проект: название, автор…</button>
+        <button id="mTitlePage">Титульный лист и гриф…</button>
+        <hr>
+        <button id="mScenes">Список сцен</button>
+        <button id="mChars">Персонажи и связи</button>
+        <button id="mObjects">Объекты</button>
+        <hr>
+        <button id="btnSeason">Сводка сезона…</button>
+      </div>
+    </div>
+    <div class="mb" data-menu="prod"><button class="mb-btn" role="menuitem" aria-haspopup="true">Производство</button>
+      <div class="menu mm" hidden>
+        <button id="mLock">Залочить номера сцен…</button>
+        <button id="mRenum">Нумерация сцен</button>
+        <hr>
+        <button id="mTiming">Хронометраж и павильон</button>
+        <button id="mRules">Проверка по параметрам студии</button>
+        <button id="mComments">Замечания продюсера</button>
+        <button id="mLines">Линии и съёмочные группы…</button>
+        <hr>
+        <button id="mFilmtoolz">Проверка названий перед FilmToolz</button>
+        <button id="mExportFt">Экспорт в FilmToolz (.docx)</button>
+      </div>
+    </div>
+    <div class="mb" data-menu="help"><button class="mb-btn" role="menuitem" aria-haspopup="true">Справка</button>
+      <div class="menu mm" hidden>
+        <button id="mStart">Начало работы…</button>
+        <button id="mKeys">Клавиши…</button>
+        <button id="mFormatHelp">Формат сценария…</button>
+        <hr>
+        <button id="mAbout">О программе</button>
+      </div>
+    </div>
+    <div class="mb-right">
+      <label class="sr" for="projectSelect">Проект</label>
+      <select id="projectSelect" aria-label="Проект"></select>
+      <span class="crumb-sep">›</span>
+      <span id="epTitle" class="ep-title">—</span>
+    </div>
   </div>
-  <div class="tb-group">
+  <div class="toolbar tb-group" id="toolbar">
     <label class="sr" for="elemSelect">Элемент</label>
-    <select id="elemSelect" title="Тип элемента (Ctrl+1…6)">
-      <option value="scene">Сцена · Ctrl+1</option>
-      <option value="action">Описание · Ctrl+2</option>
-      <option value="character">Персонаж · Ctrl+3</option>
-      <option value="paren">Ремарка · Ctrl+4</option>
-      <option value="dialogue">Реплика · Ctrl+5</option>
-      <option value="transition">Переход · Ctrl+6</option>
+    <select id="elemSelect" class="tb-select" title="Тип элемента (Ctrl+1…6)">
+      <option value="scene">Сцена</option>
+      <option value="action">Описание</option>
+      <option value="character">Персонаж</option>
+      <option value="paren">Ремарка</option>
+      <option value="dialogue">Реплика</option>
+      <option value="transition">Переход</option>
     </select>
-    <button class="btn" id="btnComment" title="Комментарий к выделенному (Ctrl+Alt+M)">Комментарий</button>
-    <button class="btn" id="btnDraft" title="Сохранить драфт серии">Сохранить драфт</button>
-    <button class="btn" id="btnHistory" title="Откат по времени: автоснимки каждые 15 минут и перед крупными изменениями">История</button>
-    <button class="btn" id="btnImport">Загрузить сценарий</button>
+    <span class="sep"></span>
+    <button class="tb" id="tbUndo" title="Отменить (Ctrl+Z)">↶</button>
+    <button class="tb" id="tbRedo" title="Повторить (Ctrl+Y)">↷</button>
+    <span class="sep"></span>
+    <button class="tb" id="tbComment" title="Комментарий к выделенному (Ctrl+Alt+M)">Комментарий</button>
+    <button class="tb" id="tbDraft" title="Сохранить версию серии с датой">Сохранить драфт</button>
+    <button class="tb" id="tbHistory" title="Откат по времени: автоснимки каждые 15 минут">История</button>
+    <span class="sep"></span>
+    <button class="tb" id="tbImport" title="Загрузить сценарий из Word, PDF или Final Draft">Загрузить</button>
     <div class="menu-wrap">
-      <button class="btn" id="btnExport" aria-haspopup="true">Экспорт</button>
+      <button class="tb" id="btnExport" aria-haspopup="true">Экспорт ▾</button>
       <div class="menu" id="exportMenu" hidden>
-        <button data-exp="pdf">PDF в формате Final Draft</button>
-        <button data-exp="fdx">Final Draft (.fdx)</button>
+        <button data-exp="pdf">PDF в формате Final Draft…</button>
+        <button data-exp="fdx">Final Draft (.fdx)…</button>
         <button data-exp="docx">Word для FilmToolz (.docx)</button>
         <button data-exp="fountain">Fountain / текст</button>
         <button data-exp="bible">Библия персонажей (.html)</button>
@@ -38,14 +146,15 @@
         <button data-exp="openproject">Открыть файл проекта…</button>
       </div>
     </div>
-    <button class="btn ghost" id="btnSeason">Сезон</button>
-    <button class="btn ghost" id="btnSettings">Настройки</button>
-    <button class="btn ghost icon" id="btnFocus" title="Режим фокуса">◐</button>
+    <span class="grow"></span>
+    <button class="tb" id="tbNav" title="Показать или скрыть навигатор">Навигатор</button>
+    <button class="tb" id="tbProd" title="Показать или скрыть панель производства">Производство</button>
   </div>
 </header>
 
 <div class="layout" id="layout">
-  <aside class="left" id="leftPanel">
+  <aside class="left panel" id="leftPanel">
+    <div class="ph"><span>Навигатор</span><button class="ph-x" id="closeLeft" title="Скрыть">×</button></div>
     <div class="tabs" role="tablist">
       <button class="tab active" data-ltab="episodes">Серии</button>
       <button class="tab" data-ltab="scenes">Сцены</button>
@@ -55,16 +164,19 @@
   </aside>
 
   <main class="center" id="center">
-    <div class="ruler" id="ruler"><span id="pageInfo">—</span><span id="roleInfo"></span></div>
     <div class="desk" id="desk">
-      <div class="page-wrap" id="pageWrap"><div class="page" id="page">
-        <div class="editor" id="editor" spellcheck="true" lang="ru" contenteditable="true" aria-label="Текст сценария"></div>
-        <div class="cmarks" id="cmarks"></div>
-      </div></div>
+      <div class="page-wrap" id="pageWrap">
+        <div class="pageruler" id="pageRuler" aria-hidden="true"></div>
+        <div class="page" id="page">
+          <div class="editor" id="editor" spellcheck="true" lang="ru" contenteditable="true" aria-label="Текст сценария"></div>
+          <div class="cmarks" id="cmarks"></div>
+        </div>
+      </div>
     </div>
   </main>
 
-  <aside class="right" id="rightPanel">
+  <aside class="right panel" id="rightPanel">
+    <div class="ph"><span>Производство</span><button class="ph-x" id="closeRight" title="Скрыть">×</button></div>
     <div class="tabs" role="tablist">
       <button class="tab active" data-rtab="stats">Время</button>
       <button class="tab" data-rtab="rules">Параметры</button>
@@ -78,6 +190,12 @@
     <section class="rpane" id="pane-bible" hidden></section>
     <section class="rpane" id="pane-objects" hidden></section>
   </aside>
+</div>
+
+<div class="statusbar" id="ruler">
+  <span id="pageInfo">—</span>
+  <span id="hint" class="hint"></span>
+  <span id="roleInfo"></span>
 </div>
 
 <div class="ac" id="ac" hidden></div>

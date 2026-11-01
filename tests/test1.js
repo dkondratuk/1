@@ -2,6 +2,7 @@ const { chromium } = require('playwright');
 const path=require('path'), fs=require('fs');
 (async()=>{
   const b=await chromium.launch(); const p=await b.newPage({viewport:{width:1440,height:900}});
+  await p.addInitScript(() => { try { localStorage.setItem('draft.started', 'true'); } catch (e) {} });
   const errs=[]; p.on('pageerror',e=>errs.push(e.message)); p.on('console',m=>{if(m.type()==='error')errs.push(m.text())});
   const nm=require('path').resolve(__dirname,'../node_modules')+'/';
   await p.route('**/*',r=>{const u=r.request().url();

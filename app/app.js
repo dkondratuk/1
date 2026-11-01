@@ -200,6 +200,7 @@
     if (t !== 'paren' && el.textContent === '()') { el.innerHTML = '<br>'; setCaret(el.dataset.id, 0); }
     $('#elemSelect').value = t;
     scheduleRecompute(); acUpdate();
+    if (typeof renderHint === 'function') renderHint();
   }
   function insertBlockAfter(el, t, x) {
     const id = C.uid();
@@ -564,11 +565,11 @@
     const missing = lock ? C.lockMissing(lock, S.st.scenes) : [];
     const lockHTML = lock
       ? '<div class="rule ' + (missing.length || nc.issues.length ? 'warn' : 'ok') + '"><div class="top"><span class="dot"></span><span class="title">Номера сцен залочены</span><span class="val">' + fmtDate(lock.at) + '</span></div>' +
-        '<div class="note">' + esc(lock.by) + '. Новые сцены получают буквенные номера (12A), убранные остаются как «ОПУЩЕНА».</div>' +
+        '<div class="note">' + esc(lock.by) + '. Новые сцены получают буквенные номера (12A), убранные остаются в нумерации как «УДАЛЕНА».</div>' +
         (nc.issues.length ? '<ul>' + nc.issues.map((d) => '<li data-scene="' + d.sceneId + '">' + esc(d.text) + '</li>').join('') + '</ul>' : '') +
-        (missing.length ? '<div class="note">Удалены без пометки «опущена»: ' + missing.map((n) => esc(n.num)).join(', ') + '</div><div class="row">' + missing.map((n) => '<button class="btn small" data-restore-omit="' + esc(n.num) + '">Вернуть ' + esc(n.num) + ' как опущенную</button>').join('') + '</div>' : '') +
+        (missing.length ? '<div class="note">Убраны из текста без пометки «УДАЛЕНА»: ' + missing.map((n) => esc(n.num)).join(', ') + '</div><div class="row">' + missing.map((n) => '<button class="btn small" data-restore-omit="' + esc(n.num) + '">Вернуть ' + esc(n.num) + ' как УДАЛЕНА</button>').join('') + '</div>' : '') +
         (canLock() ? '<div class="row"><button class="btn small ghost" id="unlockNum">Снять лок</button></div>' : '') + '</div>'
-      : (canLock() && S.st.scenes.length ? '<div class="rule"><div class="top"><span class="dot"></span><span class="title">Номера сцен не залочены</span></div><div class="note">Перед запуском в производство зафиксируйте номера: после этого вставка даёт 12A, удаление даёт «ОПУЩЕНА», и график группы не ломается.</div><div class="row"><button class="btn small" id="lockNum">Залочить номера сцен</button></div></div>' : '');
+      : (canLock() && S.st.scenes.length ? '<div class="rule"><div class="top"><span class="dot"></span><span class="title">Номера сцен не залочены</span></div><div class="note">Перед запуском в производство зафиксируйте номера: после этого вставка даёт 12A, удаление даёт «УДАЛЕНА», и график группы не ломается.</div><div class="row"><button class="btn small" id="lockNum">Залочить номера сцен</button></div></div>' : '');
     const numHTML = lockHTML + (nc.fromFile && !lock ? '<div class="rule ' + (nc.issues.length ? 'warn' : 'ok') + '"><div class="top"><span class="dot"></span><span class="title">Нумерация из файла</span><span class="val">' + (nc.issues.length ? nc.issues.length + ' замеч.' : 'по порядку') + '</span></div>' +
       (nc.partial ? '<div class="note">У части сцен номера нет.</div>' : '') +
       (nc.issues.length ? '<ul>' + nc.issues.map((d) => '<li data-scene="' + d.sceneId + '">' + esc(d.text) + '</li>').join('') + '</ul>' : '') +
@@ -619,7 +620,7 @@
       };
     });
   }
-  // a scene that leaves the shooting script keeps its number as «ОПУЩЕНА»
+  // a scene that leaves the shooting script keeps its number as «УДАЛЕНА»
   function omitScene(s) {
     pushUndo();
     const blocks = readBlocks();
@@ -650,7 +651,7 @@
   }
   function inspectorHTML(s) {
     const lock = !!S.ep.lock;
-    return '<div class="inspector"><div class="row between"><b>Сцена ' + esc(s.num) + (s.omitted ? ' · опущена' : '') + '</b><span class="row">' + (lock ? (s.omitted ? '<button class="btn small" id="scRestore">Вернуть сцену</button>' : '<button class="btn small ghost danger" id="scOmit" title="Сцена остаётся в нумерации как «ОПУЩЕНА»">Опустить</button>') : '') + '<button class="btn small" id="scUp" title="Переместить выше">↑</button><button class="btn small" id="scDown" title="Переместить ниже">↓</button></span></div>' +
+    return '<div class="inspector"><div class="row between"><b>Сцена ' + esc(s.num) + (s.omitted ? ' · удалена' : '') + '</b><span class="row">' + (lock ? (s.omitted ? '<button class="btn small" id="scRestore">Вернуть сцену</button>' : '<button class="btn small ghost danger" id="scOmit" title="Текст убирается, а номер остаётся в сценарии как «УДАЛЕНА»">Удалить сцену</button>') : '') + '<button class="btn small" id="scUp" title="Переместить выше">↑</button><button class="btn small" id="scDown" title="Переместить ниже">↓</button></span></div>' +
       '<label class="small muted">Синопсис<textarea id="scSyn" rows="2">' + esc(s.synopsis) + '</textarea></label>' +
       '<div class="row"><label class="small muted">Номер <input type="text" id="scNum" value="' + esc(s.fileNum ? s.num : '') + '" placeholder="' + esc(s.num) + '" style="width:70px"' + (lock ? ' readonly title="Номера залочены"' : '') + '></label>' +
       '<label class="small muted">Сценарный день <input type="text" id="scDay" value="' + esc(s.day) + '" style="width:70px"></label></div>' +
@@ -1516,12 +1517,120 @@
     if (on) pg.dataset.wm = S.me.name + ' · ' + new Date().toLocaleDateString('ru-RU'); else delete pg.dataset.wm;
   }
   $('#elemSelect').onchange = (e) => { const el = ed.querySelector('.b.cur') || curBlockEl(); if (el) { setType(el, e.target.value); setCaret(el.dataset.id, el.textContent.length); } };
-  $('#btnFocus').onclick = () => document.body.classList.toggle('focus');
+  $('#btnFocus').onclick = () => { document.body.classList.toggle('focus'); syncViewMenu(); };
 
   // narrow screens: a button to open the production panel
-  const panelBtn = document.createElement('button'); panelBtn.className = 'btn ghost'; panelBtn.id = 'btnPanel'; panelBtn.textContent = 'Панель';
+  const panelBtn = document.createElement('button'); panelBtn.className = 'tb'; panelBtn.id = 'btnPanel'; panelBtn.textContent = 'Панель';
   panelBtn.onclick = () => document.body.classList.toggle('show-right');
   $('.tb-group').appendChild(panelBtn);
+
+  // ---------- classic chrome: menu bar, toolbar, status bar ----------
+  // Menus open on click and switch on hover while one is open, like a desktop application.
+  const menus = $$('.mb');
+  const closeMenus = () => menus.forEach((m) => { m.classList.remove('open'); $('.mm', m).hidden = true; });
+  const openMenu = (m) => { closeMenus(); m.classList.add('open'); $('.mm', m).hidden = false; syncViewMenu(); };
+  menus.forEach((m) => {
+    const btn = $('.mb-btn', m);
+    btn.onclick = (e) => { e.stopPropagation(); if (m.classList.contains('open')) closeMenus(); else openMenu(m); };
+    btn.onmouseenter = () => { if (menus.some((x) => x.classList.contains('open')) && !m.classList.contains('open')) openMenu(m); };
+    $('.mm', m).addEventListener('click', (e) => { if (e.target.closest('button')) setTimeout(closeMenus, 0); e.stopPropagation(); });
+  });
+  document.addEventListener('click', closeMenus);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeMenus(); $('#exportMenu').hidden = true; } });
+  // toolbar buttons repeat the most used menu commands
+  const same = (from, to) => { $(from).onclick = () => $(to).click(); };
+  same('#tbUndo', '#mUndo'); same('#tbRedo', '#mRedo'); same('#tbComment', '#btnComment'); same('#tbDraft', '#btnDraft'); same('#tbHistory', '#btnHistory'); same('#tbImport', '#btnImport');
+  $('#mUndo').onclick = () => { undo(); ed.focus(); };
+  $('#mRedo').onclick = () => { redo(); ed.focus(); };
+  $('#mFind').onclick = () => toast('Поиск по странице: Ctrl+F в браузере');
+  $('#mNewEp').onclick = () => $('#addEp').click();
+  $('#mNewSeason').onclick = () => $('#addSeason').click();
+  $('#mDrafts').onclick = () => showDrafts();
+  $('#mTrash').onclick = () => showTrash();
+  $('#mEpisode').onclick = () => $('#renEp').click();
+  $('#mProject').onclick = () => projectModal();
+  $('#mTitlePage').onclick = () => $('#btnSettings').click();
+  $('#mLines').onclick = () => $('#btnSettings').click();
+  $('#mFont').onclick = () => $('#btnSettings').click();
+  $('#mRules').onclick = () => showRight('rules');
+  $('#mTiming').onclick = () => showRight('stats');
+  $('#mComments').onclick = () => showRight('comments');
+  $('#mChars').onclick = () => showRight('bible');
+  $('#mObjects').onclick = () => showRight('objects');
+  $('#mFilmtoolz').onclick = () => showRight('objects');
+  $('#mScenes').onclick = () => showLeft('scenes');
+  $('#mRenum').onclick = () => showLeft('scenes');
+  $('#mLock').onclick = () => { showLeft('scenes'); const b = $('#lockNum') || $('#unlockNum'); if (b) b.click(); else if (!canLock()) needProducer('Залочить номера сцен'); };
+  $('#mExportFt').onclick = () => $('#exportMenu [data-exp=docx]').click();
+  $$('[data-type]').forEach((b) => b.onclick = () => { const el = ed.querySelector('.b.cur') || curBlockEl(); if (el) { setType(el, b.dataset.type); setCaret(el.dataset.id, el.textContent.length); } });
+  $$('[data-paper]').forEach((b) => b.onclick = () => { P().rules.paper = b.dataset.paper; P().episodes.forEach((e) => delete e._st); applyPaper(); recompute(); fitPage(); persist(); syncViewMenu(); });
+  const setTheme = (t) => { ls.set('draft.theme', t); applyTheme(); syncViewMenu(); };
+  $('#mThemeLight').onclick = () => setTheme('light'); $('#mThemeDark').onclick = () => setTheme('dark'); $('#mThemeAuto').onclick = () => setTheme('');
+  $('#mZoomIn').onclick = () => setZoom((S.zoomUser || S.zoom) * 1.15);
+  $('#mZoomOut').onclick = () => setZoom((S.zoomUser || S.zoom) / 1.15);
+  $('#mZoomFit').onclick = () => setZoom(null);
+  function setZoom(z) { S.zoomUser = z ? Math.max(0.4, Math.min(2, z)) : null; fitPage(); }
+  // panels: toggled from the toolbar, the View menu and the panel headers
+  const narrow = () => window.matchMedia('(max-width: 1180px)').matches;
+  function toggleLeft() { document.body.classList.toggle('hide-left'); ls.set('draft.hideLeft', document.body.classList.contains('hide-left')); syncViewMenu(); setTimeout(fitPage, 30); }
+  function toggleRight() { if (narrow()) document.body.classList.toggle('show-right'); else { document.body.classList.toggle('hide-right'); ls.set('draft.hideRight', document.body.classList.contains('hide-right')); } syncViewMenu(); setTimeout(fitPage, 30); }
+  function showLeft(tab) { document.body.classList.remove('hide-left', 'focus'); ls.set('draft.hideLeft', false); $$('[data-ltab]').find((b) => b.dataset.ltab === tab).click(); syncViewMenu(); }
+  function showRight(tab) { document.body.classList.remove('hide-right', 'focus'); ls.set('draft.hideRight', false); if (narrow()) document.body.classList.add('show-right'); $$('[data-rtab]').find((b) => b.dataset.rtab === tab).click(); syncViewMenu(); }
+  $('#tbNav').onclick = toggleLeft; $('#mLeft').onclick = toggleLeft; $('#closeLeft').onclick = toggleLeft;
+  $('#tbProd').onclick = toggleRight; $('#mRight').onclick = toggleRight; $('#closeRight').onclick = toggleRight;
+  function syncViewMenu() {
+    const b = document.body.classList;
+    $('#mLeft').classList.toggle('on', !b.contains('hide-left') && !b.contains('focus'));
+    $('#mRight').classList.toggle('on', !b.contains('hide-right') && !b.contains('focus'));
+    $('#tbNav').classList.toggle('on', !b.contains('hide-left') && !b.contains('focus'));
+    $('#tbProd').classList.toggle('on', !b.contains('hide-right') && !b.contains('focus'));
+    const th = ls.get('draft.theme', '');
+    $('#mThemeLight').classList.toggle('on', th === 'light'); $('#mThemeDark').classList.toggle('on', th === 'dark'); $('#mThemeAuto').classList.toggle('on', !th);
+    $$('[data-paper]').forEach((x) => x.classList.toggle('on', x.dataset.paper === (P() && P().rules.paper)));
+    $('#mLock').textContent = S.ep && S.ep.lock ? 'Снять лок номеров сцен…' : 'Залочить номера сцен…';
+  }
+  if (ls.get('draft.hideLeft', false)) document.body.classList.add('hide-left');
+  if (ls.get('draft.hideRight', false)) document.body.classList.add('hide-right');
+  // status bar hint: what Enter and Tab do in the current element (Final Draft shows the same in its status bar)
+  const HINTS = {
+    scene: '<b>Enter</b> → описание · <b>Tab</b> → описание · заголовок: ИНТ./НАТ./ПАВ. ОБЪЕКТ - ВРЕМЯ',
+    action: '<b>Enter</b> → новое описание · <b>Tab</b> → персонаж',
+    character: '<b>Enter</b> → реплика · <b>Tab</b> (пустой) → переход · имя подставляется по первым буквам',
+    paren: '<b>Enter</b> → реплика · ремарка в скобках',
+    dialogue: '<b>Enter</b> → описание · <b>Tab</b> → ремарка · <b>Ctrl+3</b> → персонаж',
+    transition: '<b>Enter</b> → сцена · <b>Tab</b> (пустой) → описание',
+  };
+  function renderHint() {
+    const el = ed.querySelector('.b.cur') || curBlockEl();
+    const t = el ? el.dataset.t : '';
+    $('#hint').innerHTML = !canEdit() ? 'Только чтение' : (HINTS[t] || '<b>Tab</b> и <b>Enter</b> переключают элементы · <b>Ctrl+1…6</b> задают тип');
+  }
+  document.addEventListener('selectionchange', debounce(renderHint, 80));
+  // Help menu
+  const KEYS_HTML = '<div class="tbl-wrap"><table class="t"><tbody>' + [['Enter', 'Следующий элемент (описание → описание, персонаж → реплика, реплика → описание)'], ['Tab', 'Описание → персонаж, реплика → ремарка, пустой персонаж → переход'], ['Shift+Tab', 'Предыдущий тип элемента'], ['Ctrl+1 … Ctrl+6', 'Сцена, описание, персонаж, ремарка, реплика, переход'], ['Ctrl+Z / Ctrl+Y', 'Отменить / повторить'], ['Ctrl+Alt+M', 'Комментарий к выделенному'], ['Ctrl+S', 'Сохранить на этом компьютере (сохраняется и само)'], ['Esc', 'Закрыть окно или меню']].map((r) => '<tr><td class="n">' + r[0] + '</td><td>' + r[1] + '</td></tr>').join('') + '</tbody></table></div>';
+  function showStart() {
+    modal('<h2>Начало работы</h2><p>«Драфт» — сценарный редактор в формате Final Draft. Страница на экране совпадает со страницей на бумаге: одна страница ≈ одна минута экрана.</p>' +
+      '<ol class="start"><li><b>Пишите, не отвлекаясь на формат.</b> Начните заголовок с ИНТ., НАТ. или ПАВ. — он станет сценой. <b>Enter</b> и <b>Tab</b> переключают элементы, тип всегда виден в левом верхнем углу.</li>' +
+      '<li><b>Имена подставляются сами.</b> Начните печатать персонажа или объект — список появится по первым буквам.</li>' +
+      '<li><b>Ничего не теряется.</b> Текст сохраняется сам, каждые 15 минут делается снимок (Файл → История), крупные версии фиксируйте кнопкой «Сохранить драфт».</li>' +
+      '<li><b>Навигатор слева</b> — серии и сцены; <b>Производство справа</b> — хронометраж, павильон, проверка по параметрам студии, замечания, персонажи, объекты.</li>' +
+      '<li><b>Экспорт</b> — PDF в формате Final Draft, .fdx и Word для FilmToolz. У каждого PDF именной водяной знак.</li></ol>' +
+      KEYS_HTML + '<div class="actions"><button class="btn primary" id="stGo">Начать</button></div>', (m) => { $('#stGo', m).onclick = () => { ls.set('draft.started', true); closeModal(); ed.focus(); }; });
+  }
+  $('#mStart').onclick = showStart;
+  $('#mKeys').onclick = () => modal('<h2>Клавиши</h2>' + KEYS_HTML + '<div class="actions"><button class="btn primary" id="kC">Закрыть</button></div>', (m) => { $('#kC', m).onclick = closeModal; });
+  $('#mFormatHelp').onclick = () => modal('<h2>Формат сценария</h2><p class="note">Страница: Courier 12, 54 строки (Letter, как в Final Draft) или 58 строк (A4). Поля 1,5" слева и 1" с остальных сторон. Персонаж от 3,7", ремарка от 3,1", реплика от 2,5" шириной 3,5". Русская «американка» на A4: поля 3,75 / 1,25 / 2,5 / 2,5 см, персонаж 6,75 см от поля, реплика 3,75 / 3,75 см, ремарка 5,5 / 4,5 см. Шаблон листа выбирается в меню Формат.</p>' +
+    '<p class="note">Заголовок сцены: ИНТ./НАТ./ПАВ. ОБЪЕКТ. ПОДОБЪЕКТ - ВРЕМЯ (ДЕНЬ, НОЧЬ, УТРО, ВЕЧЕР, РЕЖИМ). Номера сцен ставятся в сценарии автоматически; перед производством продюсер или редактор лочит номера, после чего вставка даёт 12A, а удаление оставляет «УДАЛЕНА».</p><div class="actions"><button class="btn primary" id="fhC">Закрыть</button></div>', (m) => { $('#fhC', m).onclick = closeModal; });
+  $('#mAbout').onclick = () => modal('<h2>Драфт</h2><p class="note">Русскоязычный сценарный редактор в формате Final Draft: точная страница, нумерация и ревизии как в производстве, экспорт в FilmToolz, продюсерские замечания, история изменений и защита текста.</p><div class="actions"><button class="btn primary" id="abC">Закрыть</button></div>', (m) => { $('#abC', m).onclick = closeModal; });
+  // global shortcuts that work outside the editor too
+  document.addEventListener('keydown', (e) => {
+    const mod = e.ctrlKey || e.metaKey;
+    if (mod && (e.key === 'p' || e.key === 'з')) { e.preventDefault(); $('#exportMenu [data-exp=pdf]').click(); }
+    if (mod && e.shiftKey && (e.key === 'S' || e.key === 'Ы' || e.key === 's' || e.key === 'ы')) { e.preventDefault(); $('#btnDraft').click(); }
+    if (mod && (e.key === '=' || e.key === '+')) { e.preventDefault(); $('#mZoomIn').click(); }
+    if (mod && e.key === '-') { e.preventDefault(); $('#mZoomOut').click(); }
+    if (mod && e.key === '0') { e.preventDefault(); setZoom(null); }
+  });
 
   // ---------- boot ----------
   async function boot() {
@@ -1537,13 +1646,15 @@
     openProject(db.currentProjectId);
     renderRight();
     fitPage();
+    syncViewMenu(); renderHint();
+    if (!ls.get('draft.started', false)) showStart();
   }
   // the sheet keeps its real 8.5in geometry and is scaled to fit narrow windows
   S.zoom = 1;
   const pagePx = () => Math.round(C.paperOf(P().rules).w * 96);
   function fitPage() {
     const w = $('#desk').clientWidth - 24;
-    const z = Math.max(0.4, Math.min(1, w / pagePx()));
+    const z = S.zoomUser || Math.max(0.4, Math.min(1, w / pagePx()));
     S.zoom = z;
     $('#page').style.transform = z === 1 ? '' : 'scale(' + z + ')';
     sizePage();
@@ -1552,7 +1663,22 @@
   function sizePage() {
     const z = S.zoom || 1;
     $('#pageWrap').style.width = (pagePx() * z) + 'px';
-    $('#pageWrap').style.height = z === 1 ? '' : ($('#page').offsetHeight * z) + 'px';
+    $('#pageWrap').style.height = z === 1 ? '' : (($('#page').offsetHeight + 22) * z) + 'px';
+    renderRuler2();
+  }
+  // inch ruler above the sheet, like the one in Final Draft: the shaded part is the text area
+  function renderRuler2() {
+    const paper = C.paperOf(P().rules);
+    const r = $('#pageRuler');
+    const z = S.zoom || 1;
+    r.style.width = pagePx() + 'px'; r.style.transform = z === 1 ? '' : 'scale(' + z + ')';
+    let html = '<span class="tx" style="left:' + (paper.left * 96) + 'px;width:' + ((paper.w - paper.left - paper.right) * 96) + 'px"></span>';
+    for (let q = 0; q <= paper.w * 4; q++) {
+      const x = q * 24;
+      html += '<i class="' + (q % 4 === 0 ? 'big' : '') + '" style="left:' + x + 'px"></i>';
+      if (q % 4 === 0 && q) html += '<b style="left:' + x + 'px">' + (q / 4) + '</b>';
+    }
+    r.innerHTML = html;
   }
   window.addEventListener('resize', debounce(fitPage, 150));
   $('#btnFocus').addEventListener('click', () => setTimeout(fitPage, 50));

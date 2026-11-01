@@ -470,8 +470,8 @@
   // scene numbers taken from a file: duplicates, gaps, wrong order; a proposal keeps the file's "51-" prefix
   // ---------- locked scene numbers (shooting script) ----------
   // After the lock, numbers never move: a new scene between 12 and 13 becomes 12A (then 12B…), a scene inserted before the
-  // first one becomes A1, a deleted scene keeps its number as «ОПУЩЕНА» (OMITTED). Numbers may carry an episode prefix «3-12».
-  const OMIT_RE = /^\s*(ОПУЩЕНА|OMITTED)\b/i;
+  // first one becomes A1, a deleted scene keeps its number as «УДАЛЕНА» (OMITTED). Numbers may carry an episode prefix «3-12».
+  const OMIT_RE = /^\s*(УДАЛЕНА|ОПУЩЕНА|OMITTED)\b/i;
   const NUM_PARTS = /^(\d+-)?([A-ZА-Я]*)(\d+)([A-ZА-Я]*)$/;
   const LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
   function numParts(num) {
@@ -529,7 +529,7 @@
     const first = scenes[0];
     return first ? first.from : blocksLength;
   }
-  function omittedHeading(num) { return 'ОПУЩЕНА'; }
+  function omittedHeading(num) { return 'УДАЛЕНА'; }
 
   function numberingCheck(scenes, lock) {
     const issues = [];

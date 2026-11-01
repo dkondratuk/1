@@ -17,7 +17,7 @@ const nm=require('path').resolve(__dirname,'../node_modules')+'/';
   const docx=await exp('docx'); const pdf=await exp('pdf'); const txt=await exp('fountain');
   await exp('project');
   for (const f of [fdx,docx,pdf,txt]) {
-    await p.click('#btnImport'); await p.waitForTimeout(200);
+    await p.locator('#btnImport').dispatchEvent('click'); await p.waitForTimeout(200);
     const [fc]=await Promise.all([p.waitForEvent('filechooser'), p.click('#drop')]); await fc.setFiles(f);
     await p.waitForSelector('#impDone',{timeout:15000});
     console.log(f, '->', (await p.locator('#modal p').first().innerText()));

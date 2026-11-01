@@ -4,6 +4,7 @@ const path = require('path'), fs = require('fs');
 const pdfjs = require('pdfjs-dist/legacy/build/pdf.js');
 (async () => {
   const b = await chromium.launch(); const p = await b.newPage({ viewport: { width: 1440, height: 900 } });
+  await p.addInitScript(() => { try { localStorage.setItem('draft.started', 'true'); } catch (e) {} });
   const errs = []; p.on('pageerror', (e) => errs.push(e.message)); p.on('console', (m) => { if (m.type() === 'error') errs.push(m.text()); });
   const nm = path.resolve(__dirname, '../node_modules') + '/';
   await p.route('**/*', (r) => { const u = r.request().url();
@@ -33,7 +34,7 @@ const pdfjs = require('pdfjs-dist/legacy/build/pdf.js');
   const fdx = await ev(() => window.__draft.C.exportFDX(window.__draft.S.ep, window.__draft.S.project, window.__draft.S.st, {}));
   console.log('fdx omitted:', /Number="2" Type="Scene Heading"><SceneProperties[^>]*\/><Text>OMITTED/.test(fdx), 'fdx 1A:', fdx.includes('Number="1A"'));
   const docx = await ev(() => window.__draft.C.docxDocumentXML(window.__draft.S.ep, window.__draft.S.project, window.__draft.S.st));
-  console.log('docx has omitted:', docx.includes('ОПУЩЕНА'), 'docx has 1A:', docx.includes('1-1A.'));
+  console.log('docx has omitted:', docx.includes('УДАЛЕНА'), 'docx has 1A:', docx.includes('1-1A.'));
   // restore the omitted scene
   await p.click('#scRestore'); await p.waitForTimeout(300);
   console.log('after restore', await ev(() => window.__draft.S.st.scenes.map((s) => s.num + (s.omitted ? '*' : '')).join(',')));

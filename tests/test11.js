@@ -1,6 +1,7 @@
 const { chromium } = require('playwright');
 (async()=>{
   const b=await chromium.launch(); const p=await b.newPage({viewport:{width:1440,height:900}});
+  await p.addInitScript(() => { try { localStorage.setItem('draft.started', 'true'); } catch (e) {} });
   p.on('pageerror',e=>console.log('PE',e.message)); p.on('console',m=>{ if(m.type()==='error') console.log('CE',m.text()); });
   await p.route('**/*',r=>r.request().url().startsWith('file:')?r.continue():r.abort());
   await p.goto('file://'+require('path').resolve(__dirname,'../app/_test.html')); await p.waitForTimeout(600);
@@ -11,7 +12,7 @@ const { chromium } = require('playwright');
   await p.click('#editor .b.t-action'); await p.keyboard.press('End'); await p.keyboard.type(' ДОБАВЛЕНО ПОСЛЕ СНИМКА'); await p.waitForTimeout(500);
   const h2 = await p.evaluate(async()=>{ const d=window.__draft; d.recompute(); await d.histAdd(d.S.ep,'тест 2'); return (await d.histLoad(d.S.ep)).length; });
   console.log('snaps', h2);
-  await p.click('#btnHistory'); await p.waitForTimeout(400);
+  await p.locator('#btnHistory').dispatchEvent('click'); await p.waitForTimeout(400);
   console.log('rows', await p.locator('.hist-row').count(), 'diff', await p.locator('#hsView .diff').count());
   await p.locator('.hist-row').nth(1).click(); await p.waitForTimeout(200);
   console.log('del lines', await p.locator('#hsView .diff .del').count(), 'add', await p.locator('#hsView .diff .add').count());
