@@ -47,6 +47,18 @@ const paste = (p, text) => p.evaluate((text) => { const dt = new DataTransfer();
     await p.keyboard.type('ИВАН П', { delay: 10 }); await p.waitForTimeout(100); await p.keyboard.press('Tab'); await p.waitForTimeout(100);
     eq((await blocks(p))[1], ['character', 'ИВАН ПЕТРОВИЧ (ЗК)'], 'accepting a name keeps the extension after the caret');
 
+    // 2b. location autocomplete: an object or sub-object typed in full is not replaced by a longer one
+    await p.evaluate(() => { const P = window.__draft.S.project; P.locs['КУХНЯ'] = {}; P.locs['КУХНЯ ЛЕНЫ'] = {}; });
+    for (const [typed, key, want] of [['ИНТ. КУХНЯ', 'Enter', 'ИНТ. КУХНЯ'], ['ИНТ. КУХНЯ', 'Tab', 'ИНТ. КУХНЯ'], ['ИНТ. КУХНЯ Л', 'Enter', 'ИНТ. КУХНЯ ЛЕНЫ'], ['ИНТ. КУХ', 'Tab', 'ИНТ. КУХНЯ']]) {
+      await setDoc(p, [['scene', '']]); await sel(p, 0, 0);
+      await p.keyboard.type(typed, { delay: 10 }); await p.waitForTimeout(100); await p.keyboard.press(key); await p.waitForTimeout(100);
+      eq((await blocks(p))[0], ['scene', want], 'heading «' + typed + '» + ' + key);
+    }
+    await setDoc(p, [['scene', 'ИНТ. ДОМ. ЗАЛ - ДЕНЬ'], ['scene', 'ИНТ. ДОМ. ЗАЛ БОЛЬШОЙ - ДЕНЬ'], ['scene', 'ИНТ. ДОМ. ЗАЛ БОЛЬШОЙ - НОЧЬ'], ['scene', '']]); await sel(p, 3, 0);
+    await p.keyboard.type('ИНТ. ДОМ. ЗАЛ', { delay: 10 }); await p.waitForTimeout(100); await p.keyboard.press('Enter'); await p.waitForTimeout(100);
+    eq((await blocks(p))[3], ['scene', 'ИНТ. ДОМ. ЗАЛ'], 'sub-object typed in full + Enter stays');
+    await p.evaluate(() => { const P = window.__draft.S.project; delete P.locs['КУХНЯ']; delete P.locs['КУХНЯ ЛЕНЫ']; });
+
     // 3. Tab / Shift+Tab / Enter on empty elements cycle types instead of inserting a suggestion
     await setDoc(p, [['scene', 'ИНТ. КУХНЯ - ДЕНЬ'], ['action', '']]); await sel(p, 1, 0);
     const seq = [];

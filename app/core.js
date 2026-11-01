@@ -2,8 +2,9 @@
 (function (root) {
   'use strict';
 
-  const TYPES = ['scene', 'action', 'character', 'paren', 'dialogue', 'transition'];
-  const TYPE_LABEL = { scene: 'Сцена', action: 'Описание', character: 'Персонаж', paren: 'Ремарка', dialogue: 'Реплика', transition: 'Переход' };
+  // the order is the shortcut: Ctrl+1 … Ctrl+7 (Final Draft's Shot comes last, so Ctrl+1…6 stay as they were)
+  const TYPES = ['scene', 'action', 'character', 'paren', 'dialogue', 'transition', 'shot'];
+  const TYPE_LABEL = { scene: 'Сцена', action: 'Описание', character: 'Персонаж', paren: 'Ремарка', dialogue: 'Реплика', transition: 'Переход', shot: 'Кадр' };
 
   // Final Draft default screenplay geometry, as in the ElementSettings of FDX files saved by Final Draft 11/13.
   // Indent: inches from the left edge of the sheet; width: characters (Courier 12 = 10 characters per inch);
@@ -15,6 +16,8 @@
     paren:      { indent: 3.0, width: 25, sb: 0 },
     dialogue:   { indent: 2.5, width: 35, sb: 0 },
     transition: { indent: 5.5, width: 16, sb: 1, right: true, edge: 7.1 },
+    // Final Draft Shot («КРУПНО — ЛИЦО ИВАНА»): the action column, in capitals, one blank line before
+    shot:       { indent: 1.5, width: 60, sb: 1 },
   };
   // Russian «американка» (screenwriter.ru): A4, margins top/bottom 2.5 cm, left 3.75 cm, right 1.25 cm (text 16 cm = 63 chars);
   // character 6.75 cm from the left margin, dialogue 3.75/3.75 cm, parenthetical 5.5/4.5 cm.
@@ -26,7 +29,43 @@
     paren:      { indent: cm(3.75 + 5.5), width: 23, sb: 0 },
     dialogue:   { indent: cm(3.75 + 3.75), width: 33, sb: 0 },
     transition: { indent: cm(3.75 + 10), width: 23, sb: 1, right: true },
+    shot:       { indent: cm(3.75), width: 63, sb: 1 },
   };
+  // Dual dialogue (Final Draft Format → Dual Dialogue): two speeches side by side, each in half of the action column.
+  // In a column the dialogue starts at the column's edge, the parenthetical 0.5 in and the cue 1.0 in into it; on Letter
+  // that is dialogue 1.50 in / 4.50 in, 2.7 in wide, as Final Draft lays out the pair.
+  const DUAL_CACHE = new Map();
+  function dualFmt(F) {
+    F = F || FMT;
+    if (DUAL_CACHE.has(F)) return DUAL_CACHE.get(F);
+    const col = F.action.width / 2;
+    const out = [0, 1].map((k) => {
+      const o = F.action.indent + k * col / 10;
+      return {
+        character: { indent: o + 1.0, width: col - 12, sb: F.character.sb },
+        paren: { indent: o + 0.5, width: col - 10, sb: 0 },
+        dialogue: { indent: o, width: col - 3, sb: 0 },
+      };
+    });
+    DUAL_CACHE.set(F, out);
+    return out;
+  }
+  // pairs of speeches printed side by side: the second cue carries dual; the first speech is the one right before it
+  // (cue, then only parentheticals and dialogue). a: first cue, b: the dual cue, e: the last element of the second speech
+  function dualPairs(blocks) {
+    const out = [];
+    let cue = -1;
+    for (let i = 0; i < (blocks || []).length; i++) {
+      const b = blocks[i];
+      if (b.t === 'character') {
+        // three at once is not a thing in Final Draft: a speech already on the right never starts another pair
+        if (b.dual && cue >= 0 && !(out.length && out[out.length - 1].b === cue)) out.push({ a: cue, b: i, e: i });
+        cue = i;
+      } else if (b.t === 'paren' || b.t === 'dialogue') { if (out.length && out[out.length - 1].b === cue) out[out.length - 1].e = i; }
+      else cue = -1;
+    }
+    return out;
+  }
   // page templates: lines = text lines per page at 6 lines per inch; margins in inches
   const PAPER = {
     letter: { name: 'Letter (Final Draft)', w: 8.5, h: 11, lines: 54, fmt: FMT, top: 1, bottom: 1, left: 1.5, right: 1 },
@@ -59,6 +98,8 @@
     baseObjectsMax: 3,
     newObjectMinPages: 7,
     nightMaxPct: 10,
+    extMaxPct: 30,
+    maxCharsPerEpisode: 20,
     bigCast: 5,
     bigCastMaxScenes: 3,
     ensembleMinSec: 30,
@@ -167,7 +208,7 @@
   }
   function displayText(b) {
     const t = b.x || '';
-    return (b.t === 'scene' || b.t === 'character' || b.t === 'transition') ? up(t) : t;
+    return (b.t === 'scene' || b.t === 'character' || b.t === 'transition' || b.t === 'shot') ? up(t) : t;
   }
   // a right-aligned element ends at its own edge (Final Draft transition: 7.10 in) or at the right margin
   const rightEdge = (f, paper) => f.edge || paper.w - paper.right;
@@ -190,6 +231,8 @@
     return k >= 2 ? { head: lines.slice(0, k), rest: lines.slice(k).join(' '), done: lines.slice(0, k).join(' ') } : null;
   }
 
+  // lines an item takes on its page: a dual pair counts once, on its first item, as tall as its longer column
+  const itH = (it) => (it.dual ? (it.dualH != null ? it.sb + it.dualH : 0) : it.sb + it.lines.length);
   function paginate(blocks, opts) {
     const lpp = (opts && opts.lines) || 54;
     const F = (opts && opts.fmt) || FMT;
@@ -199,6 +242,21 @@
       const lines = wrap(displayText(b), f.width);
       return { lines, L: lines.length, sb: f.sb };
     });
+    // dual dialogue: both speeches of a pair wrap in their own column and go on one page together, as tall as the longer
+    // column; a pair taller than a page (never in practice) is printed one speech after the other
+    const DF = dualFmt(F), pairAt = {}, duals = [];
+    for (const p of dualPairs(blocks)) {
+      const col = (from, to, c) => {
+        let h = 0; const its = [];
+        for (let q = from; q <= to; q++) { const lines = wrap(displayText(blocks[q]), DF[c][blocks[q].t].width); its.push({ q, lines, row: h, col: c }); h += lines.length; }
+        return { its, h };
+      };
+      const L = col(p.a, p.b - 1, 0), R = col(p.b, p.e, 1), h = Math.max(L.h, R.h);
+      if (h > lpp - 2) continue;
+      Object.assign(p, { h, hL: L.h, hR: R.h, its: L.its.concat(R.its) });
+      pairAt[p.a] = p; duals.push(p);
+      for (const x of p.its) info[x.q] = { lines: x.lines, L: x.lines.length, sb: x.q === p.a ? info[x.q].sb : 0, dual: x.col };
+    }
     // breaks: block i starts a page; inner: page breaks inside block i, as a line offset from its top
     const breaks = {}, inner = {};
     let used = 0;
@@ -208,7 +266,7 @@
     const labels = PL ? [PL.label(0)] : null;
     const items = () => pages[pages.length - 1].items;
     const newPage = (q) => { pages.push({ items: [] }); used = 0; if (PL) labels.push(PL.next(q)); };
-    const put = (it) => { items().push(it); used += it.sb + it.lines.length; };
+    const put = (it) => { items().push(it); used += itH(it); };
     // the cue repeated at the top of the next page keeps its extension: ИВАН (ЗК) (ПРОД.)
     const contd = (i) => ({ i, t: 'character', lines: [lastCue + ' (ПРОД.)'], sb: 0, contd: true });
     // an «УДАЛЕНА» heading is a whole scene of its own: it stays on the page where the scene was
@@ -218,10 +276,12 @@
     const carryOver = (b, i) => {
       const cur = items(), out = [];
       let u = used, speech = b.t === 'dialogue' || b.t === 'paren';
-      const take = () => { const it = cur.pop(); u -= it.sb + it.lines.length; out.unshift(it); };
+      const take = () => { const it = cur.pop(); u -= itH(it); out.unshift(it); };
       while (cur.length) {
         const it = cur[cur.length - 1];
-        if (it.t === 'scene' && !omitted(it.i)) { take(); speech = false; continue; }
+        // a dual pair is never pulled apart; a shot, like a heading, goes with what it introduces
+        if (it.dual) break;
+        if ((it.t === 'scene' && !omitted(it.i)) || it.t === 'shot') { take(); speech = false; continue; }
         if (!speech) break;
         if (it.t === 'paren') take();
         else if (it.t === 'character') { take(); speech = false; }
@@ -241,7 +301,13 @@
       if (PL) {
         // a locked page starts where it started at the lock, however much text the page before it lost or gained:
         // the break is forced here (a heading or cue left at the bottom still goes along with its text)
-        const a = PL.at.get(i), force = (q) => {
+        let a = PL.at.get(i);
+        // a locked page that started inside a dual pair (laid out one after the other at the lock) starts with the pair
+        if (pairAt[i]) for (let q = i + 1; q <= pairAt[i].e; q++) {
+          const aq = PL.at.get(q);
+          if (aq && aq.start != null && (!a || a.start == null || aq.start > a.start)) a = { start: aq.start, mids: ((a && a.mids) || []).concat(aq.mids) };
+        }
+        const force = (q) => {
           if (!items().length) { labels[labels.length - 1] = PL.next(q); return; }
           const carry = carryOver(b, i);
           newPage(q);
@@ -252,12 +318,27 @@
         if (a && a.start != null && a.start > PL.cur) force(a.start);
         if (a) PL.mids = a.mids.filter((q) => q > PL.cur);
       }
+      const pr = pairAt[i];
+      if (pr) {
+        lastChar = lastCue = '';
+        let sb = used === 0 ? 0 : inf.sb;
+        if (sb + pr.h > lpp - used) {
+          const carry = used > 0 ? carryOver(b, i) : null;
+          newPage();
+          if (carry && carry.length) { carry[0].sb = 0; carry.forEach(put); breaks[carry[0].i] = { page: pages.length }; } else breaks[i] = { page: pages.length };
+          sb = used === 0 ? 0 : inf.sb;
+        }
+        pr.its.forEach((x, n) => items().push(Object.assign({ i: x.q, t: blocks[x.q].t, lines: x.lines, sb: n ? 0 : sb, dual: { col: x.col, row: x.row } }, n ? {} : { dualH: pr.h })));
+        used += sb + pr.h;
+        i = pr.e;
+        continue;
+      }
       const f = F[b.t] || F.action, nb = blocks[i + 1], next = info[i + 1];
       let sb = used === 0 ? 0 : inf.sb;
       let need = sb + inf.L;
       // keep with next: a heading takes at least 2 lines of the next element, a cue the first line of its speech,
       // a parenthetical the dialogue line after it
-      if (next && b.t === 'scene' && !omitted(i)) need += next.sb + Math.min(next.L, 2);
+      if (next && ((b.t === 'scene' && !omitted(i)) || b.t === 'shot')) need += next.sb + Math.min(pairAt[i + 1] ? pairAt[i + 1].h : next.L, 2);
       if (next && b.t === 'character') need += next.sb + 1;
       if (next && b.t === 'paren' && nb.t === 'dialogue') need += 1;
       if (need <= lpp - used) { put({ i, t: b.t, lines: inf.lines, sb }); continue; }
@@ -288,9 +369,9 @@
       }
     }
     const last = pages[pages.length - 1];
-    const lastUsed = last.items.reduce((a, it) => a + it.sb + it.lines.length, 0);
+    const lastUsed = last.items.reduce((a, it) => a + itH(it), 0);
     const total = blocks.length ? (pages.length - 1) + lastUsed / lpp : 0;
-    return { pages, total, info, breaks, inner, lpp, labels: labels || pages.map((pg, k) => String(k + 1)), locked: !!PL };
+    return { pages, total, info, breaks, inner, lpp, labels: labels || pages.map((pg, k) => String(k + 1)), locked: !!PL, duals };
   }
 
   // ---------- locked pages (Final Draft «Lock Pages») ----------
@@ -394,7 +475,8 @@
       const lv = r.level || 0, base = r.base || [];
       if (!lv) continue;
       const was = new Map(base.map((b) => [b.id, b])), at = new Map(base.map((b, k) => [b.id, k]));
-      const chg = blocks.map((b) => { const o = was.get(b.id); return !o || o.t !== b.t || (o.x || '') !== (b.x || ''); });
+      // dual dialogue switched on or off is a change of the page too (a base taken before the flag existed has none)
+      const chg = blocks.map((b) => { const o = was.get(b.id); return !o || o.t !== b.t || (o.x || '') !== (b.x || '') || !!o.dual !== !!(b.dual && b.t === 'character'); });
       const idx = [], val = [];
       blocks.forEach((b, i) => { if (at.has(b.id)) { idx.push(i); val.push(at.get(b.id)); } });
       const inOrder = lnds(val);
@@ -416,7 +498,7 @@
   // a fresh draft: the next level, its number name (colour only for FDX), and the text it is measured against
   function newRevision(prevLevel, blocks, by, date) {
     const level = (prevLevel || 0) + 1;
-    return { level, name: revName(level), color: revColor(level), date: date || Date.now(), by: by || '', base: blocks.map((b) => ({ id: b.id, t: b.t, x: b.x || '' })) };
+    return { level, name: revName(level), color: revColor(level), date: date || Date.now(), by: by || '', base: blocks.map((b) => (b.dual && b.t === 'character' ? { id: b.id, t: b.t, x: b.x || '', dual: true } : { id: b.id, t: b.t, x: b.x || '' })) };
   }
   // FDX import: marks read from RevisionID become revisions whose base is the text without the marks of that level and
   // above, so revMarks gives every block back exactly the level it had in Final Draft
@@ -458,6 +540,12 @@
     lay.pages.forEach((pg, k) => pg.items.forEach((it) => { if (pageAt[it.i] == null) pageAt[it.i] = lay.labels[k]; }));
     const minutes = pages * rules.minPerPage;
     const nominal = lay.info.map((inf, i) => (i === 0 ? 0 : inf.sb) + inf.L);
+    // a dual pair takes the height of its longer column, not both: the second speech adds only what overhangs the first
+    for (const p of lay.duals || []) {
+      let r = 0;
+      for (let q = p.b; q <= p.e; q++) { r += nominal[q]; nominal[q] = 0; }
+      nominal[p.b - 1] += Math.max(0, r - p.hL);
+    }
     const totalNominal = nominal.reduce((a, b) => a + b, 0) || 1;
     const locs = project.locs || {};
     const chars = project.chars || {};
@@ -474,7 +562,7 @@
         const b = blocks[i];
         if (b.t === 'character') { speaker = charName(b.x); if (speaker) { speaking.add(speaker); replicas++; } }
         if (b.t === 'dialogue') dialogueWords += clean(b.x).split(' ').filter(Boolean).length;
-        if (b.t === 'action') {
+        if (b.t === 'action' || b.t === 'shot') {
           const U = b.x || '';
           for (const n of dictNames) if (n.length > 1 && new RegExp('(^|[^А-ЯЁA-Z])' + n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '($|[^А-ЯЁA-Z])').test(U)) mentioned.add(n);
         }
@@ -540,7 +628,8 @@
     const objList = Object.values(objects).map((o) => Object.assign(o, {
       share: o.lines / sceneLines, base: !!(locs[o.name] || {}).base, main: !!(locs[o.name] || {}).main,
     })).sort((a, b) => b.lines - a.lines);
-    let main = objList.find((o) => o.main) || objList.find((o) => o.pav) || objList[0] || null;
+    // the main pavilion is the object marked «основной», or else a pavilion: an episode with neither has none
+    let main = objList.find((o) => o.main) || objList.find((o) => o.pav) || null;
     const totalShifts = live.reduce((a, s) => a + s.shifts, 0);
     const sum = (f) => live.filter(f).reduce((a, s) => a + s.min, 0);
     const tot = minutes || 1;
@@ -735,7 +824,7 @@
       (widths ? '<cols>' + widths.map((w, i) => '<col min="' + (i + 1) + '" max="' + (i + 1) + '" width="' + w + '" customWidth="1"/>').join('') + '</cols>' : '') +
       '<sheetData>' + rows.map((row, r) => '<row r="' + (r + 1) + '">' + row.map((v, c) => cell(v, r, c, r === 0 ? 1 : typeof v === 'string' && v.length > 40 ? 2 : 0)).join('') + '</row>').join('') + '</sheetData></worksheet>';
   }
-  // sheets «Сцены», «Объекты», «Персонажи», «Разбивка»; returns { path: xml } for a zip
+  // sheets «Сцены», «Объекты», «Персонажи», «Разбивка», «По объектам»; returns { path: xml } for a zip
   function breakdownXLSX(ep, project, st) {
     const cats = BREAKDOWN.filter((c) => c.id !== 'extras');
     const join = (list) => (list || []).map((x) => x.name).join(', ');
@@ -746,7 +835,7 @@
       // the crowd column takes the breakdown's «Массовка» items, or the scene's own «Массовка» mark
       const crowd = join(bd.extras) || (s.tags.includes('crowd') ? 'да' : '');
       scenes.push([s.num, s.heading || '', s.omitted ? '' : s.h.object, s.omitted ? '' : s.h.time, s.omitted ? '' : (s.h.prefix || '') + (s.pav && s.h.type !== 'pav' ? ' (пав.)' : ''),
-        s.day || '', s.omitted ? '' : fmtPages(s.pages), s.omitted ? '' : fmtTime(s.min), s.cast.join(', '), crowd, ...cats.map((c) => join(bd[c.id]))]);
+        s.day || '', s.omitted ? '' : fmtScenePages(s), s.omitted ? '' : fmtTime(s.min), s.cast.join(', '), crowd, ...cats.map((c) => join(bd[c.id]))]);
     }
     const objects = [['Объект', 'Павильон', 'Сцен', 'Страницы', 'Хронометраж', '%', 'Смен']];
     for (const o of st.objects) objects.push([o.name, o.pav ? 'да' : 'нет', o.scenes, fmtPages(o.pages), fmtTime(o.min), round(o.share * 100, 1), round(o.shifts, 2)]);
@@ -754,11 +843,15 @@
     for (const c of st.characters || []) chars.push([c.name, c.scenes, c.replicas, fmtTime(c.min)]);
     const items = [['Категория', 'Элемент', 'Сцены', 'Сцен', 'Примечание']];
     for (const it of breakdownItems(st)) items.push([BD[it.cat].name, it.name, it.scenes.join(', '), it.scenes.length, it.notes.join('; ')]);
+    // per object: what the scenes shot there need, by category (the «Разбивка» tab's object summary)
+    const byObj = [['Объект', 'Сцены', 'Сцен', ...BREAKDOWN.map((c) => c.name)]];
+    for (const o of breakdownByObject(st)) byObj.push([o.name, o.scenes.join(', '), o.scenes.length, ...BREAKDOWN.map((c) => (o.cats[c.id] || []).join(', '))]);
     const sheets = [
       ['Сцены', xlSheet(scenes, [7, 44, 22, 10, 12, 10, 10, 11, 30, 18, ...cats.map(() => 18)])],
       ['Объекты', xlSheet(objects, [30, 10, 7, 10, 12, 7, 7])],
       ['Персонажи', xlSheet(chars, [26, 7, 8, 13])],
       ['Разбивка', xlSheet(items, [18, 30, 24, 7, 30])],
+      ['По объектам', xlSheet(byObj, [30, 18, 7, ...BREAKDOWN.map(() => 20)])],
     ];
     const NS = 'http://schemas.openxmlformats.org/', XML = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
     const files = {
@@ -813,6 +906,9 @@
       add('main', 'Основной павильон: ' + st.main.name, status,
         Math.round(share) + '% материала · ' + Math.round(shiftShare) + '% смен', [],
         'Нужно ≥ ' + r.mainShareMin + '% материала и ≥ ' + r.mainShiftShareMin + '% смен. Основной объект отмечается во вкладке «Объекты».');
+    } else if (st.objects.length) {
+      add('main', 'Основной павильон не найден', 'fail', '0% материала', st.objects.map((o) => ({ text: o.name + ' · ' + fmtPages(o.pages) + ' стр.' })),
+        'Ни один объект не отмечен как павильон или основной. Нужно ≥ ' + r.mainShareMin + '% материала в основном павильоне; отметьте его во вкладке «Объекты».');
     }
     const nObj = st.objects.length;
     add('objects', 'Число объектов', nObj <= r.baseObjectsMax ? 'ok' : nObj <= r.baseObjectsMax + 2 ? 'warn' : 'fail',
@@ -835,6 +931,14 @@
     add('night', 'Ночь (без павильона)', nightPct <= r.nightMaxPct ? 'ok' : nightPct <= r.nightMaxPct * 1.5 ? 'warn' : 'fail',
       nightPct.toFixed(1) + '% / ' + r.nightMaxPct + '%', nightScenes.map((s) => sref(s, s.heading + (s.pav ? ' · павильон' : ''))),
       'Ночная жилая натура летом почти под запретом.');
+    // nature (натура) share cap: exterior scenes outside a pavilion, by running time; 0 switches the rule off
+    if (+r.extMaxPct > 0) {
+      const extPct = st.extMin / (st.minutes || 1) * 100;
+      const extScenes = live.filter((s) => !s.pav && (s.h.type === 'ext' || s.h.type === 'intext'));
+      add('ext', 'Натура', extPct <= r.extMaxPct ? 'ok' : extPct <= r.extMaxPct * 1.5 ? 'warn' : 'fail',
+        extPct.toFixed(1) + '% / ' + r.extMaxPct + '%', extScenes.map((s) => sref(s, s.heading + ' · ' + fmtTime(s.min))),
+        'Натура зависит от погоды и света, выработка на ней ниже. Ориентир — не больше ' + r.extMaxPct + '% хронометража.');
+    }
     const extNight = nightScenes.filter((s) => s.h.type === 'ext' || s.h.type === 'intext');
     if (extNight.length) add('extnight', 'Ночная натура', 'warn', extNight.length + ' сц.', extNight.map((s) => sref(s)));
     const big = live.filter((s) => s.cast.length > r.bigCast);
@@ -843,6 +947,13 @@
     const ens = big.filter((s) => s.sec < r.ensembleMinSec);
     add('ensemble', 'Сбор ансамбля короче ' + r.ensembleMinSec + ' с', ens.length ? 'fail' : 'ok', ens.length + ' сц.',
       ens.map((s) => sref(s, s.heading + ' · ' + s.sec + ' с')), 'Раз собрали всех, сцена должна быть плотной.');
+    // characters in the episode (speaking and listed in scene cards); 0 switches the rule off
+    if (+r.maxCharsPerEpisode > 0) {
+      const chars = st.characters || [], nc = chars.length, speak = chars.filter((c) => c.speaking).length, mx = r.maxCharsPerEpisode;
+      add('chars', 'Персонажей в серии', nc <= mx ? 'ok' : nc <= Math.ceil(mx * 1.2) ? 'warn' : 'fail',
+        nc + ' / ' + mx + (speak !== nc ? ' · с репликами ' + speak : ''), chars.map((c) => ({ text: c.name + ' · ' + c.scenes + ' сц.' + (c.speaking ? '' : ' · без реплик') })),
+        'Каждый новый артист — отдельный кастинг, договор и смены.');
+    }
     const small23 = live.filter((s) => s.cast.length >= 2 && s.cast.length <= 3).length;
     add('balance', 'Баланс: сцены на 2–3 артистов', 'info', small23 + ' из ' + live.length);
     const spPct = st.specialMin / (st.minutes || 1) * 100;
@@ -988,6 +1099,10 @@
     if (!w && !r) return '0';
     return (w ? w : '') + (r ? (w ? ' ' : '') + r + '/8' : '');
   }
+  // a scene's length in eighths, as in Final Draft and Movie Magic: a live scene is never shorter than 1/8
+  function sceneEighths(s) { return s.omitted ? 0 : Math.max(1, Math.round((s.pages || 0) * 8)); }
+  function fmtEighths(e) { return fmtPages(e / 8); }
+  function fmtScenePages(s) { return s.omitted ? fmtPages(0) : fmtEighths(sceneEighths(s)); }
   function fmtTime(min) {
     const s = Math.round(min * 60);
     return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
@@ -1030,6 +1145,8 @@
   const NOT_NAMES = /^(ТИТР|НАДПИСЬ|ЗТМ|ВСТАВКА|КОНЕЦ|ПРОДОЛЖЕНИЕ|СМЕНА КАДРА|ЗАТЕМНЕНИЕ|НАПЛЫВ|FADE|CUT)/;
 
   // lines: [{text, indent?(inches from the sheet edge), style?, gapBefore?}] -> blocks
+  // plain text «ИМЯ. Реплика» / «ИМЯ (тихо): реплика»
+  const INLINE_CUE = /^([А-ЯЁA-Z][А-ЯЁA-Z\- ]{1,30}?)\s*(\([^)]*\))?\s*[.:]\s+(.+)$/;
   function classifyLines(lines) {
     const blocks = [];
     const ind = lines.map((l) => l.indent).filter((x) => x != null);
@@ -1037,9 +1154,11 @@
     // a document with named screenplay styles: anything in an unknown style is action, not a continuation
     const styled = lines.filter((l) => styleToType(l.style)).length >= 10;
     let prev = null;
-    const push = (t, x) => { const b = { id: uid(), t, x: clean(x) }; blocks.push(b); prev = b; return b; };
+    let L = null;
+    // a cue line marked dual (Fountain «МАША ^») makes its cue the second speech of a dual dialogue pair
+    const push = (t, x) => { const b = { id: uid(), t, x: clean(x) }; if (t === 'character' && L && L.dual) b.dual = true; blocks.push(b); prev = b; return b; };
     for (let k = 0; k < lines.length; k++) {
-      const L = lines[k];
+      L = lines[k];
       let text = clean(L.text);
       if (!text) { prev = prev && prev.t === 'gap' ? prev : { t: 'gap' }; continue; }
       const style = (L.style || '').toLowerCase();
@@ -1048,7 +1167,8 @@
       const last = blocks[blocks.length - 1];
       const styleType = styleToType(style);
       // the normalised heading drops the number and the script day: both ride on the block to absorb, which puts them in the scene card
-      if (HEADING_START.test(text) || styleType === 'scene') { const b = push('scene', normalizeHeadingText(text)); const ph = parseHeading(text); if (ph.guessed) b.guessed = true; if (ph.num) b.num = ph.num; if (ph.day) b.day = ph.day; continue; }
+      // a Fountain forced action («!ИНТ. ЭТО ПРОСТО ТЕКСТ») is never a heading
+      if ((!L.forced && HEADING_START.test(text)) || styleType === 'scene') { const b = push('scene', normalizeHeadingText(text)); const ph = parseHeading(text); if (ph.guessed) b.guessed = true; if (ph.num) b.num = ph.num; if (ph.day) b.day = ph.day; continue; }
       // a cast list sits in the action column; a lone caps name with text right under it is the cue of the scene's first speech
       const nx = lines[k + 1];
       const cueAbove = text.indexOf(',') < 0 && !!(nx && clean(nx.text) && !nx.gapBefore);
@@ -1069,7 +1189,7 @@
         push('action', text); continue;
       }
       // plain text: inline "ИМЯ. Реплика" or "ИМЯ (тихо): реплика"
-      const inl = text.match(/^([А-ЯЁA-Z][А-ЯЁA-Z\- ]{1,30}?)\s*(\([^)]*\))?\s*[.:]\s+(.+)$/);
+      const inl = text.match(INLINE_CUE);
       if (inl && isCaps(inl[1]) && !NOT_NAMES.test(inl[1]) && !/[.!?]$/.test(inl[1])) {
         push('character', inl[1]);
         if (inl[2]) push('paren', inl[2]);
@@ -1143,6 +1263,8 @@
     if (/paren|ремарк/.test(s)) return 'paren';
     if (/dialog|реплик|диалог/.test(s)) return 'dialogue';
     if (/transit|переход/.test(s)) return 'transition';
+    // Final Draft's Shot element, «Кадр» / «План» in Russian templates
+    if (/^(shot|кадр|план)\b|^(shot|кадр)$/.test(s)) return 'shot';
     if (/action|описан|действ|текст|narration|general/.test(s)) return 'action';
     return null;
   }
@@ -1164,12 +1286,96 @@
     return fixHomoglyphs(t);
   }
 
-  function importText(txt) {
+  // ---------- title page (Final Draft TitlePage, Fountain «Key: value») ----------
+  // ep.titlePage = { fields: what the imported title page said, base: the project/episode values right after the import,
+  // fdx: Final Draft's own paragraphs (alignment, fonts, blank lines) with a role on the ones we read, extra: other
+  // Fountain keys }. A field is written back as it was imported until its project or episode value is changed here.
+  const EPISODE_RE = /^(?:Серия|Эпизод|Episode|Ep\.)(?![\p{L}])/iu;
+  const CREDIT_RE = /^(?:written by|screenplay by|teleplay by|story by|by|автор(?:ы)?(?: сценария)?|сценарий|сценаристы?|по сценарию)\s*:?$/iu;
+  const TPDATE_RE = /\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{4}-\d\d-\d\d|(?:январ|феврал|март|апрел|ма[яй]|июн|июл|август|сентябр|октябр|ноябр|декабр|January|February|March|April|May|June|July|August|September|October|November|December)[\p{L}]*\s+(?:\d{1,2},?\s+)?\d{4}/iu;
+  function parseEpisodeLine(s) {
+    const m = clean(s).replace(EPISODE_RE, '').match(/^\s*(\d+)?\s*[.:,—–-]?\s*(.*)$/u);
+    const title = clean(m[2] || '').replace(/^[«"“]+|[»"”]+$/g, '');
+    return { number: m[1] ? +m[1] : null, title };
+  }
+  const tpEpKey = (ep) => (ep.number || '') + '|' + (ep.title || '');
+  const tpEpLine = (ep) => 'Серия ' + (ep.number || '') + (ep.title ? '. ' + ep.title : '');
+  // the values a title page shows now: imported text where nothing changed since, the project's and episode's otherwise
+  function titleInfo(ep, project, today) {
+    const tp = ep.titlePage || null, b = (tp && tp.base) || null, f = (tp && tp.fields) || {};
+    const lv = ep.revLevel || 0, draftNow = revName(lv);
+    const revDate = ((ep.revisions || []).find((r) => r.level === lv) || {}).date;
+    const same = (k, cur) => !!b && (b[k] || '') === (cur || '');
+    // changed: the project or episode value differs from the one the title page was imported with (always, without one)
+    const changed = { title: !same('title', project.name), author: !same('author', project.author), contact: !same('contact', project.contact),
+      draft: !same('draft', draftNow), episode: !same('episode', tpEpKey(ep)) };
+    changed.date = changed.draft;
+    return {
+      changed,
+      title: !changed.title && f.title ? f.title : project.name || '',
+      author: !changed.author && f.author != null ? f.author : project.author || '',
+      contact: !changed.contact && f.contact != null ? f.contact : project.contact || '',
+      draft: !changed.draft && f.draft ? f.draft : draftNow,
+      date: !changed.date && f.date ? f.date : ruDate(isoDay(today || revDate || Date.now())),
+      episode: tpEpLine(ep),
+      extra: (tp && tp.extra) || [],
+    };
+  }
+  // after an import: a new episode takes its title and number from the title page, an empty author or contact of the
+  // project is filled in, and the title page is kept on the episode to be written back
+  function adoptTitlePage(tp, ep, project, isNew) {
+    if (!tp || !tp.fields) return;
+    const f = tp.fields;
+    if (isNew) {
+      if (f.episode && f.episode.title) ep.title = f.episode.title;
+      else if (f.title && !f.episode && up(clean(f.title)) !== up(clean(project.name))) ep.title = clean(f.title);
+      const n = f.episode && f.episode.number;
+      if (n && !(project.episodes || []).some((e) => e !== ep && e.season === ep.season && e.number === n)) ep.number = n;
+    }
+    if (!project.author && f.author) project.author = clean(f.author.replace(/\n/g, ', '));
+    if (!project.contact && f.contact) project.contact = clean(f.contact.replace(/\n+/g, ', '));
+    const out = { fields: f, base: { title: project.name || '', author: project.author || '', contact: project.contact || '', draft: revName(ep.revLevel || 0), episode: tpEpKey(ep) } };
+    if (tp.fdx) out.fdx = tp.fdx;
+    if (tp.extra && tp.extra.length) out.extra = tp.extra;
+    ep.titlePage = out;
+  }
+  // Fountain: «Key: value» lines (a value may go on indented lines below) up to the first line that is neither
+  const FNT_KEYS = /^(?:Title|Credit|Author|Authors|Episode|Source|Draft date|Draft|Revision|Contact|Notes|Copyright|Date)\s*:/i;
+  function fountainTitle(txt) {
+    const lines = txt.split('\n');
+    if (!FNT_KEYS.test(lines[0] || '')) return null;
+    const pairs = [];
+    let k = 0;
+    for (; k < lines.length; k++) {
+      const s = lines[k];
+      if (!s.trim()) break;
+      const m = s.match(/^([A-Za-z][A-Za-z \-]*?)\s*:\s*(.*)$/);
+      if (/^(?: {2,}|\t)\S/.test(s) && pairs.length) { const pr = pairs[pairs.length - 1]; pr[1] += (pr[1] ? '\n' : '') + s.trim(); }
+      else if (m) pairs.push([m[1].trim(), m[2].trim()]);
+      else break;
+    }
+    // emphasis marks (*bold*, _underline_) are markup, not text
+    const plain = (v) => { let o; do { o = v; v = v.replace(/(\*{1,3}|_)(\S(?:.*?\S)?)\1/g, '$2'); } while (v !== o); return v; };
+    const fields = {}, extra = [];
+    for (const [key, v0] of pairs) {
+      const v = plain(v0), K = key.toLowerCase();
+      if (K === 'title') fields.title = v.replace(/\n/g, ' ');
+      else if (K === 'author' || K === 'authors') fields.author = v;
+      else if (K === 'episode') fields.episode = parseEpisodeLine(v.replace(/\n/g, ' '));
+      else if (K === 'contact') fields.contact = v;
+      else if (K === 'draft date' || K === 'date') fields.date = v;
+      else if (K === 'draft' || K === 'revision') fields.draft = v;
+      else extra.push([key, v0]);
+    }
+    return { tp: { fields, extra }, rest: lines.slice(k).join('\n') };
+  }
+
+  // opts.fountain: the file is Fountain (a .fountain file, or any text that opens with a Fountain title page)
+  function importText(txt, opts) {
     txt = txt.replace(/\r/g, '');
-    // a Fountain title page marks the file as Fountain: only then '!' (forced action) and '~' (lyrics) are markup, not text
-    const TITLE_RE = /^(?:(?:Title|Credit|Author|Authors|Episode|Source|Draft date|Contact|Notes):.*\n)+/i;
-    const fountain = TITLE_RE.test(txt);
-    txt = txt.replace(TITLE_RE, '');
+    const ft = fountainTitle(txt);
+    const fountain = !!(ft || (opts && opts.fountain));
+    if (ft) txt = ft.rest;
     // Fountain forced elements and centered text are reduced to plain text; ordinary text ("...Ну да.", "> стрелка") is kept as is
     // in a Fountain file any '.X' is a forced heading («.«СОН»», ".2 ГОДА СПУСТЯ"); in plain text only before a capital
     const FORCED_RE = fountain ? /^\.(?=[^.\s])/ : /^\.(?=[A-ZА-ЯЁ])/;
@@ -1177,65 +1383,380 @@
       const t = s.replace(/^\s+/, '');
       if (/^>.*<\s*$/.test(t)) return t.replace(/^>\s*/, '').replace(/\s*<\s*$/, '');
       if (/^>\s*[A-ZА-ЯЁ0-9 .:()\-]+:?\s*$/.test(t)) return t.replace(/^>\s*/, '');
-      if (fountain && /^[!~](?=[^!\s])/.test(t)) return t.slice(1);
+      if (fountain && (/^!(?=\S)/.test(t) || /^~(?=[^~\s])/.test(t))) return t.slice(1);
       // a forced heading left empty (a new scene exported before it got a heading) is nothing, not an action ". #1#"
       if (fountain && /^\.\s*(?:#[^#\s]+#)?\s*$/.test(t)) return '';
       return t.replace(FORCED_RE, '').replace(/^@(?=[A-ZА-ЯЁ])/, '');
     };
-    const nums = [];
-    const lines = txt.split('\n').map((s) => {
+    // Fountain markup that is not script text: notes [[…]], boneyard /* … */, sections (#), page breaks (===);
+    // a synopsis line («= …») becomes the synopsis of the scene above it
+    const DROP = '\u0001';
+    if (fountain) txt = txt.replace(/\/\*[\s\S]*?\*\//g, DROP).replace(/\[\[[\s\S]*?\]\]/g, DROP);
+    const raw = [], synAt = {};
+    let lastHead = -1;
+    for (let s of txt.split('\n')) {
+      if (fountain) {
+        if (s.includes(DROP)) { s = s.split(DROP).join(''); if (!s.trim()) continue; }
+        if (/^\s*#/.test(s) || /^\s*={3,}\s*$/.test(s)) continue;
+        const sy = s.match(/^\s*=(?!=)\s*(.*)$/);
+        if (sy) { if (lastHead >= 0 && clean(sy[1])) synAt[lastHead] = clean((synAt[lastHead] ? synAt[lastHead] + ' ' : '') + sy[1]); continue; }
+        const t = s.trim();
+        if (FORCED_RE.test(t) || HEADING_START.test(t)) lastHead = raw.length;
+      }
+      raw.push(s);
+    }
+    const nums = [], syns = [];
+    const blank = (k) => k < 0 || k >= raw.length || !raw[k].replace(/\u200B/g, '').trim();
+    const lines = raw.map((s, k) => {
+      // our export's escape (FNT_ZW): a line opening with a zero-width space is text as it stands, never markup (a
+      // speech line «#яжемать», «=== », «.ИНТ…»); with one at the end too it is a shot the shot rule would not see
+      if (fountain && s.includes(FNT_ZW)) {
+        if (/^[ \t]*\u200B/.test(s)) {
+          const shotM = /\u200B\s*$/.test(s.replace(/^[ \t]*\u200B/, ''));
+          return { text: s.replace(/\u200B/g, ''), joinable: true, style: shotM ? 'Shot' : 'Dialogue', forced: true };
+        }
+        s = s.replace(/\u200B/g, '');
+      }
+      // Fountain dual dialogue: «МАША ^» is the cue of the second speech, printed beside the one before it
+      let dual = false;
+      if (/\S\s*\^\s*$/.test(s) && isCaps(s.replace(/\^\s*$/, '').replace(/^\s*@/, ''))) { s = s.replace(/\s*\^\s*$/, ''); dual = true; }
       let text = unforce(s);
+      if (dual) return { text, joinable: true, style: 'Character', dual: true };
       const forced = FORCED_RE.test(s.replace(/^\s+/, ''));
-      const action = fountain && /^\s*!(?=[^!\s])/.test(s);
+      const action = fountain && /^\s*!(?=\S)/.test(s);
       // Fountain scene number "#12А#" at the end of a heading
       const m = text.match(/^(.*?)\s*#([^#\s]+)#\s*$/);
-      const head = forced || HEADING_START.test(m ? m[1] : text);
+      const head = forced || (!action && HEADING_START.test(m ? m[1] : text));
       if (head && m) text = m[1];
-      if (head && clean(text)) nums.push(m ? m[2] : '');
-      return { text, joinable: true, style: forced ? 'Scene Heading' : action ? 'Action' : undefined };
+      if (head && clean(text)) { nums.push(m ? m[2] : ''); syns.push(synAt[k] || ''); }
+      // Fountain has no shot element: a capitals line standing alone (our export forces capitals action with «!») is a shot
+      const t0 = s.trim();
+      const shot = fountain && !head && !forced && !action && blank(k - 1) && blank(k + 1) && fountainShotLike(t0);
+      return { text, joinable: true, style: forced ? 'Scene Heading' : action ? 'Action' : shot ? 'Shot' : undefined, forced: action || undefined };
     });
     const blocks = classifyLines(lines);
     let k = 0;
-    for (const b of blocks) if (b.t === 'scene') { const n = nums[k++]; if (n) b.num = n; }
+    for (const b of blocks) if (b.t === 'scene') { const n = nums[k], sy = syns[k]; k++; if (n) b.num = n; if (sy) b.synopsis = sy; }
+    if (ft) blocks.titlePage = ft.tp;
     return blocks;
   }
   function importFDX(xml, DOMParserImpl) {
     const doc = new (DOMParserImpl || DOMParser)().parseFromString(xml, 'application/xml');
-    const map = { 'Scene Heading': 'scene', Action: 'action', Character: 'character', Parenthetical: 'paren', Dialogue: 'dialogue', Transition: 'transition', Shot: 'action', General: 'action' };
-    const content = doc.getElementsByTagName('Content')[0];
+    const map = { 'Scene Heading': 'scene', Action: 'action', Character: 'character', Parenthetical: 'paren', Dialogue: 'dialogue', Transition: 'transition', Shot: 'shot', General: 'action' };
+    // the script's own <Content> is a child of <FinalDraft>; the title page has a <Content> of its own
+    const root = doc.documentElement, inTitle = (el) => { for (let q = el; q; q = q.parentNode) if (q.nodeName === 'TitlePage') return true; return false; };
+    let content = null, tpEl = null;
+    for (let c = root && root.firstChild; c; c = c.nextSibling) { if (c.nodeName === 'Content' && !content) content = c; if (c.nodeName === 'TitlePage' && !tpEl) tpEl = c; }
+    if (!content) content = Array.from(doc.getElementsByTagName('Content')).find((c) => !inTitle(c)) || null;
     if (!content) throw new Error('В файле нет текста сценария (раздел Content).');
-    const blocks = [];
+    const blocks = [], ddCues = new Map();
     const ps = content.getElementsByTagName('Paragraph');
+    const kids = (el, name) => { const out = []; for (let c = el.firstChild; c; c = c.nextSibling) if (c.nodeName === name) out.push(c); return out; };
+    // a paragraph's own text: its Text runs, not those of nested paragraphs
+    const ownText = (p) => { let text = '', rev = 0; const ts = p.getElementsByTagName('Text');
+      for (let j = 0; j < ts.length; j++) { let q = ts[j].parentNode; while (q && q.nodeName !== 'Paragraph') q = q.parentNode; if (q === p) { text += ts[j].textContent; if (ts[j].textContent.trim()) rev = Math.max(rev, +ts[j].getAttribute('RevisionID') || 0); } }
+      return { text: clean(text), rev }; };
+    // unknown element types (Cast List, Shot, New Act…) are matched by name like Word styles, otherwise they become action
+    const typeOf = (p) => { const ty = p.getAttribute('Type') || ''; return map[ty] || (/summary|synops|outline|title|act\b/i.test(ty) ? 'action' : styleToType(ty)) || 'action'; };
+    const shape = (t, text) => { if (t === 'scene') return normalizeHeadingText(text); if (t === 'character') return normalizeCharacter(text); if (t === 'paren' && !/^\(/.test(text)) return '(' + text + ')'; return text; };
+    // paragraphs that are not script text: the dead body of an omitted scene (<OmittedScene>), and what Final Draft 10+
+    // keeps in a heading's scene properties (the Summary, character arc beats) as paragraphs of their own
+    const DEAD = { OmittedScene: 1, SceneProperties: 1, Summary: 1, SceneArcBeats: 1, CharacterArcBeat: 1 };
+    // a <Paragraph><DualDialogue>…</DualDialogue></Paragraph> wrapper has no text: its speeches are read one by one
+    const isWrap = (p) => kids(p, 'DualDialogue').length > 0;
+    // the body of an omitted scene, dual pairs included (the second cue of a wrapper is the dual one)
+    const deadBody = (om) => {
+      const out = [];
+      const one = (q, dual) => { const o = ownText(q), tq = typeOf(q); if (!o.text) return; const b = { id: uid(), t: tq, x: shape(tq, o.text) }; if (dual && tq === 'character') b.dual = true; out.push(b); };
+      for (const q of kids(om, 'Paragraph')) {
+        if (!isWrap(q)) { one(q, false); continue; }
+        for (const d of kids(q, 'DualDialogue')) { let n = 0; for (const q2 of kids(d, 'Paragraph')) { if (typeOf(q2) === 'character' && ownText(q2).text) n++; one(q2, n === 2); } }
+      }
+      return out.filter((x) => x.t !== 'cast');
+    };
     for (let i = 0; i < ps.length; i++) {
       const p = ps[i];
       // Final Draft keeps the dead body of an omitted scene inside <OmittedScene>: never import it as live text
       let anc = p.parentNode, dead = false;
-      while (anc && anc !== content) { if (anc.nodeName === 'OmittedScene') { dead = true; break; } anc = anc.parentNode; }
+      while (anc && anc !== content) { if (DEAD[anc.nodeName]) { dead = true; break; } anc = anc.parentNode; }
       if (dead) continue;
-      const hasOmitted = p.getElementsByTagName('OmittedScene').length > 0;
-      if (!hasOmitted && p.getElementsByTagName('Paragraph').length) continue;
-      let text = '';
-      const ts = p.getElementsByTagName('Text');
-      // only this paragraph's own Text runs, not those of nested paragraphs
-      let rev = 0;
-      for (let j = 0; j < ts.length; j++) { let q = ts[j].parentNode; while (q && q.nodeName !== 'Paragraph') q = q.parentNode; if (q === p) { text += ts[j].textContent; if (ts[j].textContent.trim()) rev = Math.max(rev, +ts[j].getAttribute('RevisionID') || 0); } }
-      text = clean(text);
-      let t = map[p.getAttribute('Type')] || 'action';
+      // <DualDialogue>: the second cue inside it is the dual one
+      let dd = p.parentNode;
+      while (dd && dd !== content && dd.nodeName !== 'DualDialogue') dd = dd.parentNode;
+      if (dd === content) dd = null;
+      const hasOmitted = kids(p, 'OmittedScene').length > 0;
+      if (!hasOmitted && isWrap(p)) continue;
+      let { text, rev } = ownText(p);
+      let t = typeOf(p);
       if (hasOmitted && !text) { text = 'OMITTED'; t = 'scene'; }
       if (!text) continue;
       const fdxNum = (p.getAttribute('Number') || '').trim();
       const fdxDay = t === 'scene' ? parseHeading(text).day : '';
-      if (t === 'scene') text = normalizeHeadingText(text);
-      if (t === 'character') text = normalizeCharacter(text);
-      if (t === 'paren' && !/^\(/.test(text)) text = '(' + text + ')';
+      text = shape(t, text);
       const nb = { id: uid(), t, x: text };
+      if (dd && t === 'character') { const n = (ddCues.get(dd) || 0) + 1; ddCues.set(dd, n); if (n === 2) nb.dual = true; }
+      // the scene's Summary (Final Draft 10+) becomes its synopsis; without one, the SceneProperties Title (older files)
+      const sp = t === 'scene' ? kids(p, 'SceneProperties')[0] : null;
+      const sum = sp ? kids(sp, 'Summary').map((q) => kids(q, 'Paragraph').map((x) => ownText(x).text).filter(Boolean).join(' ')).filter(Boolean).join(' ') : '';
+      if (sum) nb.synopsis = sum;
+      else if (sp && (sp.getAttribute('Title') || '').trim()) nb.synopsis = sp.getAttribute('Title').trim();
       if (t === 'scene' && fdxNum) nb.num = fdxNum;
       if (rev > 0) nb.rev = rev;
       if (fdxDay) nb.day = fdxDay;
-      if (t === 'scene' && (hasOmitted || OMIT_RE.test(text))) { nb.x = omittedHeading(fdxNum); nb.omitted = true; }
+      if (t === 'scene' && (hasOmitted || OMIT_RE.test(text))) {
+        nb.x = omittedHeading(fdxNum); nb.omitted = true;
+        // the dead body stays with the scene (as «Удалить сцену» keeps it), so «Вернуть сцену» can bring it back
+        const om = hasOmitted ? kids(p, 'OmittedScene')[0] : null;
+        const body = om ? deadBody(om) : [];
+        if (body.length) {
+          if (body[0].t !== 'scene') body.unshift({ id: nb.id, t: 'scene', x: '' }); else body[0].id = nb.id;
+          nb.omittedBlocks = body; nb.omittedHeading = body[0].x;
+        }
+      }
       blocks.push(nb);
     }
+    const tp = tpEl ? fdxTitle(tpEl) : null;
+    if (tp) blocks.titlePage = tp;
     return blocks;
+  }
+  // ---------- КИТ Сценарист (.kitsp) and Story Architect (.starc) ----------
+  // Both are SQLite files (read with sql.js, passed in by the caller). КИТ keeps the script as XML in scenario.text
+  // (<scenario version="1.0"><scene_heading number=".."><v><![CDATA[..]]></v></scene_heading>…), the main text is the
+  // row with is_draft = 0. STARC keeps every document in documents(uuid, type, content); the screenplay text is type
+  // 10104 (<document><scene uuid=".." omited="true"><number value="5" fixed="true"/><story_day>..</story_day>
+  // <content><scene_heading><v>..</v></scene_heading>…</content></scene>…</document>), names come from the structure
+  // document (type 1, <item uuid type name>). Both escape the text as HTML inside CDATA. Unknown elements are skipped.
+  const KIT_TYPE = {
+    scene_heading: 'scene', time_and_place: 'scene', scene_characters: 'cast', action: 'action', character: 'character',
+    parenthetical: 'paren', dialog: 'dialogue', dialogue: 'dialogue', lyrics: 'dialogue', transition: 'transition', shot: 'shot',
+    note: 'action', title_header: 'action', title: 'action', unformatted_text: 'action',
+    sound: 'action', music: 'action', cue: 'action', text: 'action',
+    // not text of the script: folders, acts, sequences, beats, notes the writer does not print
+    noprintable_text: null, inline_note: null, folder_header: null, folder_footer: null, scene_group_header: null, scene_group_footer: null,
+    act_heading: null, act_footer: null, sequence_heading: null, sequence_footer: null, beat_heading: null, page_splitter: null,
+    part_heading: null, part_footer: null, chapter_heading: null, chapter_footer: null, undefined: null,
+  };
+  const htmlUnesc = (s) => String(s || '').replace(/&(#x[0-9a-f]+|#\d+|lt|gt|quot|apos|amp|nbsp);/gi, (m, e) => {
+    const k = e.toLowerCase();
+    if (k[0] === '#') return String.fromCodePoint(k[1] === 'x' ? parseInt(k.slice(2), 16) : +k.slice(1));
+    return { lt: '<', gt: '>', quot: '"', apos: "'", amp: '&', nbsp: ' ' }[k];
+  }).replace(/\u2028|\u2029/g, '\n');
+  const elKids = (el) => { const out = []; for (let c = el && el.firstChild; c; c = c.nextSibling) if (c.nodeType === 1) out.push(c); return out; };
+  const kidEl = (el, name) => elKids(el).find((c) => c.nodeName === name) || null;
+  function screenplayXmlBlocks(xml, DOMParserImpl) {
+    const doc = new (DOMParserImpl || DOMParser)().parseFromString(String(xml).replace(/^﻿/, ''), 'application/xml');
+    const root = doc && doc.documentElement;
+    if (!root || root.nodeName === 'parsererror' || root.getElementsByTagName('parsererror').length) throw new Error('Текст сценария в файле повреждён.');
+    const blocks = [];
+    let table = 0, col = 2, dualDone = false, titleHead = null;
+    const shape = (t, text) => { if (t === 'scene') return normalizeHeadingText(text); if (t === 'character') return normalizeCharacter(text); if (t === 'paren' && !/^\(/.test(text)) return '(' + text + ')'; return text; };
+    const valueOf = (el) => { const v = kidEl(el, 'v'); return htmlUnesc(v ? v.textContent : (elKids(el).length ? '' : el.textContent)); };
+    const para = (el) => {
+      const name = el.nodeName, t = KIT_TYPE[name];
+      if (t === undefined || t === null) { titleHead = null; return; }
+      // a paragraph of the second column of a dual dialogue (STARC marks the first column with params ifc="true")
+      const pr = kidEl(el, 'params');
+      if (table && pr && pr.getAttribute('ifc') === 'false') col = 2;
+      if (table && pr && pr.getAttribute('ifc') === 'true') col = 1;
+      const raw = valueOf(el);
+      // КИТ «Заголовок титра» + «Титр»: one line of description, «ТИТР: Москва, 1999»
+      if (name === 'title' && titleHead) { titleHead.x = clean(titleHead.x + ' ' + raw.replace(/\n+/g, ' ')); titleHead = null; return; }
+      titleHead = null;
+      const lines = t === 'action' ? raw.split('\n').map(clean).filter(Boolean) : [clean(raw.replace(/\n+/g, ' '))].filter(Boolean);
+      if (!lines.length) return;
+      for (const ln of lines) {
+        const nb = { id: uid(), t, x: shape(t, ln) };
+        if (t === 'scene') {
+          const day = parseHeading(ln).day; if (day) nb.day = day;
+          const num = clean(el.getAttribute('number') || ''); if (num) nb.num = num;
+          const desc = clean(htmlUnesc(el.getAttribute('description') || '')); if (desc) nb.synopsis = desc;
+        }
+        if (t === 'character' && table && col === 2 && !dualDone) { nb.dual = true; dualDone = true; }
+        blocks.push(nb);
+      }
+      if (name === 'title_header') titleHead = blocks[blocks.length - 1];
+      // КИТ «Описание сцены» is the scene's synopsis, not printed text
+    };
+    const walk = (el) => {
+      for (const c of elKids(el)) {
+        const n = c.nodeName;
+        if (n === 'splitter_start' || (n === 'splitter' && c.getAttribute('type') === 'start')) { table = 1; col = 1; dualDone = false; continue; }
+        if (n === 'splitter_end' || (n === 'splitter' && c.getAttribute('type') === 'end')) { table = 0; continue; }
+        if (n === 'splitter') { if (table) col = 2; continue; }
+        if (n === 'scene_description') {
+          const s = clean(valueOf(c).replace(/\n+/g, ' '));
+          for (let k = blocks.length - 1; k >= 0; k--) if (blocks[k].t === 'scene') { if (s) blocks[k].synopsis = blocks[k].synopsis ? blocks[k].synopsis + ' ' + s : s; break; }
+          continue;
+        }
+        if (n === 'content') { walk(c); continue; }
+        if (kidEl(c, 'content')) { group(c); continue; }
+        para(c);
+      }
+    };
+    // a STARC group (scene, beat, sequence…): its number, story day, description and omitted mark go to its first scene
+    const group = (g) => {
+      const from = blocks.length;
+      walk(kidEl(g, 'content'));
+      const k = blocks.findIndex((b, i) => i >= from && b.t === 'scene');
+      if (k < 0 || blocks[k]._g) return;
+      const b = blocks[k]; b._g = true;
+      const nm = kidEl(g, 'number');
+      if (nm && (nm.getAttribute('fixed') === 'true' || nm.getAttribute('custom') === 'true') && clean(nm.getAttribute('value'))) b.num = clean(nm.getAttribute('value'));
+      const day = kidEl(g, 'story_day'), dx = day ? clean(htmlUnesc(day.textContent)) : '';
+      // «День 3», «3», «Day 3» -> 3, the script day of the scene card
+      if (dx) b.day = (dx.match(/\d+/) || [dx])[0];
+      const ds = kidEl(g, 'description'); if (ds && clean(htmlUnesc(ds.textContent))) b.synopsis = clean(htmlUnesc(ds.textContent).replace(/\n+/g, ' '));
+      if (g.getAttribute('omited') === 'true' || g.getAttribute('omitted') === 'true') {
+        // the dead body stays with the scene card, as for <OmittedScene> in .fdx
+        let end = blocks.length;
+        for (let i = k + 1; i < blocks.length; i++) if (blocks[i].t === 'scene') { end = i; break; }
+        const body = blocks.slice(k, end).map((x) => ({ id: x.id, t: x.t, x: x.x })).filter((x) => x.t !== 'cast');
+        blocks.splice(k + 1, end - k - 1);
+        b.omittedBlocks = body; b.omittedHeading = body[0].x; b.omitted = true; b.x = omittedHeading(b.num || '');
+      }
+    };
+    walk(root);
+    blocks.forEach((b) => delete b._g);
+    return blocks;
+  }
+  function importKIT(xml, DOMParserImpl) { return screenplayXmlBlocks(xml, DOMParserImpl); }
+  function importSTARC(xml, DOMParserImpl) { return screenplayXmlBlocks(xml, DOMParserImpl); }
+  const STARC_TEXT = 10104, STARC_SERIES_TEXT = 10115, STARC_STRUCTURE = 1, STARC_SCREENPLAY = 10100, STARC_BIN = 10001;
+  const sqlText = (v) => (v == null ? '' : typeof v === 'string' ? v : new TextDecoder('utf-8').decode(v));
+  // rows of a query as objects; a missing table or column gives no rows
+  const sqlRows = (db, q) => { try { const r = db.exec(q)[0]; return r ? r.values.map((v) => Object.fromEntries(r.columns.map((c, i) => [c, v[i]]))) : []; } catch (e) { return []; } };
+  // a .kitsp / .starc file -> { format, scripts: [{ name, blocks }] } (STARC may hold several screenplays and episodes)
+  function importSqliteProject(SQL, bytes, DOMParserImpl) {
+    let db;
+    try { db = new SQL.Database(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)); db.exec('SELECT name FROM sqlite_master LIMIT 1'); }
+    catch (e) { throw new Error('Это не файл КИТ Сценариста или Story Architect (не база SQLite).'); }
+    try {
+      const tables = sqlRows(db, "SELECT name FROM sqlite_master WHERE type = 'table'").map((r) => r.name);
+      if (tables.includes('scenario')) {
+        const rows = sqlRows(db, 'SELECT * FROM scenario ORDER BY id');
+        // the main text first (is_draft = 0), then the draft ("черновик") if the main one is empty
+        rows.sort((a, b) => (+a.is_draft || 0) - (+b.is_draft || 0));
+        let blocks = [];
+        for (const r of rows) { const x = sqlText(r.text); if (x.trim()) { blocks = importKIT(x, DOMParserImpl); if (blocks.length) break; } }
+        const data = {}; sqlRows(db, 'SELECT data_name, data_value FROM scenario_data').forEach((r) => { data[r.data_name] = clean(htmlUnesc(sqlText(r.data_value)).replace(/<[^>]+>/g, ' ')); });
+        const name = data.name || (rows[0] && clean(sqlText(rows[0].name))) || '';
+        const fields = {};
+        if (name) fields.title = name;
+        if (data.author) fields.author = data.author;
+        if (data.contacts) fields.contact = data.contacts;
+        if (Object.keys(fields).length) blocks.titlePage = { fields };
+        return { format: 'kitsp', scripts: [{ name, blocks }] };
+      }
+      if (tables.includes('documents')) {
+        const docs = sqlRows(db, 'SELECT uuid, type, content FROM documents');
+        const names = {}, parent = {}, inBin = new Set(), isItem = new Set();
+        const st = docs.find((d) => +d.type === STARC_STRUCTURE);
+        if (st) {
+          try {
+            const sd = new (DOMParserImpl || DOMParser)().parseFromString(sqlText(st.content), 'application/xml');
+            const visit = (el, up, bin) => {
+              for (const c of elKids(el)) {
+                if (c.nodeName !== 'item') continue;
+                const u = c.getAttribute('uuid') || '', ty = +c.getAttribute('type') || 0;
+                names[u] = { name: clean(htmlUnesc(c.getAttribute('name') || '')), type: ty }; parent[u] = up; isItem.add(u);
+                const b = bin || ty === STARC_BIN; if (b) inBin.add(u);
+                visit(c, u, b);
+              }
+            };
+            visit(sd.documentElement, null, false);
+          } catch (e) { /* no names: the scripts are still read */ }
+        }
+        // a script is named after its screenplay (the parent item of the text), an episode by its own name
+        const nameOf = (u) => { for (let q = u, d = 0; q && d < 4; q = parent[q], d++) { const n = names[q]; if (n && n.name && (n.type === STARC_SCREENPLAY || q === u && n.type !== STARC_TEXT)) return n.name; } return (names[parent[u]] || {}).name || ''; };
+        const scripts = [];
+        for (const d of docs) {
+          const ty = +d.type;
+          if (ty !== STARC_TEXT && ty !== STARC_SERIES_TEXT) continue;
+          // drafts and versions of a text are separate documents that the structure lists as <draft>: only the current text
+          if (st && (!isItem.has(d.uuid) || inBin.has(d.uuid))) continue;
+          const x = sqlText(d.content);
+          if (!x.trim()) continue;
+          const blocks = importSTARC(x, DOMParserImpl);
+          if (blocks.length) scripts.push({ name: nameOf(d.uuid), blocks, series: ty === STARC_SERIES_TEXT });
+        }
+        // a series text is all its episodes together: keep it only when there are no episodes to choose from
+        const own = scripts.filter((s) => !s.series);
+        return { format: 'starc', scripts: own.length ? own : scripts };
+      }
+      throw new Error('Это не файл КИТ Сценариста или Story Architect: в базе нет сценария.');
+    } finally { db.close(); }
+  }
+  const xmlKids = (el, name) => { const out = []; for (let c = el.firstChild; c; c = c.nextSibling) if (c.nodeName === name) out.push(c); return out; };
+  const xmlAttrs = (el) => { const o = {}; for (let i = 0; i < el.attributes.length; i++) o[el.attributes[i].name] = el.attributes[i].value; return o; };
+  // Final Draft's title page is free text: every paragraph is kept as it is (alignment, font, blank lines), and the ones
+  // we understand get a role: centred title, «Серия N. …», author (the first other centred line; a credit such as
+  // «Written by» is skipped), contact on the left, draft label and date on the right
+  function fdxTitle(tpEl) {
+    const c = xmlKids(tpEl, 'Content')[0];
+    if (!c) return null;
+    const paras = xmlKids(c, 'Paragraph').map((p) => ({ a: xmlAttrs(p), r: xmlKids(p, 'Text').map((t) => ({ a: xmlAttrs(t), x: t.textContent })) }));
+    if (!paras.some((p) => p.r.some((r) => r.x.trim()))) return null;
+    const fields = {}, contact = [];
+    const al = (p) => (p.a.Alignment || 'Left').toLowerCase();
+    // a title page typed all on the left still has a title: its first line
+    const anyCenter = paras.some((p) => al(p) === 'center' && p.r.some((r) => r.x.trim()));
+    for (const p of paras) {
+      const x = clean(p.r.map((r) => r.x).join(''));
+      if (!x) continue;
+      const a = !anyCenter && fields.title == null ? 'center' : al(p);
+      if (a === 'center') {
+        if (fields.title == null) { p.role = 'title'; fields.title = x; }
+        else if (!fields.episode && EPISODE_RE.test(x)) { p.role = 'episode'; fields.episode = parseEpisodeLine(x); }
+        else if (CREDIT_RE.test(x)) p.role = 'credit';
+        else if (fields.author == null) { p.role = 'author'; fields.author = x; }
+      } else if (a === 'right') {
+        if (fields.date == null && TPDATE_RE.test(x)) { p.role = 'date'; fields.date = x; }
+        else if (fields.draft == null) { p.role = 'draft'; fields.draft = x; }
+      } else { p.role = 'contact'; contact.push(x); }
+    }
+    if (contact.length) fields.contact = contact.join('\n');
+    return { fields, fdx: paras };
+  }
+  // the <TitlePage> written to .fdx: Final Draft's own paragraphs when the episode came from a title page (a field
+  // changed here since replaces the text of its paragraphs), otherwise the layout of our PDF title page
+  const TP_PARA = { FirstIndent: '0.00', Leading: 'Regular', LeftIndent: '1.00', RightIndent: '7.50', SpaceBefore: '0', Spacing: '1', StartsNewPage: 'No' };
+  const TP_TEXT = { AdornmentStyle: '0', Background: '#FFFFFFFFFFFF', Color: '#000000000000', Font: 'Courier Final Draft', RevisionID: '0', Size: '12', Style: '' };
+  function fdxTitleXML(ep, project, today) {
+    const ti = titleInfo(ep, project, today), tp = ep.titlePage;
+    const para = (align, x, style) => ({ a: Object.assign({ Alignment: align }, TP_PARA), r: [{ a: Object.assign({}, TP_TEXT, style ? { Style: style } : {}), x }] });
+    let paras;
+    if (tp && tp.fdx && tp.fdx.length) {
+      paras = tp.fdx.map((p) => ({ a: p.a, r: p.r, role: p.role }));
+      const setText = (p, x) => Object.assign({}, p, { r: [{ a: (p.r[0] || {}).a || Object.assign({}, TP_TEXT), x }] });
+      const put = (role, lines, align) => {
+        const at = []; paras.forEach((p, k) => { if (p.role === role) at.push(k); });
+        if (!at.length) {
+          if (!lines.some(Boolean)) return;
+          // no paragraph for it yet: a centred field goes under the centred block, the others to the end
+          let k = paras.length;
+          if (align === 'Center') { k = 0; paras.forEach((p, q) => { if (p.role === 'title' || p.role === 'episode' || p.role === 'credit' || p.role === 'author') k = q + 1; }); }
+          paras.splice(k, 0, ...lines.map((x) => Object.assign(para(align, x), { role })));
+          return;
+        }
+        at.forEach((k, j) => { paras[k] = setText(paras[k], lines[j] || ''); });
+        const last = at[at.length - 1];
+        if (lines.length > at.length) paras.splice(last + 1, 0, ...lines.slice(at.length).map((x) => setText(paras[last], x)));
+      };
+      if (ti.changed.title) put('title', [ti.title], 'Center');
+      if (ti.changed.episode) put('episode', [ti.episode], 'Center');
+      if (ti.changed.author) put('author', [ti.author], 'Center');
+      if (ti.changed.contact) put('contact', ti.contact ? ti.contact.split('\n') : [''], 'Left');
+      if (ti.changed.draft) put('draft', [ti.draft], 'Right');
+      if (ti.changed.date) put('date', [ti.date], 'Right');
+    } else {
+      const blank = (n, a) => Array.from({ length: n }, () => para(a || 'Center', ''));
+      paras = [...blank(16), para('Center', up(ti.title), 'Bold'), ...blank(1), para('Center', ti.episode), ...blank(3)];
+      if (ti.author) paras.push(para('Center', ti.author));
+      paras.push(...blank(Math.max(1, 46 - paras.length)), para('Right', ti.draft), para('Right', ti.date));
+      if (ti.contact) paras.push(...blank(1, 'Left'), ...ti.contact.split('\n').map((x) => para('Left', x)));
+    }
+    const at = (o) => Object.keys(o).map((k) => ' ' + k + '="' + xmlEsc(o[k]) + '"').join('');
+    return '  <TitlePage>\n    <Content>\n' + paras.map((p) => '      <Paragraph' + at(p.a) + '>' + p.r.map((r) => '<Text' + at(r.a) + '>' + xmlEsc(r.x) + '</Text>').join('') + '</Paragraph>').join('\n') + '\n    </Content>\n  </TitlePage>\n';
   }
   // after import: unify spelling with the project dictionary and register new names
   function absorb(blocks, project) {
@@ -1252,7 +1773,12 @@
         const day = h.day || b.day || '';
         delete b.day;
         if (day || h.flash || num) report.sceneMeta[b.id] = { day, tags: h.flash ? ['flashback'] : [], num };
-        if (b.omitted || OMIT_RE.test(b.x)) { (report.sceneMeta[b.id] = report.sceneMeta[b.id] || { num }).omitted = true; b.x = omittedHeading(num); delete b.omitted; continue; }
+        if (b.synopsis) { (report.sceneMeta[b.id] = report.sceneMeta[b.id] || { tags: [], num }).synopsis = b.synopsis; delete b.synopsis; }
+        if (b.omitted || OMIT_RE.test(b.x)) {
+          const m = (report.sceneMeta[b.id] = report.sceneMeta[b.id] || { num }); m.omitted = true;
+          if (b.omittedBlocks) { m.omittedBlocks = b.omittedBlocks; m.omittedHeading = b.omittedHeading || ''; }
+          b.x = omittedHeading(num); delete b.omitted; delete b.omittedBlocks; delete b.omittedHeading; continue;
+        }
         delete b.num;
         if (h.guessed || b.guessed) { report.guessed.push(b.x); delete b.guessed; }
         if (!h.type) { report.untyped.push(b.x); continue; }
@@ -1295,7 +1821,7 @@
 
   // ---------- export ----------
   const xmlEsc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-  const FDX_TYPE = { scene: 'Scene Heading', action: 'Action', character: 'Character', paren: 'Parenthetical', dialogue: 'Dialogue', transition: 'Transition' };
+  const FDX_TYPE = { scene: 'Scene Heading', action: 'Action', character: 'Character', paren: 'Parenthetical', dialogue: 'Dialogue', transition: 'Transition', shot: 'Shot' };
   function exportFDX(ep, project, st, opts) {
     opts = opts || {};
     const revs = st.revs || [];
@@ -1305,18 +1831,31 @@
     const paras = (ep.blocks || []).map((b, i) => {
       const s = sceneByIdx[i];
       const num = s ? (opts.episodePrefix && !/-/.test(s.num) ? (ep.number || 1) + '-' + s.num : s.num) : '';
-      const props = s ? '<SceneProperties Length="' + fmtPages(s.pages) + '" Page="' + (s.page || 1) + '" Title="' + xmlEsc(s.synopsis || '') + '"/>' : '';
+      // the synopsis is Final Draft's scene Summary (and the Title, which older files and versions read)
+      const props = s ? '<SceneProperties Length="' + fmtScenePages(s) + '" Page="' + (s.page || 1) + '" Title="' + xmlEsc(s.synopsis || '') + '"' + (s.synopsis ? '><Summary><Paragraph Alignment="Left"><Text>' + xmlEsc(s.synopsis) + '</Text></Paragraph></Summary></SceneProperties>' : '/>') : '';
       const text = s && s.omitted ? 'OMITTED' : displayText(b) + headingDay(s, b);
-      return '    <Paragraph' + (s ? ' Number="' + num + '"' : '') + ' Type="' + FDX_TYPE[b.t] + '">' + props + '<Text' + (revs[i] ? ' RevisionID="' + revs[i] + '"' : '') + '>' + xmlEsc(text) + '</Text></Paragraph>';
+      // an omitted scene carries its dead body inside <OmittedScene>, as Final Draft writes it
+      const dead = s && s.omitted ? ((ep.sceneMeta || {})[s.id] || {}).omittedBlocks : null;
+      let om = '';
+      if (dead && dead.length) {
+        const db = dead.filter((d) => FDX_TYPE[d.t]), dp = db.map((d) => '<Paragraph Type="' + FDX_TYPE[d.t] + '"><Text>' + xmlEsc(displayText(d)) + '</Text></Paragraph>');
+        for (const pr of dualPairs(db).reverse()) dp.splice(pr.a, pr.e - pr.a + 1, '<Paragraph><DualDialogue>' + dp.slice(pr.a, pr.e + 1).join('') + '</DualDialogue></Paragraph>');
+        om = '<OmittedScene>' + dp.join('') + '</OmittedScene>';
+      }
+      return '    <Paragraph' + (s ? ' Number="' + num + '"' : '') + ' Type="' + FDX_TYPE[b.t] + '">' + props + om + '<Text' + (revs[i] ? ' RevisionID="' + revs[i] + '"' : '') + '>' + xmlEsc(text) + '</Text></Paragraph>';
     });
+    // a dual pair goes into one <Paragraph><DualDialogue>…</DualDialogue></Paragraph>, both speeches inside, as Final Draft writes it
+    for (const p of dualPairs(ep.blocks || []).reverse()) {
+      paras.splice(p.a, p.e - p.a + 1, '    <Paragraph><DualDialogue>\n' + paras.slice(p.a, p.e + 1).map((x) => '  ' + x).join('\n') + '\n    </DualDialogue></Paragraph>');
+    }
     const el = (name, f, behavior) => '    <ElementSettings Type="' + name + '"><FontSpec AdornmentStyle="0" Background="#FFFFFFFFFFFF" Color="#000000000000" Font="Courier New" RevisionID="0" Size="12" Style=""/><ParagraphSpec Alignment="' + (f.right ? 'Right' : 'Left') + '" FirstIndent="0.00" Leading="Regular" LeftIndent="' + f.indent.toFixed(2) + '" RightIndent="' + (f.right ? rightEdge(f, paper) : f.indent + f.width / 10).toFixed(2) + '" SpaceBefore="' + (f.sb * 12) + '" Spacing="1" StartsNewPage="No"/><Behavior PaginateAs="' + name + '" ReturnKey="' + behavior + '" Shortcut=""/></ElementSettings>';
     const chars = Object.keys(project.chars || {}).sort();
     const locs = new Set();
     st.scenes.filter((s) => !s.omitted).forEach((s) => { const h = s.h; if (h.object) locs.add(h.object + (h.sub ? '. ' + h.sub : '')); });
     return '<?xml version="1.0" encoding="UTF-8" standalone="no" ?>\n<FinalDraft DocumentType="Script" Template="No" Version="5">\n  <Content>\n' + paras.join('\n') + '\n  </Content>\n' +
-      '  <TitlePage>\n    <Content>\n' + [project.name, ep.title ? 'Серия ' + (ep.number || '') + '. ' + ep.title : '', project.author || ''].filter(Boolean).map((t) => '      <Paragraph Alignment="Center" Type="General"><Text>' + xmlEsc(t) + '</Text></Paragraph>').join('\n') + '\n    </Content>\n  </TitlePage>\n' +
+      fdxTitleXML(ep, project, opts.today) +
       el('Scene Heading', F.scene, 'Action') + '\n' + el('Action', F.action, 'Action') + '\n' + el('Character', F.character, 'Dialogue') + '\n' +
-      el('Parenthetical', F.paren, 'Dialogue') + '\n' + el('Dialogue', F.dialogue, 'Action') + '\n' + el('Transition', F.transition, 'Scene Heading') + '\n' +
+      el('Parenthetical', F.paren, 'Dialogue') + '\n' + el('Dialogue', F.dialogue, 'Action') + '\n' + el('Transition', F.transition, 'Scene Heading') + '\n' + el('Shot', F.shot, 'Action') + '\n' +
       '  <PageLayout BackgroundColor="#FFFFFFFFFFFF" BottomMargin="' + Math.round(paper.bottom * 72) + '" BreakDialogueAndActionAtSentences="Yes" DocumentLeading="Normal" FooterMargin="36" ForegroundColor="#000000000000" HeaderMargin="36" InvisiblesColor="#A0A0A0A0A0A0" TopMargin="' + Math.round(paper.top * 72) + '" UsesSmartQuotes="Yes"><AutoCastList AddParentheses="Yes" AutomaticallyGenerate="No" CastListElement="Cast List"/></PageLayout>\n' + fdxRevisions(ep, revs) +
       '  <SmartType>\n    <Characters>\n' + chars.map((c) => '      <Character>' + xmlEsc(c) + '</Character>').join('\n') + '\n    </Characters>\n' +
       '    <Extensions>\n' + EXTENSIONS.map((x) => '      <Extension>' + xmlEsc(x) + '</Extension>').join('\n') + '\n    </Extensions>\n' +
@@ -1339,21 +1878,57 @@
     const d = s && !s.omitted && b.t === 'scene' ? String(s.day || '').replace(/\D/g, '') : '';
     return d && !parseHeading(b.x).day && parseHeading(b.x + ' ' + d).day === d ? ' ' + d : '';
   }
-  function exportFountain(ep, project, st) {
+  // an action that Fountain would read as something else (a heading, a cue, a transition, markup) is forced with «!»
+  const FNT_LEAD = /^(?:[.!@~=#>]|\[\[|\/\*)/;
+  // Fountain has no escape for a speech line that starts with markup, nor for «[[» and «/*» inside text: our export puts a
+  // zero-width space there (invisible in any Fountain app) and importText reads such a line as plain text
+  const FNT_ZW = '\u200B';
+  const fountainInline = (t) => String(t).replace(/\[\[/g, '[' + FNT_ZW + '[').replace(/\/\*/g, '/' + FNT_ZW + '*');
+  // the capitals line Fountain import takes for a shot (Fountain itself has no shot element)
+  function fountainShotLike(t0) {
+    return /^[^!>.@~#=\[(]/.test(t0) && isCaps(t0) && t0.length <= 60 && !HEADING_START.test(t0) && !/\^\s*$/.test(t0) &&
+      !/^(СМЕНА КАДРА|ЗАТЕМНЕНИЕ|НАПЛЫВ|ИЗ ЗАТЕМНЕНИЯ|CUT TO|FADE|КОНЕЦ|THE END|ПРОДОЛЖЕНИЕ СЛЕДУЕТ)/i.test(t0) && !/(TO|В):$/.test(t0) && !/^\(.*\)$/.test(t0);
+  }
+  function fountainForce(t, afterHeading) {
+    if (!t) return false;
+    if (FNT_LEAD.test(t) || isCaps(t) || /\^\s*$/.test(t)) return true;
+    const ctx = afterHeading ? [{ text: 'ИНТ. ДОМ - ДЕНЬ', style: 'Scene Heading' }, { text: '' }] : [];
+    const r = classifyLines(ctx.concat([{ text: t, joinable: true }])).slice(afterHeading ? 1 : 0);
+    return !(r.length === 1 && r[0].t === 'action' && r[0].x === clean(t));
+  }
+  // Fountain title page: «Key: value», a value of several lines goes on indented lines under its key
+  function fountainTitleLines(ep, project, today) {
+    const ti = titleInfo(ep, project, today);
+    const kv = (k, v) => (/\n/.test(v) ? [k + ':'].concat(v.split('\n').map((x) => '    ' + x)) : [k + ': ' + v]);
+    const out = [...kv('Title', ti.title), ...kv('Episode', (ep.number || '') + (ep.title ? ' ' + ep.title : ''))];
+    if (ti.author) out.push(...kv('Author', ti.author));
+    out.push(...kv('Draft', ti.draft), ...kv('Draft date', ti.date));
+    if (ti.contact) out.push(...kv('Contact', ti.contact));
+    for (const [k, v] of ti.extra) out.push(...kv(k, v));
+    return out;
+  }
+  function exportFountain(ep, project, st, opts) {
     st = st || analyzeEpisode(ep, project);
-    const out = ['Title: ' + (project.name || ''), 'Episode: ' + (ep.number || '') + (ep.title ? ' ' + ep.title : ''), ''];
+    const out = fountainTitleLines(ep, project, opts && opts.today).concat(['']);
     const sceneByIdx = {}; st.scenes.forEach((s) => { sceneByIdx[s.from] = s; });
     const blocks = ep.blocks || [];
+    const dualB = new Set(dualPairs(blocks).map((p) => p.b));
     blocks.forEach((b, i) => {
-      const t = displayText(b);
+      const t0 = displayText(b), t = fountainInline(t0);
       const s = sceneByIdx[i];
       const next = blocks[i + 1];
       // Fountain scene number "#12А#"; a blank line ends a speech, so it comes only after its last paren or dialogue
-      if (b.t === 'scene') out.push('', '.' + (s && s.omitted ? omittedHeading(s.num) : t + headingDay(s, b)) + (s && s.num ? ' #' + s.num + '#' : ''), '');
-      else if (b.t === 'character') out.push('@' + t);
-      else if (b.t === 'paren' || b.t === 'dialogue') { out.push(t); if (!next || (next.t !== 'paren' && next.t !== 'dialogue')) out.push(''); }
+      // the scene's synopsis follows its heading as Fountain's «= …»
+      if (b.t === 'scene') out.push('', '.' + (s && s.omitted ? omittedHeading(s.num) : t + headingDay(s, b)) + (s && s.num ? ' #' + s.num + '#' : ''), '', ...(s && s.synopsis && !s.omitted ? ['= ' + fountainInline(clean(s.synopsis)), ''] : []));
+      // the second cue of a dual pair carries Fountain's «^»
+      else if (b.t === 'character') out.push('@' + t + (dualB.has(i) ? ' ^' : ''));
+      // a speech line that Fountain would read as markup (#, =, ===, [[, /*, a forced element, a heading) is escaped
+      else if (b.t === 'paren' || b.t === 'dialogue') { out.push((FNT_LEAD.test(t0) || HEADING_START.test(t0) || /\^\s*$/.test(t0) || INLINE_CUE.test(t0) ? FNT_ZW : '') + t); if (!next || (next.t !== 'paren' && next.t !== 'dialogue')) out.push(''); }
       else if (b.t === 'transition') out.push('> ' + t, '');
-      else out.push(t, '');
+      // a shot is a capitals line on its own; an action in capitals is forced with «!» so it does not read back as a shot
+      // one the import's shot rule would miss (long, «(ДЕТАЛЬ)», «...И ТИШИНА», «В:») carries the zero-width marks
+      else if (b.t === 'shot') out.push('', t === t0 && fountainShotLike(t0) ? t : FNT_ZW + t + FNT_ZW, '');
+      else out.push((fountainForce(t, i > 0 && blocks[i - 1].t === 'scene') ? '!' : '') + t, '');
     });
     return out.join('\n').replace(/\n{3,}/g, '\n\n');
   }
@@ -1362,10 +1937,16 @@
   const FT_PREFIX = { int: 'ИНТ.', ext: 'НАТ.', intext: 'НАТ/ИНТ.', pav: 'ПАВ.' };
   function filmtoolzHeading(s, ep) {
     const h = s.h;
-    let line = (/^\d+-\d+/.test(s.num) ? s.num : (ep.number || 1) + '-' + s.num) + '. ' + (h.type ? FT_PREFIX[h.type] + ' ' : '') + h.object + (h.sub ? '. ' + h.sub : '');
+    const num = (/^\d+-\d+/.test(s.num) ? s.num : (ep.number || 1) + '-' + s.num) + '. ';
+    // a heading without a recognised object («СОН», «ФЛЕШБЭК», empty) keeps its own text instead of vanishing
+    const raw = up(String(s.heading || '')).replace(/^\s*(?:\d+-)?[A-ZА-Я]?\d+[\-–.\d]*[А-ЯA-Z]?[.)]?\s+/, '').replace(/[\s.]+$/, '').trim();
+    let line = h.object ? (h.type ? FT_PREFIX[h.type] + ' ' : '') + h.object + (h.sub ? '. ' + h.sub : '') : raw || 'БЕЗ ЗАГОЛОВКА';
     const tm = FT_TIME[h.time] || '';
-    if (tm) line += ' ' + tm;
-    if (s.day) line += ' ' + String(s.day).replace(/\D/g, '') + '.';
+    if (tm && h.object) line += ' ' + tm;
+    const day = String(s.day || '').replace(/\D/g, '');
+    if (day) line += ' ' + day;
+    // FilmToolz reads the heading up to the closing period, so the line always ends with one
+    line = num + line.replace(/[\s.]+$/, '') + '.';
     const cast = s.cast.join(', ');
     return { line, cast: (cast ? cast + ' ' : '') + '(' + fmtTime(s.min).padStart(5, '0') + ')' };
   }
@@ -1379,7 +1960,7 @@
     const paras = (ep.blocks || []).filter((b, i) => !skip.has(i)).map((b, i) => {
       const f = FMT[b.t];
       const left = tw(f.indent - 1.5), right = tw(7.5 - (f.indent + f.width / 10));
-      const pPr = '<w:pPr><w:spacing w:before="' + (i === 0 ? 0 : f.sb * 240) + '" w:after="0" w:line="240" w:lineRule="exact"/><w:ind w:left="' + left + '" w:right="' + Math.max(0, right) + '"/>' + (f.right ? '<w:jc w:val="right"/>' : '') + (b.t === 'scene' || b.t === 'character' ? '<w:keepNext/>' : '') + '</w:pPr>';
+      const pPr = '<w:pPr><w:spacing w:before="' + (i === 0 ? 0 : f.sb * 240) + '" w:after="0" w:line="240" w:lineRule="exact"/><w:ind w:left="' + left + '" w:right="' + Math.max(0, right) + '"/>' + (f.right ? '<w:jc w:val="right"/>' : '') + (b.t === 'scene' || b.t === 'character' || b.t === 'shot' ? '<w:keepNext/>' : '') + '</w:pPr>';
       const s = st.scenes.find((x) => x.id === b.id);
       if (b.t === 'scene' && s) {
         const ft = filmtoolzHeading(s, ep);
@@ -1634,20 +2215,109 @@
     });
   }
   // ---------- history (time rewind) ----------
-  // keep every snapshot for a day, one per hour for a week, then one per day; marked ones (keep) survive thinning
-  const HIST = { dense: 24 * 3600e3, hourly: 7 * 24 * 3600e3, max: 400 };
-  function thinHistory(list, now) {
-    now = now || Date.now();
-    const sorted = list.slice().sort((a, b) => a.date - b.date);
-    const out = []; let lastKey = null;
-    for (const h of sorted) {
-      const age = now - h.date;
-      const key = h.keep ? 'k' + h.date : age < HIST.dense ? 'd' + h.date : age < HIST.hourly ? 'h' + Math.floor(h.date / 3600e3) : 'D' + Math.floor(h.date / 86400e3);
-      if (key === lastKey && out.length && !out[out.length - 1].keep) out[out.length - 1] = h;
-      else out.push(h);
-      lastKey = key;
+  // Every snapshot is kept. To fit in the browser they are stored as reverse deltas: the newest snapshot is whole, each
+  // older one keeps only what differs from the next one (ops: [from, count] runs of that snapshot's blocks, or a block
+  // itself; inh: fields equal to it). Every HIST.key-th snapshot stays whole, so a restore never walks a long chain.
+  // Snapshots written whole by older versions are read as they are. Versions are dropped only over a storage budget
+  // (thinHistory), oldest automatic ones first; marked ones (keep) never.
+  const HIST = { key: 30, budget: 40e6, dense: 24 * 3600e3, hourly: 7 * 24 * 3600e3 };
+  const HIST_FIELDS = ['blocks', 'sceneMeta', 'lock', 'revisions', 'revLevel', 'pageLock', 'tags', 'titlePage', 'sugs'];
+  const histIsDelta = (h) => !!(h && Array.isArray(h.ops));
+  // a short fingerprint of a state (a snapshot used to keep the whole JSON of the episode a second time for this)
+  function hashStr(s) {
+    let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+    for (let i = 0; i < s.length; i++) { const c = s.charCodeAt(i); h1 = Math.imul(h1 ^ c, 2654435761); h2 = Math.imul(h2 ^ c, 1597334677); }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return (h2 >>> 0).toString(36) + (h1 >>> 0).toString(36) + ':' + s.length.toString(36);
+  }
+  const histSig = (state) => hashStr(JSON.stringify(state));
+  const sigOf = (h) => (h && typeof h.sig === 'string' && h.sig.length > 64 ? (h.sig = hashStr(h.sig)) : h && h.sig);
+  const sameJSON = (a, b) => a === b || JSON.stringify(a) === JSON.stringify(b);
+  // cur as a delta against ref (the next, newer snapshot)
+  function histEncode(cur, ref) {
+    const out = {};
+    for (const k of Object.keys(cur)) if (!HIST_FIELDS.includes(k) && k !== 'sz') out[k] = cur[k];
+    const pos = new Map((ref.blocks || []).map((b, i) => [b.id, i])), ops = [];
+    for (const b of cur.blocks || []) {
+      const j = pos.get(b.id), last = ops[ops.length - 1];
+      if (j != null && sameJSON(ref.blocks[j], b)) { if (Array.isArray(last) && last[0] + last[1] === j) last[1]++; else ops.push([j, 1]); }
+      else ops.push(b);
     }
-    return out.slice(-HIST.max);
+    out.ops = ops;
+    const inh = [];
+    for (const f of HIST_FIELDS) {
+      if (f === 'blocks' || !(f in cur)) continue;
+      if (f in ref && sameJSON(cur[f], ref[f])) inh.push(f); else out[f] = cur[f];
+    }
+    if (inh.length) out.inh = inh;
+    out.sz = JSON.stringify(out).length;
+    return out;
+  }
+  function histDecode(d, ref) {
+    const out = {};
+    for (const k of Object.keys(d)) if (k !== 'ops' && k !== 'inh' && k !== 'sz') out[k] = d[k];
+    const blocks = [];
+    for (const op of d.ops) { if (Array.isArray(op)) for (let q = op[0]; q < op[0] + op[1]; q++) blocks.push(ref.blocks[q]); else blocks.push(op); }
+    out.blocks = blocks;
+    for (const f of d.inh || []) out[f] = ref[f];
+    return out;
+  }
+  // the whole state of snapshot i (old whole snapshots come back as they are); shared parts are not copied
+  function histState(list, i) {
+    const h = list[i];
+    if (!h || !histIsDelta(h)) return h || null;
+    let j = i + 1; while (j < list.length && histIsDelta(list[j])) j++;
+    if (j >= list.length) return null;
+    let st = list[j];
+    for (let k = j - 1; k >= i; k--) st = histDecode(list[k], st);
+    return st;
+  }
+  // every state, newest to oldest in one pass (for thinning)
+  function histStates(list) {
+    const out = new Array(list.length);
+    for (let i = list.length - 1; i >= 0; i--) out[i] = histIsDelta(list[i]) ? (out[i + 1] ? histDecode(list[i], out[i + 1]) : null) : list[i];
+    return out;
+  }
+  const histEntrySize = (h) => h.sz || (h.sz = JSON.stringify(h).length);
+  const histSize = (list) => list.reduce((a, h) => a + histEntrySize(h), 0);
+  // a new whole snapshot goes on the end; the one before it becomes a delta unless it is a key snapshot
+  function histPush(list, h) {
+    list.forEach(sigOf);
+    const n = list.length, last = list[n - 1];
+    if (last && !histIsDelta(last)) {
+      let c = 0; for (let k = n - 2; k >= 0 && histIsDelta(list[k]); k--) c++;
+      if (c < HIST.key - 1 && list.length > 0) list[n - 1] = histEncode(last, h);
+    }
+    delete h.sz; histEntrySize(h);
+    list.push(h);
+    return list;
+  }
+  // Over the budget only: first the old tiers (every snapshot for a day, one an hour for a week, one a day after), then the
+  // oldest automatic snapshots. Marked snapshots (keep) and the newest one are never dropped. Returns the list (new array)
+  // with .dropped = how many went.
+  function thinHistory(list, budget, now) {
+    now = now || Date.now();
+    budget = budget == null ? HIST.budget : budget;
+    // within the budget the list itself comes back (callers keep one array per episode)
+    if (histSize(list) <= budget || list.length < 2) return list;
+    // stored order is date order; deltas refer to the next entry, so the order is never changed here
+    const out = list.slice();
+    Object.defineProperty(out, 'dropped', { value: 0, writable: true, enumerable: false });
+    let size = histSize(out);
+    const states = histStates(out);
+    const drop = (i) => {
+      size -= histEntrySize(out[i]);
+      out.splice(i, 1); states.splice(i, 1); out.dropped++;
+      // the snapshot before it was a delta against the one dropped: now against the next one
+      if (i > 0 && histIsDelta(out[i - 1]) && states[i - 1] && states[i]) { size -= histEntrySize(out[i - 1]); out[i - 1] = histEncode(states[i - 1], states[i]); size += out[i - 1].sz; }
+    };
+    const tier = (h) => { const age = now - h.date; return age < HIST.dense ? 'd' + h.date : age < HIST.hourly ? 'h' + Math.floor(h.date / 3600e3) : 'D' + Math.floor(h.date / 86400e3); };
+    for (let i = 0; i < out.length - 1 && size > budget;) {
+      if (!out[i].keep && !out[i + 1].keep && tier(out[i]) === tier(out[i + 1])) drop(i); else i++;
+    }
+    for (let i = 0; i < out.length - 1 && size > budget;) { if (!out[i].keep) drop(i); else i++; }
+    return out;
   }
   // put one scene from a snapshot back into the current text; the rest of the text is untouched
   function restoreScene(cur, snap, sceneId) {
@@ -1668,6 +2338,380 @@
     if (pos == null) { const idx = ss.indexOf(sc); pos = cs[idx] ? cs[idx].from : cur.length; }
     out.splice(pos, 0, ...piece);
     return { blocks: out, how: 'inserted' };
+  }
+  // the pages of a layout as block ranges: page k holds the blocks that start on it (a block carried over from the page
+  // before stays with that page); a page that only continues an earlier block has no range of its own
+  function pageRanges(lay) {
+    const first = [];
+    lay.pages.forEach((pg, k) => pg.items.forEach((it) => { if (it.i != null && first[it.i] == null) first[it.i] = k; }));
+    const out = [];
+    first.forEach((k, i) => {
+      const r = out[out.length - 1];
+      if (r && r.k === k) r.to = i; else out.push({ k, label: (lay.labels || [])[k] || String(k + 1), from: i, to: i });
+    });
+    return out;
+  }
+  // put blocks from..to of a snapshot (one page) back into the current text, the way restoreScene does for a scene:
+  // what stands between the page's neighbours now is replaced; without them, the span of the page's own elements; if
+  // none of it is left, the page goes in after the nearest earlier element the text still has
+  // Returns { blocks, at, count, removed, ids, kept }: ids = the restored elements, at = where the first of them stands,
+  // kept = elements left in place between them (text written inside the page since, when the span had grown too large).
+  function restoreRange(cur, snap, from, to) {
+    const piece0 = snap.slice(from, to + 1);
+    if (!piece0.length) return null;
+    const pos = new Map(cur.map((b, i) => [b.id, i]));
+    const prev = from > 0 ? pos.get(snap[from - 1].id) : -1, next = to + 1 < snap.length ? pos.get(snap[to + 1].id) : cur.length;
+    // between the neighbours, unless that span has grown far beyond the page (text written in between since)
+    if (prev != null && next != null && prev < next && next - prev - 1 <= piece0.length * 3 + 10) {
+      const a = prev + 1, z = next - 1;
+      const have = new Set(cur.map((b) => b.id));
+      for (let i = a; i <= z; i++) have.delete(cur[i].id);
+      const piece = piece0.map((b) => Object.assign({}, b, { id: have.has(b.id) ? uid() : b.id }));
+      const out = cur.slice();
+      out.splice(a, z - a + 1, ...piece);
+      return { blocks: out, at: a, count: piece.length, removed: z - a + 1, ids: piece.map((b) => b.id), kept: 0 };
+    }
+    // otherwise only the page's own elements: each one still there is replaced in place, one deleted since comes back
+    // next to its nearest surviving neighbour of the page; anything else in between (written since) stays
+    const live = piece0.filter((b) => pos.has(b.id));
+    if (!live.length) {
+      let a = 0;
+      for (let q = from - 1; q >= 0; q--) if (pos.has(snap[q].id)) { a = pos.get(snap[q].id) + 1; break; }
+      const piece = piece0.map((b) => Object.assign({}, b));
+      const out = cur.slice();
+      out.splice(a, 0, ...piece);
+      return { blocks: out, at: a, count: piece.length, removed: 0, ids: piece.map((b) => b.id), kept: 0 };
+    }
+    // missing elements: those before the first survivor go in front of it, the others right after the survivor before them
+    const before = new Map(), after = new Map();
+    let anchor = null; const lead = [];
+    for (const b of piece0) {
+      if (pos.has(b.id)) { anchor = b.id; continue; }
+      const c = Object.assign({}, b);
+      if (!anchor) lead.push(c); else { if (!after.has(anchor)) after.set(anchor, []); after.get(anchor).push(c); }
+    }
+    before.set(live[0].id, lead);
+    const snapOf = new Map(piece0.map((b) => [b.id, b]));
+    const out = [], ids = [];
+    let at = -1, lo = Infinity, hi = -1;
+    for (const b of cur) {
+      const s0 = snapOf.get(b.id);
+      if (!s0) { out.push(b); continue; }
+      const group = (before.get(b.id) || []).concat([Object.assign({}, s0)], after.get(b.id) || []);
+      if (at < 0) at = out.length;
+      lo = Math.min(lo, out.length);
+      out.push(...group); ids.push(...group.map((x) => x.id));
+      hi = out.length - 1;
+    }
+    const idSet = new Set(ids);
+    let kept = 0; for (let i = lo; i <= hi; i++) if (!idSet.has(out[i].id)) kept++;
+    return { blocks: out, at, count: ids.length, removed: live.length, ids, kept };
+  }
+
+  // ---------- who changed what ----------
+  // Every element carries its last editor and time (lastBy, lastAt). An element whose type, text and dual flag are the
+  // same as in prev keeps prev's stamp; a new or changed one gets who/at. The stamp never counts as text: revisions,
+  // exports and text comparisons (blocksSig) ignore it.
+  function stampBlocks(prev, next, who, at) {
+    const was = new Map((prev || []).map((b) => [b.id, b]));
+    return next.map((b) => {
+      const p = was.get(b.id);
+      const same = p && p.t === b.t && (p.x || '') === (b.x || '') && !!p.dual === !!b.dual;
+      if (same) {
+        if (p.lastBy === b.lastBy && p.lastAt === b.lastAt) return b;
+        const o = Object.assign({}, b);
+        if (p.lastBy) { o.lastBy = p.lastBy; o.lastAt = p.lastAt; } else { delete o.lastBy; delete o.lastAt; }
+        return o;
+      }
+      if (!who) return b;
+      return Object.assign({}, b, { lastBy: who, lastAt: at || Date.now() });
+    });
+  }
+  const STAMP_KEYS = { lastBy: 1, lastAt: 1 };
+  const blocksSig = (blocks) => JSON.stringify(blocks, (k, v) => (STAMP_KEYS[k] ? undefined : v));
+  // the editors of an episode, most text first: [{name, n}]
+  function blockAuthors(blocks) {
+    const m = new Map();
+    for (const b of blocks || []) if (b.lastBy) m.set(b.lastBy, (m.get(b.lastBy) || 0) + 1);
+    return [...m.entries()].map(([name, n]) => ({ name, n })).sort((a, b) => b.n - a.n || a.name.localeCompare(b.name));
+  }
+
+  // ---------- suggestions (Правка → «Режим предложений», track changes) ----------
+  // The text model (ep.blocks) holds accepted text only: pagination, analysis, revisions and every export read it and
+  // never see a suggestion. Suggestions are records beside it (ep.sugs), each with an id, author (by) and time (at):
+  //   { k:'ins', bid, off, x, ctx }  text x proposed at offset off of block bid's accepted text (ctx: the accepted text
+  //                                  just before it, so the place is found again after the text around it changed)
+  //   { k:'del', bid, off, x }       accepted text x at off proposed for deletion
+  //   { k:'add', bid, after, t, x }  a whole new element bid (type t, text x) after element `after` (null: first)
+  //   { k:'rm', bid }                accepted element bid proposed for deletion
+  // On screen a block is a list of segments: '=' accepted, '+' inserted, '-' struck ({k, x, id, by, at}).
+  // ep.sugGone keeps the ids accepted, rejected or withdrawn, so a merge of two copies does not bring them back.
+  const SG_CTX = 12;
+  // segments of one accepted block from its text and its records (records that no longer fit are left out)
+  function sgBlockSegs(x, ins, dels, dropped) {
+    x = x || '';
+    const placed = [];
+    for (const d of (dels || []).slice().sort((a, b) => a.off - b.off || String(a.id).localeCompare(String(b.id)))) {
+      if (!d.x) { dropped.push(d.id); continue; }
+      const free = (p) => p >= 0 && p + d.x.length <= x.length && x.substr(p, d.x.length) === d.x && !placed.some((q) => p < q.off + q.x.length && q.off < p + d.x.length);
+      let at = free(d.off) ? d.off : -1;
+      if (at < 0) {
+        // the text moved: the nearest free occurrence of the struck words
+        let best = -1;
+        for (let p = x.indexOf(d.x); p >= 0; p = x.indexOf(d.x, p + 1)) if (free(p) && (best < 0 || Math.abs(p - d.off) < Math.abs(best - d.off))) best = p;
+        at = best;
+      }
+      if (at < 0) { dropped.push(d.id); continue; }
+      placed.push(Object.assign({}, d, { off: at }));
+    }
+    const delAt = new Array(x.length).fill(null);
+    for (const d of placed) for (let q = d.off; q < d.off + d.x.length; q++) delAt[q] = d;
+    const insAt = {};
+    for (const s of ins || []) {
+      if (!s.x) { dropped.push(s.id); continue; }
+      let off = Math.max(0, Math.min(x.length, s.off | 0));
+      if (s.ctx && x.slice(Math.max(0, off - s.ctx.length), off) !== s.ctx) {
+        let best = -1;
+        for (let p = x.indexOf(s.ctx); p >= 0; p = x.indexOf(s.ctx, p + 1)) if (best < 0 || Math.abs(p + s.ctx.length - off) < Math.abs(best + s.ctx.length - off)) best = p;
+        if (best >= 0) off = best + s.ctx.length;
+      }
+      // never inside a struck run: after it, as a replacement reads (~~old~~new)
+      while (off > 0 && off < x.length && delAt[off] && delAt[off] === delAt[off - 1]) off++;
+      (insAt[off] = insAt[off] || []).push(s);
+    }
+    const chars = [];
+    for (let p = 0; p <= x.length; p++) {
+      for (const s of (insAt[p] || []).sort((a, b) => (a.at || 0) - (b.at || 0) || String(a.id).localeCompare(String(b.id)))) for (const c of s.x) chars.push({ c, k: '+', id: s.id, by: s.by, at: s.at });
+      if (p < x.length) { const d = delAt[p]; chars.push(d ? { c: x[p], k: '-', id: d.id, by: d.by, at: d.at } : { c: x[p], k: '=' }); }
+    }
+    return sgGroup(chars);
+  }
+  // characters back into runs; a run is one kind and one record
+  function sgGroup(chars) {
+    const out = [];
+    for (const ch of chars) {
+      const last = out[out.length - 1];
+      if (last && last.k === ch.k && (ch.k === '=' || last.id === ch.id)) { last.x += ch.c; continue; }
+      out.push(ch.k === '=' ? { k: '=', x: ch.c } : { k: ch.k, x: ch.c, id: ch.id, by: ch.by, at: ch.at });
+    }
+    return out;
+  }
+  function sgChars(segs) {
+    const out = [];
+    for (const s of segs || []) for (const c of s.x || '') out.push(s.k === '=' ? { c, k: '=' } : { c, k: s.k, id: s.id, by: s.by, at: s.at });
+    return out;
+  }
+  // the text of segments: 'acc' accepted (= and -), 'prop' as proposed (= and +), 'view' everything on screen
+  function sgText(segs, which) {
+    let s = '';
+    for (const g of segs || []) if (which === 'view' || g.k === '=' || g.k === (which === 'prop' ? '+' : '-')) s += g.x;
+    return s;
+  }
+  // what is on screen, in order: [{ b, add, rm, segs }] (b: the block, or the proposed one for an added element)
+  function sgView(blocks, sugs) {
+    const dropped = [], byBid = {}, adds = [];
+    for (const s of sugs || []) {
+      if (!s || !s.id) continue;
+      if (s.k === 'add') { adds.push(s); continue; }
+      const o = (byBid[s.bid] = byBid[s.bid] || { ins: [], del: [], rm: null });
+      if (s.k === 'ins') o.ins.push(s); else if (s.k === 'del') o.del.push(s); else if (s.k === 'rm') o.rm = s;
+    }
+    const known = new Set((blocks || []).map((b) => b.id));
+    for (const bid of Object.keys(byBid)) if (!known.has(bid)) { const o = byBid[bid]; [...o.ins, ...o.del, ...(o.rm ? [o.rm] : [])].forEach((s) => dropped.push(s.id)); }
+    const after = {};
+    for (const a of adds.sort((p, q) => (p.at || 0) - (q.at || 0) || String(p.id).localeCompare(String(q.id)))) (after[a.after || ''] = after[a.after || ''] || []).push(a);
+    const items = [], done = new Set();
+    const emitAdds = (key) => {
+      for (const a of after[key] || []) {
+        if (done.has(a.id) || known.has(a.bid)) { if (known.has(a.bid) && !done.has(a.id)) { done.add(a.id); dropped.push(a.id); } continue; }
+        done.add(a.id);
+        const b = { id: a.bid, t: a.t || 'action', x: a.x || '' };
+        if (a.dual && b.t === 'character') b.dual = true;
+        items.push({ b, add: a, rm: null, segs: b.x ? [{ k: '=', x: b.x }] : [] });
+        emitAdds(a.bid);
+      }
+    };
+    emitAdds('');
+    for (const b of blocks || []) {
+      const o = byBid[b.id];
+      items.push({ b, add: null, rm: (o && o.rm) || null, segs: o && (o.ins.length || o.del.length) ? sgBlockSegs(b.x, o.ins, o.del, dropped) : (b.x ? [{ k: '=', x: b.x }] : []) });
+      emitAdds(b.id);
+    }
+    // an element added after one that is gone (or in a loop): at the end, so it is not lost
+    for (const a of adds) if (!done.has(a.id)) { done.add(a.id); const b = { id: a.bid, t: a.t || 'action', x: a.x || '' }; items.push({ b, add: a, rm: null, segs: b.x ? [{ k: '=', x: b.x }] : [] }); }
+    return { items, dropped };
+  }
+  // the screen back into the model: { blocks, sugs }. An item with segs null has no suggestions in it
+  function sgSerialize(items) {
+    const blocks = [], sugs = [], seen = new Set();
+    const fresh = (id) => { let k = id, n = 2; while (seen.has(k)) k = id + '-' + n++; seen.add(k); return k; };
+    let prev = null;
+    for (const it of items) {
+      const b = it.b;
+      if (it.add) {
+        const x = it.segs ? sgText(it.segs, 'prop') : b.x || '';
+        const s = { id: fresh(it.add.id), k: 'add', bid: b.id, after: prev, t: b.t, x, by: it.add.by, at: it.add.at };
+        if (b.dual && b.t === 'character') s.dual = true;
+        sugs.push(s); prev = b.id; continue;
+      }
+      let acc = '';
+      if (it.segs) for (const g of it.segs) {
+        if (g.k === '=') { acc += g.x; continue; }
+        if (g.k === '+') sugs.push({ id: fresh(g.id), k: 'ins', bid: b.id, off: acc.length, x: g.x, ctx: acc.slice(-SG_CTX), by: g.by, at: g.at });
+        else { sugs.push({ id: fresh(g.id), k: 'del', bid: b.id, off: acc.length, x: g.x, by: g.by, at: g.at }); acc += g.x; }
+      } else acc = b.x || '';
+      if (it.rm) sugs.push({ id: fresh(it.rm.id), k: 'rm', bid: b.id, by: it.rm.by, at: it.rm.at });
+      blocks.push(acc === (b.x || '') ? b : Object.assign({}, b, { x: acc }));
+      prev = b.id;
+    }
+    return { blocks, sugs };
+  }
+  // accept (accept=true) or reject the suggestions with these ids (null: all): { blocks, sugs, n }
+  function sgResolve(blocks, sugs, ids, accept) {
+    const want = ids ? new Set(ids) : null, got = new Set(), hit = (id) => { if (!id || (want && !want.has(id))) return false; got.add(id); return true; };
+    const items = [];
+    for (const it of sgView(blocks, sugs).items) {
+      if (it.add && hit(it.add.id)) { if (accept) items.push({ b: it.b, add: null, rm: null, segs: it.segs }); continue; }
+      if (it.rm && hit(it.rm.id)) { if (accept) continue; it.rm = null; }
+      const segs = [];
+      for (const g of it.segs) {
+        if (g.k === '=' || !hit(g.id)) { segs.push(g); continue; }
+        if ((g.k === '+') === !!accept) segs.push({ k: '=', x: g.x });
+      }
+      items.push({ b: it.b, add: it.add, rm: it.rm, segs: sgGroup(sgChars(segs)) });
+    }
+    const r = sgSerialize(items);
+    r.n = got.size;
+    return r;
+  }
+  // one edit of one block on screen: view range [a, b) replaced by text. mode 'sug' records it as a suggestion of o.by
+  // (struck instead of removed, typed text inserted); 'direct' changes the text itself (removes struck or inserted text
+  // in the range; typing right after inserted text extends it). Returns { segs, caret } (caret as a view offset)
+  function sgEdit(segs, a, b, text, o) {
+    o = o || {};
+    const sug = o.mode === 'sug', me = o.by || '', at = o.at || Date.now(), newId = o.uid || uid;
+    let chars = sgChars(segs);
+    a = Math.max(0, Math.min(a, chars.length)); b = Math.max(a, Math.min(b, chars.length));
+    const mine = (ch, k) => ch && ch.k === k && ch.by === me;
+    let caret = a;
+    if (b > a) {
+      const out = chars.slice(0, a);
+      let delId = null;
+      if (sug) delId = (mine(chars[a - 1], '-') && chars[a - 1].id) || (mine(chars[b], '-') && chars[b].id) || null;
+      let kept = 0;
+      for (let q = a; q < b; q++) {
+        const ch = chars[q];
+        if (!sug || ch.k === '+') continue;
+        if (ch.k === '=') { delId = delId || newId(); out.push({ c: ch.c, k: '-', id: delId, by: me, at }); } else out.push(ch);
+        kept++;
+      }
+      chars = out.concat(chars.slice(b));
+      caret = a + (sug && !o.back ? kept : 0);
+    }
+    if (text) {
+      text = String(text).replace(/[\r\n]+/g, ' ');
+      if (sug) {
+        // typing inside a struck run goes after it
+        while (caret > 0 && caret < chars.length && chars[caret].k === '-' && chars[caret - 1].k === '-' && chars[caret].id === chars[caret - 1].id) caret++;
+        const insId = (mine(chars[caret - 1], '+') && chars[caret - 1].id) || (mine(chars[caret], '+') && chars[caret].id) || newId();
+        const ref = chars.find((c) => c.id === insId);
+        const add = [...text].map((c) => ({ c, k: '+', id: insId, by: me, at: ref ? ref.at : at }));
+        chars.splice(caret, 0, ...add); caret += add.length;
+      } else {
+        const l = chars[caret - 1];
+        const add = [...text].map((c) => (l && l.k === '+' ? { c, k: '+', id: l.id, by: l.by, at: l.at } : { c, k: '=' }));
+        chars.splice(caret, 0, ...add); caret += add.length;
+      }
+    }
+    return { segs: sgGroup(chars), caret };
+  }
+  // a block split at view offset off: [left, right] (Enter outside the suggestion mode)
+  function sgSplit(segs, off) {
+    const chars = sgChars(segs);
+    return [sgGroup(chars.slice(0, off)), sgGroup(chars.slice(off))];
+  }
+  // Enter inside an accepted element in the suggestion mode: the tail is struck here and proposed as a new element.
+  // Returns { segs, tail } (tail: the proposed text of the new element)
+  function sgSplitSug(segs, off, o) {
+    o = o || {};
+    const chars = sgChars(segs), me = o.by || '', at = o.at || Date.now();
+    let tail = '', delId = chars[off - 1] && chars[off - 1].k === '-' && chars[off - 1].by === me ? chars[off - 1].id : null;
+    const out = chars.slice(0, off);
+    for (const ch of chars.slice(off)) {
+      if (ch.k === '+') { tail += ch.c; continue; }
+      if (ch.k === '=') { tail += ch.c; delId = delId || (o.uid || uid)(); out.push({ c: ch.c, k: '-', id: delId, by: me, at }); } else out.push(ch);
+    }
+    return { segs: sgGroup(out), tail };
+  }
+  // the side list «Предложения», in text order: [{ ids, k: 'ins'|'del'|'rep'|'add'|'rm', x, old, t, bid, bi, by, at }]
+  // (bi: the index in blocks of the accepted element it is in or follows, -1 before the first; 'rep' is a struck run
+  // followed by the same author's insertion: a replacement)
+  function sgList(blocks, sugs) {
+    const out = [], idx = new Map((blocks || []).map((b, i) => [b.id, i]));
+    let bi = -1;
+    for (const it of sgView(blocks, sugs).items) {
+      if (it.add) { out.push({ ids: [it.add.id], k: 'add', x: it.b.x, t: it.b.t, bid: it.b.id, bi, by: it.add.by, at: it.add.at }); continue; }
+      bi = idx.has(it.b.id) ? idx.get(it.b.id) : bi;
+      if (it.rm) out.push({ ids: [it.rm.id], k: 'rm', x: it.b.x, t: it.b.t, bid: it.b.id, bi, by: it.rm.by, at: it.rm.at });
+      const seen = new Set();
+      it.segs.forEach((g, q) => {
+        if (g.k === '=' || seen.has(g.id)) return;
+        seen.add(g.id);
+        const nx = it.segs[q + 1];
+        if (g.k === '-' && nx && nx.k === '+' && nx.by === g.by && !seen.has(nx.id)) {
+          seen.add(nx.id);
+          out.push({ ids: [g.id, nx.id], k: 'rep', old: g.x, x: nx.x, t: it.b.t, bid: it.b.id, bi, by: g.by, at: Math.max(g.at || 0, nx.at || 0) });
+          return;
+        }
+        out.push({ ids: [g.id], k: g.k === '+' ? 'ins' : 'del', x: it.segs.filter((s) => s.id === g.id).map((s) => s.x).join(''), t: it.b.t, bid: it.b.id, bi, by: g.by, at: g.at });
+      });
+    }
+    return out;
+  }
+  // two copies of an episode: suggestions of both (union by id; the same record in both: the later one), except those
+  // either side accepted, rejected or withdrawn (ep.sugGone)
+  function mergeSugs(e1, e2) {
+    const gone = [...new Set([...(e1.sugGone || []), ...(e2.sugGone || [])])], off = new Set(gone);
+    const out = new Map();
+    for (const s of (e1.sugs || []).concat(e2.sugs || [])) {
+      if (!s || !s.id || off.has(s.id)) continue;
+      const o = out.get(s.id);
+      if (!o || (s.at || 0) > (o.at || 0) || (s.x || '').length > (o.x || '').length) out.set(s.id, s);
+    }
+    return { sugs: [...out.values()], gone: gone.slice(-5000) };
+  }
+  // ids that were in old and are not in now go to ep.sugGone (capped); ids back in now (an undo) leave it
+  function sgTrackGone(ep, old, now) {
+    const has = new Set((now || []).map((s) => s.id));
+    const lost = (old || []).filter((s) => s && !has.has(s.id)).map((s) => s.id);
+    let g = ep.sugGone || [];
+    if (g.length && has.size) g = g.filter((id) => !has.has(id));
+    if (lost.length) g = g.concat(lost.filter((id) => !g.includes(id)));
+    if (g.length > 5000) g = g.slice(-5000);
+    if (g.length) ep.sugGone = g; else delete ep.sugGone;
+    return lost;
+  }
+  // a fingerprint of the suggestions ('' with none, so episodes without them compare as before)
+  const sgSig = (sugs) => ((sugs || []).length ? JSON.stringify(sugs) : '');
+
+  // ---------- audit log (project-wide, append-only) ----------
+  const AUDIT_TYPES = { unlock: 'Снят лок номеров', pageunlock: 'Снят лок страниц', lockdrop: 'Лок снят восстановлением или загрузкой', delete: 'Удаление', restore: 'Возврат из корзины', rollback: 'Откат по истории', sides: 'Сайды', draft: 'Новый драфт', ai: 'ИИ' };
+  function mergeAuditLog(a, b) {
+    const out = (a || []).slice(), ids = new Set(out.map((x) => x.id));
+    for (const x of b || []) if (x && !ids.has(x.id)) { out.push(x); ids.add(x.id); }
+    return out.sort((x, y) => (x.at || 0) - (y.at || 0));
+  }
+  // what the «Журнал действий» shows: the project log, the db-wide one (projects deleted and brought back) and the
+  // unlock records episodes kept before the project log existed (each once: an entry the log already has is not repeated)
+  function auditEntries(project, extra) {
+    const out = mergeAuditLog(project.auditLog, (extra || []).filter((x) => !x.projectId || x.projectId === project.id || x.type === 'delete' || x.type === 'restore'));
+    const seen = new Set(out.map((x) => x.type + '|' + (x.ep || '') + '|' + x.at));
+    for (const e of project.episodes || []) {
+      const lab = 'С' + e.season + 'Е' + e.number;
+      for (const l of e.lockLog || []) { const k = 'unlock|' + e.id + '|' + l.at, k2 = 'lockdrop|' + e.id + '|' + l.at; if (!seen.has(k) && !seen.has(k2)) out.push({ id: 'll' + e.id + l.at, at: l.at, by: l.by, role: l.role, type: 'unlock', ep: e.id, epLabel: lab, text: 'Снят лок номеров сцен', reason: l.reason }); }
+      for (const l of e.pageLockLog || []) { const k = 'pageunlock|' + e.id + '|' + l.at, k2 = 'lockdrop|' + e.id + '|' + l.at; if (!seen.has(k) && !seen.has(k2)) out.push({ id: 'pl' + e.id + l.at, at: l.at, by: l.by, role: l.role, type: 'pageunlock', ep: e.id, epLabel: lab, text: 'Снят лок страниц' + (l.was && l.was.pages ? ' (' + l.was.pages + ' стр.)' : ''), reason: l.reason }); }
+    }
+    return out.sort((x, y) => (y.at || 0) - (x.at || 0));
   }
 
   // ---------- sides (scenes for a shooting day) ----------
@@ -1693,6 +2737,19 @@
   // dates as YYYY-MM-DD in local time (the value of <input type=date>), printed as ДД.ММ.ГГГГ whatever the locale
   function isoDay(t) { const d = new Date(t); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
   function sidesExpiry(from, days) { const d = new Date(from); d.setDate(d.getDate() + (days == null ? 3 : days)); return isoDay(d); }
+  // the trade-secret notice (98-ФЗ, ст. 10) printed on every PDF page: with the owner from the settings, or a generic one
+  function secretNotice(secret) {
+    const sec = secret || {};
+    if (sec.org) return 'КОММЕРЧЕСКАЯ ТАЙНА. Обладатель: ' + sec.org + (sec.addr ? ', ' + sec.addr : '') + '.';
+    return 'КОММЕРЧЕСКАЯ ТАЙНА. Копирование и передача третьим лицам без согласия обладателя запрещены.';
+  }
+  // two copies of one comment: the later «Решено»/«Открыть» wins (resolvedAt); copies from before resolvedAt keep «resolved on either side»
+  function mergeCommentState(c1, c2) {
+    const t1 = c1.resolvedAt || 0, t2 = c2.resolvedAt || 0;
+    if (t2 > t1) { c1.resolved = !!c2.resolved; c1.resolvedAt = t2; if (c2.resolvedBy) c1.resolvedBy = c2.resolvedBy; else delete c1.resolvedBy; }
+    else if (!t1 && !t2) c1.resolved = !!(c1.resolved || c2.resolved);
+    return c1;
+  }
   function ruDate(iso) { const m = /^(\d{4})-(\d\d)-(\d\d)$/.exec(iso || ''); return m ? m[3] + '.' + m[2] + '.' + m[1] : String(iso || ''); }
   // a copy is valid through its expiry day
   function sidesExpired(entry, now) { return !!(entry && entry.expires) && isoDay(now == null ? Date.now() : now) > entry.expires; }
@@ -1703,14 +2760,56 @@
     return out.sort((x, y) => (x.at || 0) - (y.at || 0));
   }
 
+  // ---------- find and replace (Final Draft Edit → Find / Replace) ----------
+  // o: { matchCase, word (whole word), types: ['character', …] or empty for all }. The text searched is what the page
+  // shows, so a heading or a cue typed in lower case is found as it is printed (capitals); an «УДАЛЕНА» placeholder is not text
+  const CAPS_T = { scene: 1, character: 1, transition: 1, shot: 1 };
+  function findRegex(q, o) {
+    if (!q) return null;
+    const esc = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), W = '[\\p{L}\\p{N}_]';
+    return new RegExp(o && o.word ? '(?<!' + W + ')' + esc + '(?!' + W + ')' : esc, 'gu' + (o && o.matchCase ? '' : 'i'));
+  }
+  function findMatches(blocks, q, o) {
+    o = o || {};
+    const re = findRegex(q, o), out = [];
+    if (!re) return out;
+    (blocks || []).forEach((b, i) => {
+      if (o.types && o.types.length && !o.types.includes(b.t)) return;
+      const x = b.x || '';
+      if (b.t === 'scene' && OMIT_RE.test(x)) return;
+      const shown = CAPS_T[b.t] ? up(x) : x, hay = shown.length === x.length ? shown : x;
+      re.lastIndex = 0;
+      let m;
+      while ((m = re.exec(hay))) { out.push({ i, id: b.id, start: m.index, end: m.index + m[0].length }); if (!m[0].length) re.lastIndex++; }
+    });
+    return out;
+  }
+  // every match (or only the one at one = {i, start}) replaced by repl as typed; changed blocks are new objects
+  function replaceMatches(blocks, q, repl, o, one) {
+    const ms = findMatches(blocks, q, o).filter((m) => !one || (m.i === one.i && m.start === one.start));
+    const byI = {};
+    ms.forEach((m) => { (byI[m.i] = byI[m.i] || []).push(m); });
+    const out = (blocks || []).map((b, i) => {
+      const list = byI[i];
+      if (!list) return b;
+      let x = b.x || '';
+      for (const m of list.slice().reverse()) x = x.slice(0, m.start) + repl + x.slice(m.end);
+      return Object.assign({}, b, { x });
+    });
+    return { blocks: out, count: ms.length };
+  }
+
   root.Core = {
-    sidesBlocks, sidesPick, sidesRecipients, sidesExpiry, sidesExpired, mergeSidesLog, isoDay, ruDate,
+    findMatches, replaceMatches, titleInfo, adoptTitlePage, parseEpisodeLine, fountainForce,
+    sidesBlocks, sidesPick, sidesRecipients, sidesExpiry, sidesExpired, mergeSidesLog, isoDay, ruDate, secretNotice, mergeCommentState,
     BREAKDOWN, BD, BD_SPECIAL, findAnchor, quoteAt, anchorTags, bdKey, bdName, breakdownItems, breakdownByObject, mergeTags, breakdownXLSX,
     REV_SETS, revName, revColorName, revColor, revMarkX, revMarks, newRevision, revisionsFromMarks, fdxActiveSet, pageLockFrom,
-    parseLines, LINE_COLORS, autoLine, listOf, paperOf, FMT_RU, lockAssign, lockMissing, lockInsertIndex, omittedHeading, OMIT_RE, numParts,
+    dualFmt, dualPairs, parseLines, LINE_COLORS, autoLine, listOf, paperOf, FMT_RU, lockAssign, lockMissing, lockInsertIndex, omittedHeading, OMIT_RE, numParts,
     TYPES, TYPE_LABEL, FMT, PAPER, TIMES, PREFIXES, TRANSITIONS, EXTENSIONS, TAGS, SPECIAL_TAGS, DEFAULT_RULES, MANUAL_CHECKS,
-    uid, up, clean, parseHeading, formatHeading, charName, wrap, paginate, rightEdge, displayText, analyzeEpisode, evalRules, fmtPages, fmtTime,
-    namingIssues, fixHomoglyphs, classifyLines, importText, importFDX, absorb, exportFDX, exportFountain, docxDocumentXML, DOCX_STATIC,
-    docxParagraphs, docxStyles, splitCast, splitCue, finalizeImport, numberingCheck, pdfLines, demoProject, sceneSplit, thinHistory, restoreScene, HIST, normalizeHeadingText, normalizeCharacter, filmtoolzHeading, HEADING_START,
+    uid, up, clean, parseHeading, formatHeading, charName, wrap, paginate, rightEdge, displayText, analyzeEpisode, evalRules, fmtPages, fmtTime, sceneEighths, fmtEighths, fmtScenePages,
+    namingIssues, fixHomoglyphs, classifyLines, importText, importFDX, importKIT, importSTARC, importSqliteProject, absorb, exportFDX, exportFountain, docxDocumentXML, DOCX_STATIC,
+    docxParagraphs, docxStyles, splitCast, splitCue, finalizeImport, numberingCheck, pdfLines, demoProject, sceneSplit, thinHistory, restoreScene, HIST,
+    sgView, sgSerialize, sgResolve, sgEdit, sgSplit, sgSplitSug, sgText, sgList, mergeSugs, sgTrackGone, sgSig, sgGroup, sgChars,
+    histPush, histState, histStates, histSize, histSig, histIsDelta, histEncode, histDecode, hashStr, pageRanges, restoreRange, stampBlocks, blocksSig, blockAuthors, AUDIT_TYPES, mergeAuditLog, auditEntries, normalizeHeadingText, normalizeCharacter, filmtoolzHeading, HEADING_START,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -161,6 +161,38 @@ let fails = 0, n = 0; const ok = (c, m) => { n++; if (!c) { fails++; console.log
   ok(r3.ok1 === false && r3.log === 1 && /не сохранены/.test(r3.toast), 'nothing saved: nothing logged, the toast says so: ' + JSON.stringify(r3));
   await p2.close();
 
+  // 7. the trade-secret notice is printed even when no owner is set; the reader's PDF is always in the reader's own name
+  await ev(() => { delete window.__draft.S.project.secret; window.__files = []; });
+  await role('producer', 'Продюсер Орлов');
+  await ev((id) => window.__draft.issueSides({ ids: [id], to: ['Анна'], expires: '2030-01-01' }), sc[1].id);
+  await p.waitForTimeout(1500);
+  files = await pdfs();
+  ok(files.length === 1 && files[0].pages.every((pg, k) => files[0].text(k).includes('КОММЕРЧЕСКАЯ ТАЙНА') && files[0].flat(k).includes('безсогласияобладателязапрещены')), 'sides without an owner: generic trade-secret line on every page');
+  await role('reader', 'Читатель Иванов');
+  await p.locator('[data-exp="pdf"]').first().dispatchEvent('click'); await p.waitForTimeout(300);
+  ok(await p.locator('#pdfTo').isDisabled() && await p.inputValue('#pdfTo') === 'Читатель Иванов', 'reader: recipient field locked to the reader');
+  await p.evaluate(() => { const i = document.getElementById('pdfTo'); i.disabled = false; i.value = 'Чужое Имя'; });
+  await p.click('#pdfOk'); await p.waitForTimeout(2500);
+  files = await pdfs();
+  const rtext = files.length ? files[0].pages.map((pg, k) => files[0].flat(k)).join('') : '';
+  ok(files.length === 1 && rtext.includes('Экземпляр:ЧитательИванов') && !rtext.includes('Чужое') && rtext.includes('КОММЕРЧЕСКАЯТАЙНА'), 'reader PDF: own name and trade-secret line even if the field is forced');
+  await ev(() => window.__draft.exportPDF({ to: 'Чужое Имя', wm: false })); await p.waitForTimeout(500);
+  files = await pdfs();
+  const rt2 = files.length ? files[0].pages.map((pg, k) => files[0].flat(k)).join('') : '';
+  ok(files.length === 1 && !rt2.includes('Чужое') && rt2.split('ЧитательИванов').length - 1 > files[0].pages.length, 'reader exportPDF: recipient and watermark forced');
+  // 8. scene lengths: a tiny live scene shows 1/8 in the scene list and in the sides list, never 0
+  await role('producer', 'Продюсер Орлов');
+  await ev(() => { const ed = document.getElementById('editor'); ed.insertAdjacentHTML('beforeend', '<div class="b t-scene" data-t="scene" data-id="tiny1">ИНТ. КОРИДОР - ДЕНЬ</div>'); window.__draft.recompute(); });
+  await p.locator('[data-ltab="scenes"]').dispatchEvent('click'); await p.waitForTimeout(200);
+  const tiny = await ev(() => { const s = window.__draft.S.st.scenes.find((x) => x.id === 'tiny1'); return { e: Math.round(s.pages * 8) }; });
+  ok(tiny.e === 0, 'the tiny scene rounds to 0 eighths');
+  ok(/^1\/8 ·/.test(await ev(() => document.querySelector('.sc[data-id="tiny1"] .meta .mono').textContent)), 'scene list: tiny scene shows 1/8');
+  await menu('#mSides');
+  ok(await p.locator('[data-sdrow="tiny1"] td:last-child').innerText() === '1/8', 'sides list: tiny scene shows 1/8');
+  await p.locator('[data-sdrow="tiny1"] td:nth-child(3)').click();
+  ok(/· 1\/8 стр\./.test(await p.locator('#sdSum').innerText()), 'sides summary counts 1/8: ' + await p.locator('#sdSum').innerText());
+  await p.click('#sdClose');
+
   ok(!errs.length, 'no page errors ' + errs.join('; '));
   console.log(fails ? fails + ' of ' + n + ' FAILED' : 'all ' + n + ' passed');
   await b.close();

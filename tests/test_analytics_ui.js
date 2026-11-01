@@ -64,6 +64,44 @@ const check = (ok, msg) => { console.log((ok ? 'ok   ' : 'FAIL ') + msg); if (!o
   const cell = await p.evaluate((i) => { const rows = document.querySelectorAll('.modal table.t tbody tr, dialog table.t tbody tr'); const row = rows[i]; return row ? row.lastElementChild.textContent.trim() : null; }, r.idx);
   check(cell === String(r.fails), 'season summary «Нарушений» matches the Rules tab (' + cell + ' vs ' + r.fails + ')');
 
+  // 5. bible cards: scene chips per episode (click opens the episode and the scene) and a relationship control on every card
+  await p.keyboard.press('Escape'); await p.waitForTimeout(100);
+  await p.locator('#pane-episodes .ep').nth(0).click(); await p.waitForTimeout(300);
+  await p.locator('[data-rtab="bible"]').dispatchEvent('click'); await p.waitForTimeout(250);
+  const card = (n) => p.locator('#pane-bible .chr').filter({ has: p.locator('.nm', { hasText: new RegExp('^' + n + '$') }) });
+  const lw = await p.evaluate(() => { const { S, C } = __draft; const out = {};
+    for (const e of S.project.episodes) { const st = e === S.ep ? S.st : C.analyzeEpisode(e, S.project); const nums = st.scenes.filter((s) => s.cast.includes('ЛЕНА')).map((s) => s.num); if (nums.length) out[e.id] = nums; } return out; });
+  const chips = await card('ЛЕНА').locator('[data-chjump]').evaluateAll((bs) => bs.map((b) => [b.dataset.chjump.split('|')[0], b.textContent]));
+  const lg = {}; chips.forEach(([e, n]) => { (lg[e] = lg[e] || []).push(n); });
+  check(JSON.stringify(lg) === JSON.stringify(lw) && chips.length > 0, 'bible: scene chips per episode for ЛЕНА ' + JSON.stringify(lg));
+  check(/Серия 1:/.test(await card('ЛЕНА').locator('.chr-scenes').innerText()), 'bible: chips grouped under «Серия N»');
+  const lother = Object.keys(lw)[0];
+  // switch to another episode first: the chip must bring its own episode back
+  await p.locator('#pane-episodes .ep:not([data-id="' + lother + '"])').first().click(); await p.waitForTimeout(300);
+  await p.locator('[data-rtab="bible"]').dispatchEvent('click'); await p.waitForTimeout(250);
+  const lchip = card('ЛЕНА').locator('[data-chjump^="' + lother + '|"]').last();
+  const lsid = (await lchip.getAttribute('data-chjump')).split('|')[1];
+  await lchip.click(); await p.waitForTimeout(400);
+  check(await p.evaluate(([e, s]) => __draft.S.ep.id === e && __draft.S.curScene === s && !!document.querySelector('#editor [data-id="' + s + '"]'), [lother, lsid]), 'bible: a scene chip opens its episode and scene');
+  await p.locator('[data-rtab="bible"]').dispatchEvent('click'); await p.waitForTimeout(250);
+  const last = await p.locator('#pane-bible .chr .nm').last().innerText();
+  const c2 = card(last);
+  const rel0 = await p.evaluate(() => JSON.stringify(__draft.S.project.relations || []));
+  const relNow = () => p.evaluate(() => __draft.S.project.relations || []);
+  check(await c2.locator('[data-relwith]').count() === 1, 'bible: every card has a relationship control (' + last + ')');
+  await c2.locator('[data-reladd]').click(); await p.waitForTimeout(100);
+  check(JSON.stringify(await relNow()) === rel0 && /Выберите/.test(await p.locator('#toast').innerText()), 'bible: no partner chosen, nothing saved');
+  await c2.locator('[data-relwith]').selectOption('ЛЕНА'); await c2.locator('[data-rellabel]').fill('соседи'); await c2.locator('[data-reladd]').click(); await p.waitForTimeout(200);
+  check(JSON.stringify(await relNow()) === JSON.stringify(JSON.parse(rel0).concat([{ a: last, b: 'ЛЕНА', label: 'соседи' }])), 'bible: relation saved from the card');
+  check(/ЛЕНА — соседи/.test(await card(last).innerText()) && /соседи/.test(await card('ЛЕНА').innerText()), 'bible: relation shown on both cards');
+  await card('ЛЕНА').locator('[data-relwith]').selectOption(last); await card('ЛЕНА').locator('[data-rellabel]').fill('бывшие'); await card('ЛЕНА').locator('[data-reladd]').click(); await p.waitForTimeout(200);
+  check((await relNow()).length === JSON.parse(rel0).length + 1 && (await relNow()).filter((r) => r.label === 'бывшие').length === 1, 'bible: the same pair is relabelled, not duplicated');
+  await card(last).locator('[data-reldel]').click(); await p.waitForTimeout(200);
+  check(JSON.stringify(await relNow()) === rel0, 'bible: × removes the relation');
+  await p.evaluate(() => { const d = __draft; d.S.me = { name: 'Читатель', role: 'reader' }; d.applyRole(); d.recompute(); });
+  await p.locator('[data-rtab="bible"]').dispatchEvent('click'); await p.waitForTimeout(250);
+  check(await p.locator('#pane-bible [data-relwith]').count() === 0 && await p.locator('#pane-bible [data-chjump]').count() > 0, 'bible: reader sees scene chips but no relationship editor');
+
   await b.close();
   if (failed) { console.log(failed + ' failed'); process.exit(1); }
   console.log('test_analytics_ui: ok');

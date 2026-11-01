@@ -54,4 +54,87 @@ const pg = [[{ str: 'ИНТ. ОФИС - ДЕНЬ', x: 108, y: 700, w: 100, h: 12
   { str: 'Актёр · 01.11.2026', x: 200, y: 400, w: 200, h: 30, rot: true }, { str: 'Экземпляр: Актёр · 01.11.2026', x: 200, y: 30, w: 120, h: 8 }]];
 const pl = C.pdfLines(pg).map((l) => l.text);
 ok(pl.length === 2 && !pl.some((t) => /Актёр/.test(t)), 'pdfLines drops watermark and footer: ' + JSON.stringify(pl));
+// 9. history: every snapshot is kept as a reverse delta, the newest stays whole, states come back exactly
+{
+  const D = 900e3, t0 = Date.UTC(2026, 9, 1);
+  const base = C.demoProject().episodes[0];
+  const mk = (i) => {
+    const blocks = JSON.parse(JSON.stringify(base.blocks));
+    blocks[1] = Object.assign({}, blocks[1], { x: blocks[1].x + ' правка ' + i });
+    if (i % 7 === 0) blocks.push({ id: 'n' + i, t: 'action', x: 'Новый абзац ' + i });
+    const st = { blocks, sceneMeta: { a: { num: String(i % 3) } }, lock: null, revisions: i > 50 ? [C.newRevision(0, base.blocks, 'Р', 1)] : null, revLevel: i > 50 ? 1 : 0, pageLock: null, tags: [], titlePage: null };
+    return Object.assign({ id: 'h' + i, date: t0 + i * D, author: i % 2 ? 'Анна' : 'Борис', reason: i % 10 ? 'автоснимок' : 'перед правкой', keep: i % 10 === 0, sig: C.histSig(st) }, st);
+  };
+  const N = 30 * 96; // 30 days of 15-minute snapshots
+  const list = [], want = [];
+    const strip = (h) => JSON.stringify(Object.keys(h).filter((k) => k !== 'sz').sort().map((k) => [k, h[k]]));
+  for (let i = 0; i < N; i++) { const h = mk(i); want.push(strip(h)); C.histPush(list, h); }
+  const kept = C.thinHistory(list, C.HIST.budget, t0 + N * D);
+  ok(kept === list && kept.length === N, '30 days of 15-minute snapshots are all kept within the budget: ' + kept.length);
+  ok(!C.histIsDelta(list[N - 1]) && list[N - 1].blocks.length > 0, 'the newest snapshot stays whole');
+  ok(list.filter((h) => !C.histIsDelta(h)).length <= Math.ceil(N / C.HIST.key) + 1, 'only every ' + C.HIST.key + 'th snapshot is whole');
+  for (const i of [0, 1, 29, 30, 31, 500, 1234, N - 2, N - 1]) assert.strictEqual(strip(C.histState(list, i)), want[i], 'state ' + i);
+  n++;
+  const all = C.histStates(list); ok(all.every((s, i) => strip(s) === want[i]), 'histStates gives every state back');
+  const whole = want.reduce((a, s) => a + s.length, 0), packed = C.histSize(list);
+  ok(packed < whole / 10, 'deltas are small: ' + packed + ' vs ' + whole);
+  // over a budget: old automatic snapshots go first, keep snapshots and the newest never; what is left still restores
+  const cut = C.thinHistory(list, packed / 3, t0 + N * D);
+  ok(cut.dropped > 0 && C.histSize(cut) <= packed / 3, 'thinning only over the budget: dropped ' + cut.dropped);
+  ok(cut.filter((h) => h.keep).length === list.filter((h) => h.keep).length, 'keep snapshots survive thinning');
+  ok(cut[cut.length - 1].id === 'h' + (N - 1), 'the newest survives');
+  const byId = {}; want.forEach((w, i) => { byId['h' + i] = w; });
+  ok(C.histStates(cut).every((s, i) => strip(s) === byId[cut[i].id]), 'every snapshot left after thinning restores exactly');
+  // old whole-format snapshots (with the long sig) load, restore and take new ones after them
+  const old = [0, 1, 2].map((i) => { const h = mk(i); h.sig = JSON.stringify({ blocks: h.blocks }); return h; });
+  const oldWant = old.map((h) => JSON.stringify(h.blocks));
+  C.histPush(old, mk(3));
+  ok(old[0].sig.length < 64 && C.histIsDelta(old[2]) && !C.histIsDelta(old[0]), 'old snapshots: sig shortened, the last becomes a delta');
+  ok([0, 1, 2].every((i) => JSON.stringify(C.histState(old, i).blocks) === oldWant[i]), 'old-format snapshots still restore');
+  // a page of a snapshot goes back into the current text, the rest stays
+  const snap = base.blocks, lay = C.paginate(snap, { lines: 54 });
+  const pr = C.pageRanges(lay);
+  ok(pr.length >= 1 && pr[0].from === 0 && pr.every((r, k) => k === 0 || r.from === pr[k - 1].to + 1), 'page ranges cover the text in order');
+  const cur = snap.map((b) => Object.assign({}, b, { x: b.x + ' НОВОЕ' }));
+  const r0 = C.restoreRange(cur, snap, pr[0].from, pr[0].to);
+  ok(r0.blocks.slice(0, pr[0].to + 1).every((b, i) => b.x === snap[i].x) && r0.blocks.slice(pr[0].to + 1).every((b) => / НОВОЕ$/.test(b.x)), 'restoreRange replaces only that page');
+  const cur2 = cur.slice(); cur2.splice(2, 0, { id: 'ins', t: 'action', x: 'Вставлено позже' });
+  ok(!C.restoreRange(cur2, snap, 0, 4).blocks.some((b) => b.id === 'ins'), 'text written inside the page since the snapshot goes with it');
+  const cur3 = cur.filter((b, i) => i > 4);
+  const r3 = C.restoreRange(cur3, snap, 0, 4);
+  ok(r3.blocks.length === cur3.length + 5 && r3.blocks[0].x === snap[0].x, 'a page deleted since comes back in its place');
+  // the span between the neighbours grew far beyond the page: only the page's own elements go back, new text stays
+  {
+    const mk = (id, x) => ({ id, t: 'action', x });
+    const sn = [mk('a', 'p1'), mk('b', 'b0'), mk('c', 'c0'), mk('d', 'd0'), mk('e', 'p3')];
+    const cu = [mk('a', 'p1'), mk('b', 'b1'), mk('c', 'c1')];
+    for (let i = 0; i < 40; i++) cu.push(mk('n' + i, 'НОВОЕ ' + i));
+    cu.push(mk('e', 'p3'));
+    const rr = C.restoreRange(cu, sn, 1, 3);
+    ok(rr.blocks.filter((b) => /^НОВОЕ/.test(b.x)).length === 40, 'page restore keeps the blocks written inside the page since the snapshot');
+    ok(rr.blocks.find((b) => b.id === 'b').x === 'b0' && rr.blocks.find((b) => b.id === 'c').x === 'c0' && rr.blocks.findIndex((b) => b.id === 'd') === rr.blocks.findIndex((b) => b.id === 'c') + 1, 'its own elements are replaced in place, a deleted one comes back after its neighbour');
+    ok(rr.removed === 2 && rr.count === 3 && rr.kept === 0 && rr.ids.join() === 'b,c,d' && rr.blocks.length === 45, 'restoreRange reports what it restored');
+    const cu2 = [mk('b', 'b1')]; for (let i = 0; i < 30; i++) cu2.push(mk('m' + i, 'НОВОЕ ' + i)); cu2.push(mk('d', 'd1'));
+    const r2 = C.restoreRange(cu2, sn, 1, 3);
+    ok(r2.blocks.filter((b) => /^НОВОЕ/.test(b.x)).length === 30 && r2.kept === 30 && r2.blocks.map((b) => b.id).slice(0, 2).join() === 'b,c' && r2.blocks[r2.blocks.length - 1].x === 'd0', 'neighbours gone: the page comes back around the new text without deleting it');
+  }
+  // stamps: unchanged elements keep their author, changed and new ones get the editor; text comparisons ignore stamps
+  const s1 = C.stampBlocks([], [{ id: 'a', t: 'action', x: 'X' }], 'Анна', 5);
+  const s2 = C.stampBlocks(s1, [{ id: 'a', t: 'action', x: 'X' }, { id: 'b', t: 'action', x: 'Y' }], 'Борис', 9);
+  ok(s2[0].lastBy === 'Анна' && s2[0].lastAt === 5 && s2[1].lastBy === 'Борис', 'stampBlocks keeps and sets authors');
+  const s3 = C.stampBlocks(s2, [{ id: 'a', t: 'action', x: 'X2' }, s2[1]], 'Борис', 10);
+  ok(s3[0].lastBy === 'Борис' && s3[0].lastAt === 10, 'an edit moves the stamp');
+  ok(C.blocksSig(s3) === C.blocksSig([{ id: 'a', t: 'action', x: 'X2' }, { id: 'b', t: 'action', x: 'Y' }]), 'blocksSig ignores stamps');
+  assert.deepStrictEqual(C.blockAuthors(s3), [{ name: 'Борис', n: 2 }]); n++;
+  const pe = C.demoProject(), e0 = pe.episodes[0]; e0.blocks = e0.blocks.map((b) => Object.assign({}, b, { lastBy: 'Анна', lastAt: 1 }));
+  const fdx = C.exportFDX(e0, pe, C.analyzeEpisode(e0, pe), {});
+  ok(!/lastBy|Анна/.test(fdx.replace(/<TitlePage>[\s\S]*<\/TitlePage>/, '')), 'stamps stay out of the .fdx');
+  ok(C.revMarks(e0.blocks, [C.newRevision(0, pe.episodes[0].blocks.map((b) => ({ id: b.id, t: b.t, x: b.x })), 'Р')]).every((x) => x === 0), 'stamps are not revisions');
+  // audit log: union by id, unlock records of the episodes shown once
+  const A = [{ id: '1', at: 1, type: 'delete' }], B = [{ id: '1', at: 1, type: 'delete' }, { id: '2', at: 2, type: 'sides' }];
+  assert.deepStrictEqual(C.mergeAuditLog(A, B).map((x) => x.id), ['1', '2']); n++;
+  const pj = { id: 'p', auditLog: [{ id: 'u', at: 7, type: 'unlock', ep: 'e' }], episodes: [{ id: 'e', season: 1, number: 2, lockLog: [{ at: 7, reason: 'r' }, { at: 3, reason: 'старое' }], pageLockLog: [{ at: 4, reason: 'стр', was: { pages: 3 } }] }] };
+  const ae = C.auditEntries(pj, []);
+  ok(ae.length === 3 && ae[0].id === 'u' && ae.some((x) => x.reason === 'старое' && x.type === 'unlock') && ae.some((x) => x.type === 'pageunlock' && x.epLabel === 'С1Е2'), 'auditEntries includes old lockLog/pageLockLog once');
+}
 console.log('test_lock: ' + n + ' checks passed');

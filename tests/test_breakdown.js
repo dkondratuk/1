@@ -98,7 +98,7 @@ ok(old.scenes.every((s) => s.bd && !Object.keys(s.bd).length && !s.bdTags.length
   for (const k of Object.keys(z2.files)) if (!z2.files[k].dir) await parse(k);
   eq(errs, [], 'all parts are well-formed XML');
   const wb = await parse('xl/workbook.xml');
-  eq(tags$(wb, 'sheet').map((s) => s.getAttribute('name')), ['Сцены', 'Объекты', 'Персонажи', 'Разбивка'], 'sheet names');
+  eq(tags$(wb, 'sheet').map((s) => s.getAttribute('name')), ['Сцены', 'Объекты', 'Персонажи', 'Разбивка', 'По объектам'], 'sheet names');
   const rels = await parse('xl/_rels/workbook.xml.rels');
   ok(tags$(rels, 'Relationship').some((r) => r.getAttribute('Target') === 'styles.xml'), 'styles related');
   const styles = await parse('xl/styles.xml');
@@ -139,6 +139,16 @@ ok(old.scenes.every((s) => s.bd && !Object.keys(s.bd).length && !s.bdTags.length
   eq(bd[0], ['Категория', 'Элемент', 'Сцены', 'Сцен', 'Примечание'], 'breakdown header');
   ok(bd.some((r) => r[0] === 'Реквизит' && r[1] === 'Пистолет' && r[2] === '1, 3' && r[3] === 2 && r[4] === 'травматический'), 'breakdown row');
   ok(bd.some((r) => r[0] === 'Трюки' && r[4] === 'каскадёр'), 'note');
+  // per-object rollup: the same data as the tab's object summary (breakdownByObject)
+  const po = await rows(5);
+  eq(po[0].slice(0, 3), ['Объект', 'Сцены', 'Сцен'], 'per-object header');
+  eq(po[0].length, 3 + C.BREAKDOWN.length, 'one column per category');
+  const bo = C.breakdownByObject(st);
+  eq(po.length, 1 + bo.length, 'one row per object with breakdown');
+  const kv = po.find((r) => r[0] === 'КВАРТИРА');
+  ok(kv && kv[1] === bo.find((o) => o.name === 'КВАРТИРА').scenes.join(', ') && kv[po[0].indexOf('Реквизит')] === 'Пистолет', 'per-object row: ' + JSON.stringify(kv));
+  // scene lengths: a live scene is never shorter than 1/8
+  ok(sc.slice(1).every((r) => r[col('Страницы')] !== '0'), 'no 0-page live scene');
   // characters that XML forbids are dropped, markup is escaped
   const ep2 = { ...ep, tags: [T('z', 'a1', 'Маша', 'cameo', 'a<b>&"\u0001')] };
   const f2 = C.breakdownXLSX(ep2, proj, C.analyzeEpisode(ep2, proj));

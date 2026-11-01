@@ -125,6 +125,30 @@ async function fresh(b) { const ctx = await b.newContext(); await setup(ctx); co
       await p.locator(pane + ' [data-del="cP"]').dispatchEvent('click');
       ok(await p.evaluate(() => !window.__draft.S.ep.comments.some((c) => c.id === 'cP')), 'producer deletes a producer comment');
       await ctx.close(); }
+
+    // 7. comment resolution: «Решено»/«Открыть» record who and when; on a project-file merge the later toggle wins
+    { const { ctx, p } = await fresh(b);
+      await p.evaluate(() => { const d = window.__draft; d.S.ep.comments.push({ id: 'cR', author: 'Продюсер', role: 'producer', text: 'проверить', quote: '', date: Date.now() - 5000, resolved: false, replies: [], blockId: d.S.ep.blocks[0].id }); d.S.me = { name: 'Редактор Р', role: 'editor' }; d.applyRole(); d.recompute(); });
+      await p.evaluate(() => { document.querySelector('[data-rtab="comments"]').click(); }); await p.waitForTimeout(200);
+      const cR = () => p.evaluate(() => { const c = window.__draft.S.ep.comments.find((x) => x.id === 'cR'); return { resolved: !!c.resolved, by: c.resolvedBy, at: c.resolvedAt || 0 }; });
+      await p.locator('#pane-comments [data-res="cR"]').dispatchEvent('click'); await p.waitForTimeout(100);
+      const r1 = await cR();
+      ok(r1.resolved && r1.by === 'Редактор Р' && r1.at > 0, 'resolving records resolvedBy and resolvedAt');
+      ok(/Редактор Р/.test(await p.getAttribute('#pane-comments [data-c="cR"] .chip.ok', 'title') || ''), 'the «решено» chip names who resolved it');
+      const f1 = path.join(tmp, 'res1.json'); await dump(p, f1);
+      await p.waitForTimeout(20);
+      await p.locator('#pane-comments [data-res="cR"]').dispatchEvent('click'); await p.waitForTimeout(100);
+      const r2 = await cR();
+      ok(!r2.resolved && r2.at > r1.at, 'reopening is a later toggle');
+      await openFile(p, f1);
+      ok(!(await cR()).resolved, 'merging an older «resolved» copy keeps the later reopen');
+      const j = JSON.parse(fs.readFileSync(f1, 'utf8')); const fe = j.project.episodes.find((e) => e.comments.some((c) => c.id === 'cR'));
+      Object.assign(fe.comments.find((c) => c.id === 'cR'), { resolved: true, resolvedAt: Date.now() + 60000, resolvedBy: 'Продюсер Б' });
+      const f2 = path.join(tmp, 'res2.json'); fs.writeFileSync(f2, JSON.stringify(j));
+      await openFile(p, f2);
+      const r3 = await cR();
+      ok(r3.resolved && r3.by === 'Продюсер Б', 'a later resolve in the file wins: ' + JSON.stringify(r3));
+      await ctx.close(); }
   } catch (e) { console.log('ERROR', e); fails++; }
   await b.close();
   console.log(fails ? fails + ' FAILED' : 'all safety checks passed');

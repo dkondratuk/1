@@ -25,6 +25,9 @@
   --bad-soft: #fbe3e1;
   --hl: rgba(255, 196, 0, 0.38);
   --hl-active: rgba(255, 140, 0, 0.55);
+  /* find matches: green, so they are never taken for comment marks */
+  --hl-find: rgba(46, 170, 90, 0.28);
+  --hl-find-cur: rgba(30, 150, 70, 0.6);
   --shadow: 0 1px 2px rgba(20, 30, 50, .12), 0 8px 28px rgba(20, 30, 50, .14);
   --r: 4px;
   --ui: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -37,7 +40,7 @@
     --paper: #26292f; --paper-ink: #e8e8e6; --accent: #7d9dff; --on-accent: #10162a; --accent-soft: #2b3652; --sel: #3b6fd6;
     --pav: #f0a640; --pav-soft: #3a2c15; --night: #a9adff; --night-soft: #282a4a;
     --ok: #5fcf8e; --ok-soft: #173325; --warn: #f2c14e; --warn-soft: #3a3014; --bad: #ff8a80; --bad-soft: #3d1c1a;
-    --hl: rgba(255, 196, 0, 0.28); --hl-active: rgba(255, 150, 0, 0.45);
+    --hl: rgba(255, 196, 0, 0.28); --hl-active: rgba(255, 150, 0, 0.45); --hl-find: rgba(95, 207, 142, 0.25); --hl-find-cur: rgba(95, 207, 142, 0.55);
     --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 28px rgba(0,0,0,.4);
     color-scheme: dark;
   }
@@ -47,7 +50,7 @@
   --paper: #26292f; --paper-ink: #e8e8e6; --accent: #7d9dff; --on-accent: #10162a; --accent-soft: #2b3652; --sel: #3b6fd6;
   --pav: #f0a640; --pav-soft: #3a2c15; --night: #a9adff; --night-soft: #282a4a;
   --ok: #5fcf8e; --ok-soft: #173325; --warn: #f2c14e; --warn-soft: #3a3014; --bad: #ff8a80; --bad-soft: #3d1c1a;
-  --hl: rgba(255, 196, 0, 0.28); --hl-active: rgba(255, 150, 0, 0.45);
+  --hl: rgba(255, 196, 0, 0.28); --hl-active: rgba(255, 150, 0, 0.45); --hl-find: rgba(95, 207, 142, 0.25); --hl-find-cur: rgba(95, 207, 142, 0.55);
   --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 28px rgba(0,0,0,.4);
   color-scheme: dark;
 }
@@ -173,6 +176,14 @@ body.focus .left, body.focus .right { display: none; }
 .editor .t-paren { margin-left: var(--in-paren, 1.5in); width: var(--w-paren, 25ch); }
 .editor .t-dialogue { margin-left: var(--in-dial, 1in); width: var(--w-dial, 35ch); }
 .editor .t-transition { margin-top: 12pt; margin-left: var(--in-tr, 4in); width: var(--w-tr, calc(1.6in + 1px)); text-align: right; text-transform: uppercase; }
+.editor .t-shot { margin-top: 12pt; width: var(--tx-w, 60ch); text-transform: uppercase; }
+/* dual dialogue: the first speech in the left half of the column, the second beside it (app.js lifts it up, layoutDual) */
+.editor .b.dl.t-character { margin-left: var(--dl-char, 1in); width: var(--dw-char, 18ch); }
+.editor .b.dl.t-paren { margin-left: var(--dl-paren, 0.5in); width: var(--dw-paren, 20ch); }
+.editor .b.dl.t-dialogue { margin-left: var(--dl-dial, 0in); width: var(--dw-dial, 27ch); }
+.editor .b.dr.t-character { margin-left: var(--dr-char, 4in); width: var(--dw-char, 18ch); }
+.editor .b.dr.t-paren { margin-left: var(--dr-paren, 3.5in); width: var(--dw-paren, 20ch); }
+.editor .b.dr.t-dialogue { margin-left: var(--dr-dial, 3in); width: var(--dw-dial, 27ch); }
 .editor .b:first-child { margin-top: 0; }
 .editor .t-scene::after {
   content: attr(data-n); position: absolute; left: -0.75in; top: 0; color: var(--muted); font-size: 12pt;
@@ -187,6 +198,17 @@ body.focus .left, body.focus .right { display: none; }
 .page > .pbin {
   position: absolute; left: 0; right: 0; height: 0; z-index: 1; border-top: 1px dashed var(--line); pointer-events: none; user-select: none;
   padding-right: 8px; text-align: right; color: var(--muted); font-family: var(--mono); font-size: 10px; line-height: 14px;
+}
+/* a speech broken by a page (Final Draft (MORE) / CONT'D), as the PDF prints it: «(ДАЛЬШЕ)» under its last line on the page and
+   «ИМЯ (ПРОД.)» at the top of the next one, at the cue indent, outside the editable text. Between two elements the room is
+   made around the 'стр. N' label; inside a dialogue a float (shape-outside: its margin is not part of it) opens a four-line gap */
+.editor .b[data-pb][data-contd]::before { margin-top: 18pt; margin-bottom: 24pt; }
+.editor .b[data-cgap]::before {
+  content: ""; float: left; width: 100%; height: 48pt; margin-top: calc(var(--cg-line, 0) * 12pt); shape-outside: border-box;
+}
+.page > .pcont {
+  position: absolute; left: calc(var(--pg-left, 1.5in) + var(--in-char, 2in)); z-index: 1; pointer-events: none; user-select: none;
+  white-space: pre; font-family: var(--script); font-size: 12pt; line-height: 12pt; color: var(--muted); text-transform: uppercase;
 }
 /* draft marks (Final Draft «*» in the right margin): outside the editable text, one asterisk per line; older drafts grey */
 .page > .revmark {
@@ -421,3 +443,65 @@ ol.start { margin: 0; padding-left: 20px; display: flex; flex-direction: column;
 .sides-list, .sides-log { max-height: 240px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; margin: 6px 0 10px; }
 .sides-list tr[data-sdrow] { cursor: pointer; }
 .sides-list td:first-child { width: 24px; }
+/* character bible: scene chips and relationship row on each card */
+.chr-scenes { display: flex; flex-direction: column; gap: 3px; }
+.chip.scn { cursor: pointer; background: var(--paper); font: inherit; font-size: 11px; color: var(--accent); }
+.chip.scn:hover, .chip.scn:focus-visible { background: var(--accent-soft); }
+.chr-rel .chip .link { border: 0; background: none; padding: 0 0 0 2px; cursor: pointer; color: var(--muted); font: inherit; }
+.chr-rel .chip .link:hover { color: var(--bad, #c33); }
+.chr-rel .rel-add { margin-top: 4px; gap: 4px; flex-wrap: wrap; }
+.chr-rel .rel-add select, .chr-rel .rel-add input { flex: 1 1 110px; min-width: 0; font-size: 12px; }
+
+/* find and replace (Правка → «Найти и заменить…»): a panel over the top right of the page that leaves the text in view */
+.findbox {
+  position: fixed; z-index: 65; top: calc(72px + env(safe-area-inset-top, 0px)); right: 16px; width: 340px; max-width: calc(100vw - 32px); box-sizing: border-box;
+  background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: var(--r); box-shadow: var(--shadow);
+  padding: 8px 10px 10px; display: flex; flex-direction: column; gap: 6px; font-size: 13px;
+}
+.findbox .fb-head { display: flex; justify-content: space-between; align-items: center; }
+.findbox .fb-row { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--muted); }
+.findbox .fb-row input { width: 100%; box-sizing: border-box; color: var(--ink); }
+.findbox .fb-opts { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12.5px; }
+.findbox .fb-opts label { display: flex; align-items: center; gap: 4px; }
+.findbox .fb-status { font-size: 12px; color: var(--muted); min-height: 16px; font-variant-numeric: tabular-nums; }
+.findbox .fb-status.none { color: var(--bad); }
+.findbox .fb-note { font-size: 12px; color: var(--muted); line-height: 1.35; }
+.findbox .fb-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+::highlight(find) { background-color: var(--hl-find); }
+::highlight(find-cur) { background-color: var(--hl-find-cur); }
+@media (max-width: 760px) { .findbox { left: 16px; right: 16px; width: auto; top: auto; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); } }
+
+/* «Кто правил»: text tinted by its last editor, legend in the corner */
+:root { --who0: #1f5fbf; --who1: #b3261e; --who2: #1f7a46; --who3: #8a3fb8; --who4: #a85a00; --who5: #00808c; --who6: #b0306a; --who7: #5b6b00; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --who0: #82a8ff; --who1: #ff8a80; --who2: #6fd69b; --who3: #d29cff; --who4: #f5b25c; --who5: #5fd3dc; --who6: #ff8fc0; --who7: #c8d66a; }
+}
+:root[data-theme="dark"] { --who0: #82a8ff; --who1: #ff8a80; --who2: #6fd69b; --who3: #d29cff; --who4: #f5b25c; --who5: #5fd3dc; --who6: #ff8fc0; --who7: #c8d66a; }
+body.who-on .editor .b[data-who] { color: var(--who-c); }
+[data-who="0"] { --who-c: var(--who0); } [data-who="1"] { --who-c: var(--who1); } [data-who="2"] { --who-c: var(--who2); } [data-who="3"] { --who-c: var(--who3); }
+[data-who="4"] { --who-c: var(--who4); } [data-who="5"] { --who-c: var(--who5); } [data-who="6"] { --who-c: var(--who6); } [data-who="7"] { --who-c: var(--who7); }
+.wholegend { position: fixed; right: 16px; bottom: 34px; z-index: 40; max-width: min(320px, calc(100% - 32px)); display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); box-shadow: var(--shadow); padding: 6px 10px; font-size: 12px; }
+.wholegend b { width: 100%; font-weight: 600; }
+.wholegend .wl { display: inline-flex; align-items: center; gap: 5px; }
+.wholegend .wl i { width: 10px; height: 10px; border-radius: 2px; background: var(--who-c); display: inline-block; }
+.wholegend .wl i.none { background: transparent; border: 1px solid var(--paper-ink); }
+.bad-text { color: var(--bad); }
+.chip.priv { background: var(--night-soft); color: var(--night); border-color: transparent; }
+
+/* Suggestions (Правка → «Режим предложений»): inserted text underlined, struck text crossed out; whole elements too */
+:root { --sg-ins: #0b6e4f; --sg-ins-bg: rgba(11, 110, 79, 0.09); --sg-del: #b3261e; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --sg-ins: #6fd3a8; --sg-ins-bg: rgba(111, 211, 168, 0.12); --sg-del: #ff8a80; }
+}
+:root[data-theme="dark"] { --sg-ins: #6fd3a8; --sg-ins-bg: rgba(111, 211, 168, 0.12); --sg-del: #ff8a80; }
+ins.sg { color: var(--sg-ins); background: var(--sg-ins-bg); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; }
+del.sg { color: var(--sg-del); text-decoration: line-through; text-decoration-thickness: 1px; }
+.editor .b[data-sga] { color: var(--sg-ins); background: var(--sg-ins-bg); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; }
+.editor .b[data-sgr] { color: var(--sg-del); text-decoration: line-through; text-decoration-thickness: 1px; }
+.sginfo { cursor: pointer; white-space: nowrap; }
+.sginfo.on { color: var(--sg-ins); font-weight: 600; }
+.sgi { border: 1px solid var(--line); border-radius: var(--r); background: var(--paper); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; cursor: pointer; }
+.sgi .who { font-size: 12px; color: var(--muted); }
+.sgi .who b { color: var(--ink); font-weight: 500; }
+.sgi .q { font-family: var(--script); font-size: 12px; overflow-wrap: anywhere; }

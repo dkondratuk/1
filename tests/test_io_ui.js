@@ -44,10 +44,15 @@ const ok = (c, m, extra) => { console.log((c ? 'ok   ' : 'FAIL ') + m + (c || ex
     await p.evaluate(() => { const S = window.__draft.S; const ids = S.ep.blocks.filter((x) => x.t === 'scene').map((x) => x.id); const nums = ['A1', '12А', '51-12', '13', '14', '15', '16'];
       ids.forEach((id, k) => { S.ep.sceneMeta[id] = Object.assign(S.ep.sceneMeta[id] || {}, { num: nums[k] || String(20 + k), day: String(k + 1) }); }); window.__draft.recompute(); });
     const src = await blocks(), srcScenes = await scenes();
+    // the name the app gives the file (headless Chromium reports every blob download as «download»)
+    await p.evaluate(() => { const c = HTMLAnchorElement.prototype.click; HTMLAnchorElement.prototype.click = function () { window.__dlName = this.download; return c.call(this); }; });
     await p.click('#btnExport');
     const dl = p.waitForEvent('download');
     await p.locator('#exportMenu [data-exp=fountain]').dispatchEvent('click');
-    const fnt = path.join(tmp, 'ep.txt'); await (await dl).saveAs(fnt);
+    const fdl = await dl;
+    const fname = await p.evaluate(() => window.__dlName);
+    ok(/ С1Е01 .*\.fountain$/.test(fname), 'Fountain export is saved as .fountain', fname);
+    const fnt = path.join(tmp, 'ep.fountain'); await fdl.saveAs(fnt);
     const ftxt = fs.readFileSync(fnt, 'utf8');
     ok(/#A1#/.test(ftxt) && /#12А#/.test(ftxt) && /#51-12#/.test(ftxt), 'Fountain export writes scene numbers');
     await importFile(fnt);
@@ -74,6 +79,31 @@ const ok = (c, m, extra) => { console.log((c ? 'ok   ' : 'FAIL ') + m + (c || ex
       const hs = (await blocks()).filter((x) => x.startsWith('scene|'));
       ok(hs[0] === 'scene|ИНТ. ТРЕШКА. ЗАЛ - ДЕНЬ 2' && hs[1] === 'scene|ИНТ. ТРЕШКА - НОЧЬ 3', 'name fix keeps the day in the heading', hs.slice(0, 2));
     }
+
+    // 5. a Final Draft title page: the new episode takes its title and number, the empty contact of the project is filled,
+    // and the .fdx written back carries the same title page (blank lines, styles, credit, draft label and date)
+    await p.evaluate(() => { window.__draft.S.project.contact = ''; });
+    const TP = (a, t, st) => '<Paragraph Alignment="' + a + '" LeftIndent="1.00" RightIndent="7.50">' + (t == null ? '' : '<Text Font="Courier Final Draft" Style="' + (st || '') + '">' + t + '</Text>') + '</Paragraph>';
+    const tpXml = '<TitlePage><Content>' + TP('Center', '') + TP('Center', 'ВОРОНОВЫ', 'Bold') + TP('Center', 'Серия 7. «Дача»') + TP('Center', 'Автор сценария') + TP('Center', 'Пётр Сидоров') +
+      TP('Left', 'Студия «Юг»') + TP('Left', '+7 900 000-00-00') + TP('Right', 'Драфт 3 продюсерский') + TP('Right', '12.10.2026') + '</Content></TitlePage>';
+    const fdxIn = path.join(tmp, 'dacha.fdx');
+    fs.writeFileSync(fdxIn, '<?xml version="1.0" encoding="UTF-8"?><FinalDraft DocumentType="Script" Version="5"><Content><Paragraph Type="Scene Heading"><Text>ИНТ. ДАЧА - ДЕНЬ</Text></Paragraph><Paragraph Type="Action"><Text>Тихо.</Text></Paragraph></Content>' + tpXml + '</FinalDraft>');
+    await importFile(fdxIn);
+    const epInfo = await p.evaluate(() => { const S = window.__draft.S; return [S.ep.number, S.ep.title, S.project.contact, !!S.ep.titlePage, S.project.episodes.filter((e) => e.season === S.ep.season && e.number === S.ep.number).length]; });
+    ok(JSON.stringify(epInfo) === JSON.stringify([7, 'Дача', 'Студия «Юг», +7 900 000-00-00', true, 1]), 'FDX title page names the new episode and fills the project contact', epInfo);
+    await p.click('#btnExport');
+    const dl3 = p.waitForEvent('download');
+    await p.locator('#exportMenu [data-exp=fdx]').dispatchEvent('click');
+    await p.waitForSelector('#fxOk'); await p.locator('#fxOk').dispatchEvent('click');
+    const fdxOut = path.join(tmp, 'out.fdx'); await (await dl3).saveAs(fdxOut);
+    const xo = fs.readFileSync(fdxOut, 'utf8'), tpo = xo.slice(xo.indexOf('<TitlePage>'), xo.indexOf('</TitlePage>') + 12).replace(/\s+/g, '').replace(/<Paragraph([^>]*)><\/Paragraph>/g, '<Paragraph$1/>');
+    ok(tpo === tpXml.replace(/\s+/g, '').replace(/<Paragraph([^>]*)><\/Paragraph>/g, '<Paragraph$1/>'), 'FDX title page written back as it came', tpo.slice(0, 300));
+    // the title page travels with the text: Ctrl+Z and history snapshots bring it back
+    await p.evaluate(() => { const el = document.querySelector('#editor .b[data-t=action]'); const r = document.createRange(); r.selectNodeContents(el); r.collapse(false); const s = getSelection(); s.removeAllRanges(); s.addRange(r); document.getElementById('editor').focus(); });
+    await p.waitForTimeout(1000); await p.keyboard.type('!'); await p.waitForTimeout(300);
+    const travel = await p.evaluate(async () => { const D = window.__draft, was = JSON.stringify(D.S.ep.titlePage); delete D.S.ep.titlePage; D.undo();
+      const back = JSON.stringify(D.S.ep.titlePage) === was; await D.histAdd(D.S.ep, 'тест'); const h = await D.histLoad(D.S.ep); return [back, JSON.stringify(h[h.length - 1].titlePage) === was]; });
+    ok(travel[0] && travel[1], 'title page comes back with Ctrl+Z and is kept in history', travel);
   } catch (e) { console.log('ERROR', e); fails++; }
   await b.close();
   console.log(fails ? 'test_io_ui: ' + fails + ' FAILED' : 'test_io_ui: all passed');

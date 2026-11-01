@@ -104,4 +104,74 @@ assert.deepStrictEqual(C.wrap('(смотрит на Марию-Антуанет�
 assert.deepStrictEqual(C.wrap('ааааа бббб-вввв', 12), ['ааааа бббб-', 'вввв']); n++;
 assert.deepStrictEqual(C.wrap('ааааааа 1990-2000', 12), ['ааааааа', '1990-2000']); n++;
 ok(C.wrap('Ж'.repeat(60), 60).length === 1 && C.wrap('Ж'.repeat(37) + ' Ж', 37.5).length === 2, 'width limits');
+// 8. scene length in eighths: a live scene is never shorter than 1/8, an omitted scene has none
+ok(C.fmtScenePages({ pages: 0.0556 }) === '1/8' && C.fmtScenePages({ pages: 0 }) === '1/8' && C.fmtScenePages({ pages: 1.5 }) === '1 4/8', 'scene length minimum 1/8');
+ok(C.fmtScenePages({ pages: 0.04, omitted: true }) === '0' && C.sceneEighths({ pages: 0.3, omitted: true }) === 0, 'omitted scene has no length');
+ok(C.fmtEighths([0.0556, 0.09, 0.0954].reduce((a, x) => a + C.sceneEighths({ pages: x }), 0)) === '3/8', 'sum of three short scenes is 3/8');
+{
+  const pe = { number: 1, blocks: [{ id: 'h1', t: 'scene', x: 'ИНТ. КУХНЯ - ДЕНЬ' }, { id: 'a1', t: 'action', x: 'Тишина.' }, { id: 'h2', t: 'scene', x: 'ИНТ. ДВОР - ДЕНЬ' }, { id: 'a2', t: 'action', x: 'Шум.' }], sceneMeta: {} };
+  const pp = { name: 'X', rules: {}, chars: {}, locs: {}, episodes: [pe] }, pst = C.analyzeEpisode(pe, pp);
+  ok(pst.scenes.every((x) => Math.round(x.pages * 8) <= 1) && C.fmtPages(pst.scenes[0].pages) === '0', 'tiny scenes round to 0 or 1');
+  ok((C.exportFDX(pe, pp, pst, {}).match(/Length="1\/8"/g) || []).length === 2, 'FDX Length of a tiny scene is 1/8');
+}
+
+// 9. dual dialogue (Final Draft Format → Dual Dialogue): two columns on one page, never split, timing by the longer column
+{
+  const DF = C.dualFmt(C.FMT);
+  ok(DF[0].dialogue.indent === 1.5 && DF[1].dialogue.indent === 4.5 && DF[0].dialogue.width === 27 && DF[0].character.indent === 2.5 && DF[1].character.indent === 5.5 && DF[1].paren.indent === 5.0, 'FD dual columns ' + JSON.stringify(DF));
+  ok(DF[1].dialogue.indent + DF[1].dialogue.width / 10 <= 7.5, 'right column inside the right margin');
+  const RU = C.dualFmt(C.FMT_RU);
+  ok(Math.abs(RU[1].dialogue.indent - (C.FMT_RU.action.indent + 3.15)) < 1e-9 && RU[0].dialogue.width === 28.5, 'A4 «американка» columns split its own text width');
+  const pair = () => [ch('Петя'), D(2), { t: 'character', x: 'Маша', dual: true }, pa('(одновременно)'), { t: 'dialogue', x: 'Нет, я!' }];
+  ok(JSON.stringify(C.dualPairs([sc('ИНТ. А - ДЕНЬ')].concat(pair()))) === JSON.stringify([{ a: 1, b: 3, e: 5 }]), 'pair found: ' + JSON.stringify(C.dualPairs([sc('ИНТ. А - ДЕНЬ')].concat(pair()))));
+  ok(C.dualPairs([sc('ИНТ. А - ДЕНЬ'), { t: 'character', x: 'Маша', dual: true }, { t: 'dialogue', x: 'Да.' }]).length === 0, 'a dual cue with no speech before it is an ordinary speech');
+  ok(C.dualPairs([sc('ИНТ. А - ДЕНЬ'), { t: 'action', x: 'Шум.' }, { t: 'character', x: 'Маша', dual: true }, { t: 'dialogue', x: 'Да.' }]).length === 0, 'action between the speeches: no pair');
+  ok(C.dualPairs([ch('А'), D(1), { t: 'character', x: 'Б', dual: true }, D(1), { t: 'character', x: 'В', dual: true }, D(1)]).length === 1, 'no third speech in a pair');
+  r = P([sc('ИНТ. КУХНЯ - ДЕНЬ')].concat(pair(), [{ t: 'action', x: 'Тишина.' }]));
+  const its = r.pages[0].items, L = its.filter((it) => it.dual && it.dual.col === 0), R = its.filter((it) => it.dual && it.dual.col === 1);
+  ok(L.map((it) => it.t).join() === 'character,dialogue' && R.map((it) => it.t).join() === 'character,paren,dialogue', 'left and right columns');
+  ok(R[0].dual.row === 0 && R[1].dual.row === 1 && L[1].dual.row === 1 && L[0].dualH === Math.max(1 + L[1].lines.length, 3), 'rows inside the columns, pair height on the first item');
+  ok(L[1].lines.every((l) => l.length <= 27) && L[1].lines.length > C.wrap(D(2).x, 35).length, 'dialogue wraps at the column width, not 35');
+  const usedD = (pg) => pg.items.reduce((a, it) => a + (it.dual ? (it.dualH != null ? it.sb + it.dualH : 0) : it.sb + it.lines.length) + (it.more ? 1 : 0), 0);
+  ok(Math.abs(r.total * 54 - usedD(r.pages[0])) < 1e-9 && usedD(r.pages[0]) === 1 + 1 + L[0].dualH + 1 + 1, 'page fill counts the pair once: ' + r.total * 54);
+  const seq = P([sc('ИНТ. КУХНЯ - ДЕНЬ')].concat(pair().map((b) => Object.assign({}, b, { dual: false })), [{ t: 'action', x: 'Тишина.' }]));
+  ok(seq.total > r.total, 'side by side is shorter than one after the other');
+  // at the bottom of a page the pair moves whole to the next page, its heading with it
+  for (const k of [46, 47, 48, 49]) {
+    r = P([sc('ИНТ. КУХНЯ - ДЕНЬ'), A(k), sc('НАТ. ДВОР - НОЧЬ')].concat(pair()));
+    const pairPg = r.pages.findIndex((pg) => pg.items.some((it) => it.dual)), headPg = r.pages.findIndex((pg) => pg.items.some((it) => it.i === 2));
+    ok(pairPg === headPg && (k < 48 || pairPg === 1), 'action ' + k + ': heading goes with the pair (page ' + headPg + ' / ' + pairPg + ')');
+    ok(r.pages.every((pg) => usedD(pg) <= 54), 'action ' + k + ': no overflow');
+    const where = new Set(r.pages.map((pg, q) => pg.items.some((it) => it.dual) ? q : -1).filter((q) => q >= 0));
+    ok(where.size === 1, 'action ' + k + ': the pair is on one page');
+    ok(!r.pages.some((pg) => pg.items.some((it) => it.more || it.contd)), 'action ' + k + ': no (ДАЛЬШЕ)/(ПРОД.) inside a pair');
+  }
+  // a pair taller than a page is laid out one speech after the other
+  r = P([sc('ИНТ. КУХНЯ - ДЕНЬ'), ch('Петя'), D(30, '.'), { t: 'character', x: 'Маша', dual: true }, D(30, '.')]);
+  ok(!r.duals.length && !r.pages.some((pg) => pg.items.some((it) => it.dual)), 'a pair taller than a page is not dual');
+  // timing: the scene's share of the episode counts the pair once
+  const ep = { number: 1, sceneMeta: {}, blocks: [sc('ИНТ. КУХНЯ - ДЕНЬ')].concat(pair(), [sc('ИНТ. ДВОР - ДЕНЬ'), { t: 'action', x: 'Шум.' }]).map((b, k) => Object.assign({ id: 'd' + k }, b)) };
+  const st = C.analyzeEpisode(ep, { name: 'X', rules: {}, chars: {}, locs: {}, episodes: [ep] });
+  ok(Math.abs(st.scenes[0].lines - (1 + 1 + C.paginate(ep.blocks, {}).duals[0].h)) < 1e-9, 'scene lines count the pair at its height: ' + st.scenes[0].lines);
+  ok(Math.abs(st.scenes.reduce((a, x) => a + x.pages, 0) - st.pages) < 1e-9, 'scene pages add up to the episode');
+  // a page lock taken with a pair keeps it whole
+  const lay = C.paginate(ep.blocks, {}), lock = C.pageLockFrom(lay, ep.blocks);
+  const r2 = C.paginate(ep.blocks, { pageLock: lock });
+  ok(r2.pages.length === 1 && r2.duals.length === 1 && r2.labels[0] === '1', 'page lock with a pair');
+  // drafts: switching dual dialogue on marks the cue as changed
+  const rev = C.newRevision(0, ep.blocks.map((b) => Object.assign({}, b, { dual: false })), 'т');
+  const marks = C.revMarks(ep.blocks, [rev]);
+  ok(marks[3] === 1 && marks.filter(Boolean).length === 1, 'dual switched on is a revision of the cue: ' + marks.join());
+  ok(C.revMarks(ep.blocks, [C.newRevision(0, ep.blocks, 'т')]).every((m) => !m), 'a base taken with the flag: no marks');
+}
+// 10. Final Draft Shot (Кадр): action column, capitals, one blank line before; never left alone at the bottom of a page
+{
+  ok(C.TYPES[6] === 'shot' && C.TYPES.slice(0, 6).join() === 'scene,action,character,paren,dialogue,transition' && C.TYPE_LABEL.shot === 'Кадр', 'shot is Ctrl+7, Ctrl+1…6 unchanged');
+  ok(C.FMT.shot.indent === 1.5 && C.FMT.shot.width === 60 && C.FMT.shot.sb === 1 && C.FMT_RU.shot.width === 63, 'shot geometry');
+  ok(C.displayText({ t: 'shot', x: 'крупно — лицо' }) === 'КРУПНО — ЛИЦО', 'shot in capitals');
+  r = P([sc('ИНТ. КУХНЯ - ДЕНЬ'), A(49), { t: 'shot', x: 'Крупно — чашка' }, A(3)]);
+  ok(r.pages[1].items[0].t === 'shot', 'a shot goes to the next page with its action');
+  r = P([sc('ИНТ. КУХНЯ - ДЕНЬ'), { t: 'shot', x: 'Крупно' }, { t: 'action', x: 'Чашка.' }]);
+  ok(r.pages[0].items[1].sb === 1 && r.pages[0].items[1].lines[0] === 'КРУПНО', 'shot: one blank line before');
+}
 console.log('test_format: ' + n + ' checks passed');
