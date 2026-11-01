@@ -29,7 +29,8 @@
   // page templates: lines = text lines per page at 6 lines per inch; margins in inches
   const PAPER = {
     letter: { name: 'Letter (Final Draft)', w: 8.5, h: 11, lines: 54, fmt: FMT, top: 1, bottom: 1, left: 1.5, right: 1 },
-    a4: { name: 'A4 (Final Draft)', w: 8.27, h: 11.69, lines: 58, fmt: FMT, top: 1, bottom: 1, left: 1.5, right: 1 },
+    // Final Draft's A4 keeps the Letter text column (6 in from 1.5 in), so the right margin is what is left of the sheet
+    a4: { name: 'A4 (Final Draft)', w: 8.27, h: 11.69, lines: 58, fmt: FMT, top: 1, bottom: 1, left: 1.5, right: 0.77 },
     a4ru: { name: 'A4 «американка»', w: 8.27, h: 11.69, lines: 58, fmt: FMT_RU, top: cm(2.5), bottom: cm(2.5), left: cm(3.75), right: cm(1.25) },
   };
   const paperOf = (rules) => PAPER[(rules || {}).paper] || PAPER.letter;
@@ -313,7 +314,7 @@
       };
     });
     for (const s of scenes) {
-      if (s.line) continue;
+      if (s.line || s.omitted) continue;
       const auto = autoLine(s, project);
       if (auto) { s.line = auto.line; s.lineAuto = auto.how; }
     }
@@ -324,7 +325,8 @@
     const sp = (project.lineRules || {}).special;
     if (sp && sp.name) lineMap[sp.name] = { name: sp.name, target: null, color: '#6b7280', special: true, scenes: 0, min: 0, pages: 0, lines: 0 };
     let unassigned = { name: '', scenes: 0, min: 0, pages: 0, lines: 0 };
-    for (const s of scenes) {
+    const live = scenes.filter((s) => !s.omitted);
+    for (const s of live) {
       const t = lineMap[s.line] || (s.line ? (lineMap[s.line] = { name: s.line, scenes: 0, min: 0, pages: 0, lines: 0 }) : unassigned);
       t.scenes++; t.min += s.min; t.pages += s.pages; t.lines += s.lines;
     }
@@ -338,7 +340,7 @@
       o.pav = o.pav || s.pav;
       if (s.h.sub) o.subs[s.h.sub] = (o.subs[s.h.sub] || 0) + s.min;
     }
-    const sceneLines = scenes.reduce((a, s) => a + s.lines, 0) || 1;
+    const sceneLines = live.reduce((a, s) => a + s.lines, 0) || 1;
     const lineList = Object.values(lineMap).map((l) => Object.assign(l, { share: l.lines / sceneLines }));
     unassigned.share = unassigned.lines / sceneLines;
     const objList = Object.values(objects).map((o) => Object.assign(o, {
@@ -387,12 +389,14 @@
     add('pages', 'Объём серии', p <= r.maxPages ? 'ok' : p <= r.maxPages * 1.05 ? 'warn' : 'fail',
       p.toFixed(1) + ' / ' + r.maxPages + ' стр.', [], 'Одна страница в формате Final Draft ≈ ' + r.minPerPage + ' мин.');
     const maxScenes = Math.max(1, Math.round(Math.max(p, 1) * r.scenesPerPage));
-    const nScenes = st.scenes.filter((s) => !s.omitted).length;
+    // omitted scenes keep their number but are not material: no rule counts them
+    const live = st.scenes.filter((s) => !s.omitted);
+    const nScenes = live.length;
     add('scenes', 'Количество сцен', nScenes <= maxScenes ? 'ok' : nScenes <= maxScenes + 2 ? 'warn' : 'fail',
       nScenes + ' / ' + maxScenes, [], 'Ориентир: не больше одной сцены на страницу.');
-    const shorts = st.scenes.filter((s, i) => {
+    const shorts = live.filter((s, i) => {
       if (s.sec >= r.shortSceneSec) return false;
-      const prev = st.scenes[i - 1], next = st.scenes[i + 1];
+      const prev = live[i - 1], next = live[i + 1];
       const same = (o) => o && o.h.object === s.h.object && o.h.sub === s.h.sub;
       return !(same(prev) || same(next));
     });
@@ -414,7 +418,7 @@
       if (o === st.main || o.base) continue;
       if (o.pages >= r.newObjectMinPages) continue;
       const season = seasonCtx ? (seasonCtx.objPages[o.name] || 0) : o.pages;
-      const fs = st.scenes.find((s) => s.h.object === o.name);
+      const fs = live.find((s) => s.h.object === o.name);
       const label = o.name + ' · ' + fmtPages(o.pages) + ' стр., ' + o.scenes + ' сц.' + (seasonCtx && season > o.pages ? ' · за сезон ' + fmtPages(season) + ' стр.' : '');
       small.push({ sceneId: fs && fs.id, text: label, okSeason: season >= r.newObjectMinPages });
     }
@@ -423,26 +427,26 @@
       bad.length ? bad.length + ' объект(а) мало' : small.length ? 'добор по сезону' : 'нет нарушений', small,
       'Объект на 1–2 сцены запрещён. Меньший объём допустим, если добор в других сериях сезона даёт полную смену, или если объект отмечен как базовый.');
     const nightPct = st.nightMin / (st.minutes || 1) * 100;
-    const nightScenes = st.scenes.filter((s) => s.night);
+    const nightScenes = live.filter((s) => s.night);
     add('night', 'Ночь (без павильона)', nightPct <= r.nightMaxPct ? 'ok' : nightPct <= r.nightMaxPct * 1.5 ? 'warn' : 'fail',
       nightPct.toFixed(1) + '% / ' + r.nightMaxPct + '%', nightScenes.map((s) => sref(s, s.heading + (s.pav ? ' · павильон' : ''))),
       'Ночная жилая натура летом почти под запретом.');
     const extNight = nightScenes.filter((s) => s.h.type === 'ext' || s.h.type === 'intext');
     if (extNight.length) add('extnight', 'Ночная натура', 'warn', extNight.length + ' сц.', extNight.map((s) => sref(s)));
-    const big = st.scenes.filter((s) => s.cast.length > r.bigCast);
+    const big = live.filter((s) => s.cast.length > r.bigCast);
     add('bigcast', 'Сцены больше ' + r.bigCast + ' артистов', big.length <= r.bigCastMaxScenes ? (big.length ? 'warn' : 'ok') : 'fail',
       big.length + ' / ' + r.bigCastMaxScenes, big.map((s) => sref(s, s.heading + ' · ' + s.cast.length + ' арт.')));
     const ens = big.filter((s) => s.sec < r.ensembleMinSec);
     add('ensemble', 'Сбор ансамбля короче ' + r.ensembleMinSec + ' с', ens.length ? 'fail' : 'ok', ens.length + ' сц.',
       ens.map((s) => sref(s, s.heading + ' · ' + s.sec + ' с')), 'Раз собрали всех, сцена должна быть плотной.');
-    const small23 = st.scenes.filter((s) => s.cast.length >= 2 && s.cast.length <= 3).length;
-    add('balance', 'Баланс: сцены на 2–3 артистов', 'info', small23 + ' из ' + st.scenes.length);
+    const small23 = live.filter((s) => s.cast.length >= 2 && s.cast.length <= 3).length;
+    add('balance', 'Баланс: сцены на 2–3 артистов', 'info', small23 + ' из ' + live.length);
     const spPct = st.specialMin / (st.minutes || 1) * 100;
-    const sp = st.scenes.filter((s) => s.special);
+    const sp = live.filter((s) => s.special);
     add('special', 'Дети, животные, трюки, сложная постановка', spPct <= r.specialMaxPct ? (sp.length ? 'warn' : 'ok') : 'fail',
       spPct.toFixed(0) + '% хронометража', sp.map((s) => sref(s, s.heading + ' · ' + [...s.tags.filter((t) => SPECIAL_TAGS.includes(t)).map((t) => TAGS[t]), ...(s.minors.length ? ['несовершеннолетние: ' + s.minors.join(', ')] : [])].join(', '))),
       'Выработка в таких сценах падает в 2–3 раза.');
-    const tagged = (t) => st.scenes.filter((s) => s.tags.includes(t));
+    const tagged = (t) => live.filter((s) => s.tags.includes(t));
     const clips = tagged('clip');
     add('clip', 'Клипы', clips.length ? 'warn' : 'ok', clips.length + ' сц.', clips.map((s) => sref(s)), 'Только при драматургической необходимости.');
     const music = tagged('music');
@@ -455,13 +459,13 @@
       const tol = r.lineTolerance == null ? 5 : r.lineTolerance;
       const off = st.lines.filter((l) => l.target != null && Math.abs(l.share * 100 - l.target) > tol);
       const details = st.lines.map((l) => ({ text: l.name + ': ' + (l.share * 100).toFixed(0) + '%' + (l.target != null ? ' (цель ' + l.target + '%)' : '') + ' · ' + fmtPages(l.pages) + ' стр., ' + l.scenes + ' сц.' }));
-      if (st.unassigned.scenes) details.push({ sceneId: st.scenes.find((s) => !s.line).id, text: 'без линии: ' + st.unassigned.scenes + ' сц., ' + (st.unassigned.share * 100).toFixed(0) + '%' });
+      if (st.unassigned.scenes && live.find((s) => !s.line)) details.push({ sceneId: live.find((s) => !s.line).id, text: 'без линии: ' + st.unassigned.scenes + ' сц., ' + (st.unassigned.share * 100).toFixed(0) + '%' });
       const hasTargets = st.lines.some((l) => l.target != null);
       add('lines', 'Баланс линий', !hasTargets ? 'info' : off.length ? (off.some((l) => Math.abs(l.share * 100 - l.target) > tol * 2) ? 'fail' : 'warn') : 'ok',
         st.lines.map((l) => (l.share * 100).toFixed(0) + '%').join(' / '), details, hasTargets ? 'Допуск ±' + tol + ' п.п. от цели.' : 'Цели по линиям задаются в настройках проекта: «Группа А: 50».');
     }
-    const guestSilent = st.scenes.filter((s) => s.guests.some((g) => !s.speaking.includes(g)));
-    const guestScenes = st.scenes.filter((s) => s.guests.length);
+    const guestSilent = live.filter((s) => s.guests.some((g) => !s.speaking.includes(g)));
+    const guestScenes = live.filter((s) => s.guests.length);
     if (guestScenes.length) add('guests', 'Дорогие артисты', guestSilent.length ? 'warn' : 'info', guestScenes.length + ' сц.',
       guestScenes.map((s) => sref(s, s.heading + ' · ' + s.guests.join(', ') + (guestSilent.includes(s) ? ' (без реплик)' : ''))),
       'Не вызывать «для массовки».');
@@ -471,7 +475,8 @@
   // ---------- locked scene numbers (shooting script) ----------
   // After the lock, numbers never move: a new scene between 12 and 13 becomes 12A (then 12B…), a scene inserted before the
   // first one becomes A1, a deleted scene keeps its number as «УДАЛЕНА» (OMITTED). Numbers may carry an episode prefix «3-12».
-  const OMIT_RE = /^\s*(УДАЛЕНА|ОПУЩЕНА|OMITTED)\b/i;
+  // no \b here: in JS it is an ASCII word boundary and never fires after a Cyrillic letter
+  const OMIT_RE = /^\s*(УДАЛЕНА|ОПУЩЕНА|OMITTED)(?![A-Za-zА-Яа-яЁё0-9_])/i;
   const NUM_PARTS = /^(\d+-)?([A-ZА-Я]*)(\d+)([A-ZА-Я]*)$/;
   const LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
   function numParts(num) {
@@ -495,7 +500,12 @@
       if (prev) {
         const p = numParts(prev);
         if (!p) num = prev + 'A';
-        else {
+        else if (p.pre) {
+          // prev is itself a number before p.base (A1): the new scene is also before p.base, so B1, C1…
+          const used = new Set();
+          for (const t of taken) { const q = numParts(t); if (q && q.prefix === p.prefix && q.base === p.base && q.pre) used.add(q.pre); }
+          num = p.prefix + nextLetter(used) + p.base;
+        } else {
           const used = new Set();
           for (const t of taken) { const q = numParts(t); if (q && q.prefix === p.prefix && q.base === p.base && !q.pre && q.post) used.add(q.post); }
           num = p.prefix + p.base + nextLetter(used);
@@ -525,7 +535,14 @@
   function lockInsertIndex(lock, scenes, num, blocksLength) {
     const order = (lock && lock.nums || []).map((n) => n.num);
     const pos = order.indexOf(num);
-    for (let k = pos - 1; k >= 0; k--) { const s = scenes.find((x) => x.num === order[k]); if (s) return s.to + 1; }
+    const inOrder = new Set(order);
+    for (let k = pos - 1; k >= 0; k--) {
+      let i = scenes.findIndex((x) => x.num === order[k]); if (i < 0) continue;
+      // A-scenes added after the lock (2A, 2B…) are not in lock.nums: the restored scene goes behind them
+      const p = numParts(order[k]);
+      while (p && i + 1 < scenes.length && !inOrder.has(scenes[i + 1].num)) { const q = numParts(scenes[i + 1].num); if (q && q.prefix === p.prefix && q.base === p.base && !q.pre) i++; else break; }
+      return scenes[i].to + 1;
+    }
     const first = scenes[0];
     return first ? first.from : blocksLength;
   }
@@ -751,20 +768,27 @@
     const ps = content.getElementsByTagName('Paragraph');
     for (let i = 0; i < ps.length; i++) {
       const p = ps[i];
-      if (p.getElementsByTagName('Paragraph').length) continue;
+      // Final Draft keeps the dead body of an omitted scene inside <OmittedScene>: never import it as live text
+      let anc = p.parentNode, dead = false;
+      while (anc && anc !== content) { if (anc.nodeName === 'OmittedScene') { dead = true; break; } anc = anc.parentNode; }
+      if (dead) continue;
+      const hasOmitted = p.getElementsByTagName('OmittedScene').length > 0;
+      if (!hasOmitted && p.getElementsByTagName('Paragraph').length) continue;
       let text = '';
       const ts = p.getElementsByTagName('Text');
-      for (let j = 0; j < ts.length; j++) text += ts[j].textContent;
+      // only this paragraph's own Text runs, not those of nested paragraphs
+      for (let j = 0; j < ts.length; j++) { let q = ts[j].parentNode; while (q && q.nodeName !== 'Paragraph') q = q.parentNode; if (q === p) text += ts[j].textContent; }
       text = clean(text);
-      if (!text) continue;
       let t = map[p.getAttribute('Type')] || 'action';
+      if (hasOmitted && !text) { text = 'OMITTED'; t = 'scene'; }
+      if (!text) continue;
       const fdxNum = (p.getAttribute('Number') || '').trim();
       if (t === 'scene') text = normalizeHeadingText(text);
       if (t === 'character') text = normalizeCharacter(text);
       if (t === 'paren' && !/^\(/.test(text)) text = '(' + text + ')';
       const nb = { id: uid(), t, x: text };
       if (t === 'scene' && fdxNum) nb.num = fdxNum;
-      if (t === 'scene' && OMIT_RE.test(text)) { nb.x = omittedHeading(fdxNum); nb.omitted = true; }
+      if (t === 'scene' && (hasOmitted || OMIT_RE.test(text))) { nb.x = omittedHeading(fdxNum); nb.omitted = true; }
       blocks.push(nb);
     }
     return blocks;
@@ -841,15 +865,15 @@
       const text = s && s.omitted ? 'OMITTED' : displayText(b);
       return '    <Paragraph' + (s ? ' Number="' + num + '"' : '') + ' Type="' + FDX_TYPE[b.t] + '">' + props + '<Text>' + xmlEsc(text) + '</Text></Paragraph>';
     });
-    const el = (name, f, behavior) => '    <ElementSettings Type="' + name + '"><FontSpec AdornmentStyle="0" Background="#FFFFFFFFFFFF" Color="#000000000000" Font="Courier New" RevisionID="0" Size="12" Style=""/><ParagraphSpec Alignment="' + (f.right ? 'Right' : 'Left') + '" FirstIndent="0.00" Leading="Regular" LeftIndent="' + (f.indent - paper.left).toFixed(2) + '" RightIndent="' + (f.indent - paper.left + f.width / 10).toFixed(2) + '" SpaceBefore="' + (f.sb * 12) + '" Spacing="1" StartsNewPage="No"/><Behavior PaginateAs="' + name + '" ReturnKey="' + behavior + '" Shortcut=""/></ElementSettings>';
+    const el = (name, f, behavior) => '    <ElementSettings Type="' + name + '"><FontSpec AdornmentStyle="0" Background="#FFFFFFFFFFFF" Color="#000000000000" Font="Courier New" RevisionID="0" Size="12" Style=""/><ParagraphSpec Alignment="' + (f.right ? 'Right' : 'Left') + '" FirstIndent="0.00" Leading="Regular" LeftIndent="' + f.indent.toFixed(2) + '" RightIndent="' + (f.right ? paper.w - paper.right : f.indent + f.width / 10).toFixed(2) + '" SpaceBefore="' + (f.sb * 12) + '" Spacing="1" StartsNewPage="No"/><Behavior PaginateAs="' + name + '" ReturnKey="' + behavior + '" Shortcut=""/></ElementSettings>';
     const chars = Object.keys(project.chars || {}).sort();
     const locs = new Set();
-    (ep.blocks || []).filter((b) => b.t === 'scene').forEach((b) => { const h = parseHeading(b.x); if (h.object) locs.add(h.object + (h.sub ? '. ' + h.sub : '')); });
+    st.scenes.filter((s) => !s.omitted).forEach((s) => { const h = s.h; if (h.object) locs.add(h.object + (h.sub ? '. ' + h.sub : '')); });
     return '<?xml version="1.0" encoding="UTF-8" standalone="no" ?>\n<FinalDraft DocumentType="Script" Template="No" Version="5">\n  <Content>\n' + paras.join('\n') + '\n  </Content>\n' +
       '  <TitlePage>\n    <Content>\n' + [project.name, ep.title ? 'Серия ' + (ep.number || '') + '. ' + ep.title : '', project.author || ''].filter(Boolean).map((t) => '      <Paragraph Alignment="Center" Type="General"><Text>' + xmlEsc(t) + '</Text></Paragraph>').join('\n') + '\n    </Content>\n  </TitlePage>\n' +
       el('Scene Heading', F.scene, 'Action') + '\n' + el('Action', F.action, 'Action') + '\n' + el('Character', F.character, 'Dialogue') + '\n' +
       el('Parenthetical', F.paren, 'Dialogue') + '\n' + el('Dialogue', F.dialogue, 'Action') + '\n' + el('Transition', F.transition, 'Scene Heading') + '\n' +
-      '  <PageLayout BackgroundColor="#FFFFFFFFFFFF" BottomMargin="' + Math.round(paper.bottom * 72) + '" BreakDialogueAndActionAtSentences="Yes" DocumentLeading="Normal" FooterMargin="36" ForegroundColor="#000000000000" HeaderMargin="36" InvisiblesColor="#A0A0A0A0A0A0" LeftMargin="' + Math.round(paper.left * 72) + '" RightMargin="' + Math.round(paper.right * 72) + '" PaperHeight="' + Math.round(paper.h * 72) + '" PaperWidth="' + Math.round(paper.w * 72) + '" TopMargin="' + Math.round(paper.top * 72) + '" UsesSmartQuotes="Yes"><AutoCastList AddParentheses="Yes" AutomaticallyGenerate="No" CastListElement="Cast List"/></PageLayout>\n' +
+      '  <PageLayout BackgroundColor="#FFFFFFFFFFFF" BottomMargin="' + Math.round(paper.bottom * 72) + '" BreakDialogueAndActionAtSentences="Yes" DocumentLeading="Normal" FooterMargin="36" ForegroundColor="#000000000000" HeaderMargin="36" InvisiblesColor="#A0A0A0A0A0A0" TopMargin="' + Math.round(paper.top * 72) + '" UsesSmartQuotes="Yes"><AutoCastList AddParentheses="Yes" AutomaticallyGenerate="No" CastListElement="Cast List"/></PageLayout>\n' +
       '  <SmartType>\n    <Characters>\n' + chars.map((c) => '      <Character>' + xmlEsc(c) + '</Character>').join('\n') + '\n    </Characters>\n' +
       '    <Extensions>\n' + EXTENSIONS.map((x) => '      <Extension>' + xmlEsc(x) + '</Extension>').join('\n') + '\n    </Extensions>\n' +
       '    <SceneIntros>\n' + PREFIXES.map((x) => '      <SceneIntro>' + xmlEsc(x) + '</SceneIntro>').join('\n') + '\n    </SceneIntros>\n' +
@@ -969,6 +993,10 @@
     // a title page (no scene headings on the first page of a multi-page file) is skipped
     const hasHeading = (items) => items.some((it) => HEADING_START.test(it.str || ''));
     if (pagesItems.length > 1 && !hasHeading(pagesItems[0]) && pagesItems.slice(1).some(hasHeading)) pagesItems = pagesItems.slice(1);
+    // watermarks (rotated) and footers or stamps in a smaller or larger size are not script text: the script is one size
+    const sizes = pagesItems.flat().filter((it) => it.h && !it.rot && it.str && it.str.trim()).map((it) => it.h).sort((a, b) => a - b);
+    const body = sizes.length ? sizes[Math.floor(sizes.length / 2)] : 0;
+    pagesItems = pagesItems.map((items) => items.filter((it) => !it.rot && !(body && it.h && (it.h < body * 0.8 || it.h > body * 1.3))));
     for (const items of pagesItems) {
       const rows = [];
       for (const it of items) {

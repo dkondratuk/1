@@ -156,8 +156,8 @@ body.focus .left, body.focus .right { display: none; }
   box-shadow: var(--shadow); padding: var(--pg-top, 1in) var(--pg-right, 1in) var(--pg-bottom, 1in) var(--pg-left, 1.5in); min-height: var(--pg-h, 11in);
 }
 .page[data-wm]::after {
-  content: attr(data-wm); position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none;
-  transform: rotate(-32deg); font-family: var(--script); font-size: 34pt; color: var(--paper-ink); opacity: .07; white-space: nowrap; overflow: hidden; z-index: 2;
+  content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 2;
+  background: var(--wm-img) repeat 0 0 / 460px 300px;
 }
 .editor { outline: none; font-family: var(--script); font-size: 12pt; line-height: 12pt; width: var(--tx-w, 6in); caret-color: var(--accent); }
 .editor .b { white-space: pre-wrap; word-wrap: break-word; position: relative; min-height: 12pt; }

@@ -193,7 +193,7 @@
     return s && e ? r : null;
   }
   function setType(el, t) {
-    if (!el) return;
+    if (!el || !canEdit()) return;
     pushUndo();
     el.dataset.t = t; el.className = 'b t-' + t;
     if (t === 'paren' && !el.textContent.trim()) { el.textContent = '()'; setCaret(el.dataset.id, 1); }
@@ -255,11 +255,11 @@
   // undo / redo (our own, because the editor changes blocks programmatically)
   S.undo = []; S.redo = [];
   let lastEdit = 0;
-  function snapshot() { return { blocks: readBlocks(), caret: getCaret(), sceneMeta: JSON.parse(JSON.stringify(S.ep.sceneMeta || {})) }; }
+  function snapshot() { return { blocks: readBlocks(), caret: getCaret(), sceneMeta: JSON.parse(JSON.stringify(S.ep.sceneMeta || {})), lock: S.ep.lock ? JSON.parse(JSON.stringify(S.ep.lock)) : null }; }
   function pushUndo() { S.undo.push(snapshot()); if (S.undo.length > 200) S.undo.shift(); S.redo = []; lastEdit = Date.now(); }
-  function restore(sn) { S.ep.blocks = sn.blocks; if (sn.sceneMeta) S.ep.sceneMeta = sn.sceneMeta; renderEditor(); if (sn.caret) setCaret(sn.caret.id, sn.caret.off); recompute(); }
-  function undo() { if (!S.undo.length) return; S.redo.push(snapshot()); restore(S.undo.pop()); }
-  function redo() { if (!S.redo.length) return; S.undo.push(snapshot()); restore(S.redo.pop()); }
+  function restore(sn) { S.ep.blocks = sn.blocks; if (sn.sceneMeta) S.ep.sceneMeta = sn.sceneMeta; setLock(S.ep, sn); renderEditor(); if (sn.caret) setCaret(sn.caret.id, sn.caret.off); recompute(); }
+  function undo() { if (!S.undo.length || S.me.role === 'reader') return; S.redo.push(snapshot()); restore(S.undo.pop()); }
+  function redo() { if (!S.redo.length || S.me.role === 'reader') return; S.undo.push(snapshot()); restore(S.redo.pop()); }
 
   ed.addEventListener('beforeinput', (e) => {
     if (e.inputType === 'historyUndo') { e.preventDefault(); undo(); return; }
@@ -427,7 +427,8 @@
     S.ep.updated = Date.now();
     S.st = C.analyzeEpisode(S.ep, P());
     // under a numbering lock every new scene gets its A-number at once, so it never shifts the others
-    if (S.ep.lock && C.lockAssign(S.st.scenes, S.ep.sceneMeta).length) S.st = C.analyzeEpisode(S.ep, P());
+    // a lock with no frozen number on any scene is stale state (it would renumber everything 1, 1A, 1B…): leave it alone
+    if (S.ep.lock && S.st.scenes.some((s) => s.fileNum) && C.lockAssign(S.st.scenes, S.ep.sceneMeta).length) S.st = C.analyzeEpisode(S.ep, P());
     S.rulesRes = C.evalRules(S.ep, P(), S.st, seasonContext());
     decorateEditor();
     if (S.zoom && S.zoom !== 1) sizePage();
@@ -496,13 +497,13 @@
       '<div class="h">Последние драфты</div>' + (drafts.length ? drafts.map((x) => '<div class="draftrow" data-ep="' + x.e.id + '" data-d="' + x.d.id + '"><span>С' + x.e.season + 'Е' + x.e.number + ' · ' + esc(x.d.name) + '</span><span class="muted mono">' + fmtDate(x.d.date) + '</span></div>').join('') : '<p class="note">Драфтов пока нет. Кнопка «Сохранить драфт» фиксирует версию серии с датой.</p>');
     renderEpisodesMeta();
     $$('.ep', $('#pane-episodes')).forEach((x) => x.onclick = () => { recompute(); openEpisode(x.dataset.id); });
-    $('#addEp').onclick = () => { recompute(); const e = newEpisode(p, S.ep ? S.ep.season : 1, ''); openEpisode(e.id); };
-    $('#addSeason').onclick = () => { recompute(); const e = newEpisode(p, Math.max(...p.episodes.map((x) => x.season)) + 1, ''); openEpisode(e.id); };
+    $('#addEp').onclick = () => { if (readOnly('Новая серия')) return; recompute(); const e = newEpisode(p, S.ep ? S.ep.season : 1, ''); openEpisode(e.id); };
+    $('#addSeason').onclick = () => { if (readOnly('Новый сезон')) return; recompute(); const e = newEpisode(p, Math.max(...p.episodes.map((x) => x.season)) + 1, ''); openEpisode(e.id); };
     $('#delEp').onclick = () => deleteEpisode();
     $('#projBtn').onclick = () => projectModal();
     $('#trashBtn').onclick = () => showTrash();
     $('#histBtn').onclick = () => showHistory();
-    $('#renEp').onclick = () => modal('<h2>Серия</h2><div class="form-grid"><label>Сезон<input type="number" id="reS" min="1" value="' + S.ep.season + '"></label><label>Номер серии<input type="number" id="reN" min="1" value="' + S.ep.number + '"></label><label>Название<input type="text" id="reT" value="' + esc(S.ep.title) + '"></label></div><div class="actions"><button class="btn danger" id="reDel">Удалить серию</button><button class="btn" id="reC">Отмена</button><button class="btn primary" id="reOk">Сохранить</button></div>', (m) => {
+    $('#renEp').onclick = () => readOnly('Изменение серии') || modal('<h2>Серия</h2><div class="form-grid"><label>Сезон<input type="number" id="reS" min="1" value="' + S.ep.season + '"></label><label>Номер серии<input type="number" id="reN" min="1" value="' + S.ep.number + '"></label><label>Название<input type="text" id="reT" value="' + esc(S.ep.title) + '"></label></div><div class="actions"><button class="btn danger" id="reDel">Удалить серию</button><button class="btn" id="reC">Отмена</button><button class="btn primary" id="reOk">Сохранить</button></div>', (m) => {
       $('#reC', m).onclick = closeModal;
       $('#reOk', m).onclick = () => { S.ep.season = +$('#reS', m).value || 1; S.ep.number = +$('#reN', m).value || 1; S.ep.title = $('#reT', m).value.trim(); sortEpisodes(p); closeModal(); renderEpisodes(); renderTitle(); persist(); };
       $('#reDel', m).onclick = () => { closeModal(); deleteEpisode(); };
@@ -583,6 +584,7 @@
     $$('li[data-scene]', pane).forEach((li) => li.onclick = () => jumpTo(li.dataset.scene));
     const rn = $('#renum', pane);
     if (rn) rn.onclick = () => {
+      if (readOnly('Перенумерация')) return;
       histAdd(S.ep, 'перед перенумерацией', true);
       pushUndo();
       S.st.scenes.forEach((s, k) => { (S.ep.sceneMeta[s.id] = S.ep.sceneMeta[s.id] || {}).num = nc.proposal[k]; });
@@ -622,6 +624,7 @@
   }
   // a scene that leaves the shooting script keeps its number as «УДАЛЕНА»
   function omitScene(s) {
+    if (readOnly('Удаление сцены')) return;
     pushUndo();
     const blocks = readBlocks();
     const meta = (S.ep.sceneMeta[s.id] = S.ep.sceneMeta[s.id] || {});
@@ -631,15 +634,18 @@
     S.ep.blocks = blocks; renderEditor(); recompute(); renderScenes();
   }
   function restoreScene(s) {
+    if (readOnly('Возврат сцены')) return;
     const meta = S.ep.sceneMeta[s.id] || {};
     pushUndo();
     const blocks = readBlocks();
     const piece = meta.omittedBlocks && meta.omittedBlocks.length ? meta.omittedBlocks : [{ id: s.id, t: 'scene', x: meta.omittedHeading || '' }];
-    blocks.splice(s.from, s.to - s.from + 1, ...piece);
+    // only the «УДАЛЕНА» heading is replaced: anything typed under it stays after the restored text
+    blocks.splice(s.from, 1, ...piece);
     delete meta.omitted; delete meta.omittedBlocks; delete meta.omittedHeading;
     S.ep.blocks = blocks; renderEditor(); recompute(); renderScenes();
   }
   function restoreMissing(num) {
+    if (readOnly('Возврат номера') || !S.ep.lock) return;
     pushUndo();
     const blocks = readBlocks();
     const at = C.lockInsertIndex(S.ep.lock, S.st.scenes, num, blocks.length);
@@ -651,7 +657,9 @@
   }
   function inspectorHTML(s) {
     const lock = !!S.ep.lock;
-    return '<div class="inspector"><div class="row between"><b>Сцена ' + esc(s.num) + (s.omitted ? ' · удалена' : '') + '</b><span class="row">' + (lock ? (s.omitted ? '<button class="btn small" id="scRestore">Вернуть сцену</button>' : '<button class="btn small ghost danger" id="scOmit" title="Текст убирается, а номер остаётся в сценарии как «УДАЛЕНА»">Удалить сцену</button>') : '') + '<button class="btn small" id="scUp" title="Переместить выше">↑</button><button class="btn small" id="scDown" title="Переместить ниже">↓</button></span></div>' +
+    if (S.me.role === 'reader') return '<div class="inspector"><b>Сцена ' + esc(s.num) + (s.omitted ? ' · удалена' : '') + '</b>' + (s.synopsis ? '<p class="small">' + esc(s.synopsis) + '</p>' : '') + (s.day ? '<div class="small muted">Сценарный день: ' + esc(s.day) + '</div>' : '') + '<div class="small muted">В сцене: ' + (s.cast.length ? s.cast.map(esc).join(', ') : '—') + '</div></div>';
+    const ed2 = canEdit();
+    return '<div class="inspector"><div class="row between"><b>Сцена ' + esc(s.num) + (s.omitted ? ' · удалена' : '') + '</b><span class="row">' + (lock ? (s.omitted ? '<button class="btn small" id="scRestore">Вернуть сцену</button>' : '<button class="btn small ghost danger" id="scOmit" title="Текст убирается, а номер остаётся в сценарии как «УДАЛЕНА»">Удалить сцену</button>') : '') + (ed2 ? '<button class="btn small" id="scUp" title="Переместить выше">↑</button><button class="btn small" id="scDown" title="Переместить ниже">↓</button>' : '') + '</span></div>' +
       '<label class="small muted">Синопсис<textarea id="scSyn" rows="2">' + esc(s.synopsis) + '</textarea></label>' +
       '<div class="row"><label class="small muted">Номер <input type="text" id="scNum" value="' + esc(s.fileNum ? s.num : '') + '" placeholder="' + esc(s.num) + '" style="width:70px"' + (lock ? ' readonly title="Номера залочены"' : '') + '></label>' +
       '<label class="small muted">Сценарный день <input type="text" id="scDay" value="' + esc(s.day) + '" style="width:70px"></label></div>' +
@@ -661,6 +669,7 @@
       '<div class="small muted">В сцене: ' + (s.cast.length ? s.cast.map(esc).join(', ') : '—') + '</div></div>';
   }
   function bindInspector(s) {
+    if (S.me.role === 'reader') return;
     const meta = () => (S.ep.sceneMeta[s.id] = S.ep.sceneMeta[s.id] || {});
     $('#scSyn').onchange = (e) => { meta().synopsis = e.target.value.trim(); recompute(); };
     $('#scDay').onchange = (e) => { meta().day = e.target.value.trim(); recompute(); };
@@ -670,9 +679,10 @@
     const sl = $('#scLine'); if (sl) sl.onchange = (e) => { pushUndo(); meta().line = e.target.value; recompute(); };
     $('#scExtras').onchange = (e) => { meta().extras = e.target.value.split(',').map((x) => C.charName(x)).filter(Boolean); recompute(); };
     $$('[data-tag]').forEach((c) => c.onchange = () => { const m = meta(); m.tags = m.tags || []; if (c.checked) m.tags.push(c.dataset.tag); else m.tags = m.tags.filter((t) => t !== c.dataset.tag); recompute(); });
-    $('#scUp').onclick = () => moveScene(s, -1); $('#scDown').onclick = () => moveScene(s, 1);
+    const up = $('#scUp'), dn = $('#scDown'); if (up) up.onclick = () => moveScene(s, -1); if (dn) dn.onclick = () => moveScene(s, 1);
   }
   function moveScene(s, dir) {
+    if (!canEdit()) return readOnly('Перемещение сцены') || toast('Перемещать сцены может сценарист или редактор');
     const scenes = S.st.scenes; const k = scenes.indexOf(s); const other = scenes[k + dir]; if (!other) return;
     pushUndo();
     const blocks = readBlocks();
@@ -811,6 +821,8 @@
   const roleName = (r) => ({ producer: 'Продюсер', editor: 'Редактор', writer: 'Сценарист', reader: 'Читатель' }[r] || 'Сценарист');
   const canEdit = () => S.me.role === 'writer' || S.me.role === 'editor';
   const canLock = () => S.me.role === 'producer' || S.me.role === 'editor';
+  // a reader only reads and prints a watermarked PDF: every path that changes the project checks this
+  const readOnly = (what) => { if (S.me.role !== 'reader') return false; toast('Роль «Читатель»: только чтение' + (what ? '. ' + what + ' недоступно' : '')); return true; };
   function renderComments() {
     const marks = $('#cmarks'); marks.innerHTML = '';
     const ranges = [], active = [];
@@ -861,8 +873,8 @@
       const c = S.ep.comments.find((k) => k.id === inp.dataset.reply);
       c.replies.push({ author: S.me.name, role: S.me.role, text: inp.value.trim(), date: Date.now() }); inp.blur(); renderCommentList(pane); renderComments(); persist();
     });
-    $$('[data-res]', pane).forEach((b) => b.onclick = () => { const c = S.ep.comments.find((k) => k.id === b.dataset.res); c.resolved = !c.resolved; renderCommentList(pane); renderComments(); persist(); });
-    $$('[data-del]', pane).forEach((b) => b.onclick = () => { S.ep.comments = S.ep.comments.filter((k) => k.id !== b.dataset.del); renderCommentList(pane); renderComments(); persist(); });
+    $$('[data-res]', pane).forEach((b) => b.onclick = () => { if (readOnly()) return; const c = S.ep.comments.find((k) => k.id === b.dataset.res); c.resolved = !c.resolved; renderCommentList(pane); renderComments(); persist(); });
+    $$('[data-del]', pane).forEach((b) => b.onclick = () => { if (readOnly('Удаление замечания')) return; S.ep.comments = S.ep.comments.filter((k) => k.id !== b.dataset.del); renderCommentList(pane); renderComments(); persist(); });
   }
   const blockIndex = (id) => { const i = S.ep.blocks.findIndex((b) => b.id === id); return i < 0 ? 1e9 : i; };
   $('#btnComment').onclick = startComment;
@@ -982,12 +994,13 @@
 
   // ---------- drafts ----------
   $('#btnDraft').onclick = () => {
+    if (readOnly('Сохранение драфта')) return;
     recompute();
     const n = (S.ep.drafts || []).length + 1;
     modal('<h2>Сохранить драфт</h2><label class="small muted">Название<input type="text" id="drName" value="Драфт ' + n + '"></label><label class="small muted">Что изменилось<textarea id="drNote" rows="2" placeholder="Например: правки продюсера по 3 и 5 сценам"></textarea></label><div class="actions"><button class="btn" id="drList">Все драфты</button><button class="btn" id="drC">Отмена</button><button class="btn primary" id="drOk">Сохранить</button></div>', (m) => {
       $('#drC', m).onclick = closeModal; $('#drList', m).onclick = () => showDrafts();
       $('#drOk', m).onclick = () => {
-        const d = { id: C.uid(), name: $('#drName', m).value.trim() || 'Драфт ' + n, note: $('#drNote', m).value.trim(), date: Date.now(), author: S.me.name, blocks: JSON.parse(JSON.stringify(S.ep.blocks)), sceneMeta: JSON.parse(JSON.stringify(S.ep.sceneMeta || {})), pages: S.st.pages, scenes: S.st.scenes.length };
+        const d = { id: C.uid(), name: $('#drName', m).value.trim() || 'Драфт ' + n, note: $('#drNote', m).value.trim(), date: Date.now(), author: S.me.name, ...epCopy(S.ep), pages: S.st.pages, scenes: S.st.scenes.length };
         S.ep.drafts.push(d); closeModal(); renderEpisodes(); persist(); toast('Сохранён «' + d.name + '»');
       };
     });
@@ -1000,10 +1013,11 @@
       $('#drClose', m).onclick = closeModal;
       $$('[data-cmp]', m).forEach((b) => b.onclick = () => { $('#drDiff', m).innerHTML = diffHTML(ds.find((d) => d.id === b.dataset.cmp)); });
       $$('[data-rest]', m).forEach((b) => b.onclick = () => {
+        if (readOnly('Восстановление драфта')) return;
         const d = ds.find((x) => x.id === b.dataset.rest);
-        S.ep.drafts.push({ id: C.uid(), name: 'Авто: перед восстановлением «' + d.name + '»', date: Date.now(), author: S.me.name, blocks: JSON.parse(JSON.stringify(S.ep.blocks)), sceneMeta: JSON.parse(JSON.stringify(S.ep.sceneMeta || {})), pages: S.st.pages, scenes: S.st.scenes.length });
+        S.ep.drafts.push({ id: C.uid(), name: 'Авто: перед восстановлением «' + d.name + '»', date: Date.now(), author: S.me.name, ...epCopy(S.ep), pages: S.st.pages, scenes: S.st.scenes.length });
         histAdd(S.ep, 'перед восстановлением драфта', true);
-        pushUndo(); S.ep.blocks = JSON.parse(JSON.stringify(d.blocks)); S.ep.sceneMeta = JSON.parse(JSON.stringify(d.sceneMeta || {}));
+        pushUndo(); S.ep.blocks = JSON.parse(JSON.stringify(d.blocks)); S.ep.sceneMeta = JSON.parse(JSON.stringify(d.sceneMeta || {})); setLock(S.ep, d);
         closeModal(); renderEditor(); recompute(); renderEpisodes(); toast('Восстановлен «' + d.name + '». Текущий текст сохранён отдельным драфтом.');
       });
       if (openId && ds.find((d) => d.id === openId)) $('#drDiff', m).innerHTML = diffHTML(ds.find((d) => d.id === openId));
@@ -1039,7 +1053,9 @@
     if (!S.hist[ep.id]) S.hist[ep.id] = (await DB.get(histKey(ep))) || [];
     return S.hist[ep.id];
   }
-  function epCopy(ep) { return { blocks: JSON.parse(JSON.stringify(ep.blocks)), sceneMeta: JSON.parse(JSON.stringify(ep.sceneMeta || {})) }; }
+  function epCopy(ep) { return { blocks: JSON.parse(JSON.stringify(ep.blocks)), sceneMeta: JSON.parse(JSON.stringify(ep.sceneMeta || {})), lock: ep.lock ? JSON.parse(JSON.stringify(ep.lock)) : null }; }
+  // the numbering lock travels with the numbers it froze: a saved state without the 'lock' key (older data) leaves it as is
+  function setLock(ep, sn) { if (!sn || !('lock' in sn)) return; if (sn.lock) ep.lock = JSON.parse(JSON.stringify(sn.lock)); else delete ep.lock; }
   async function histAdd(ep, reason, keep) {
     if (!ep) return null;
     if (ep === S.ep && S.ep.blocks) { /* S.ep.blocks is refreshed by recompute on every edit */ }
@@ -1049,7 +1065,7 @@
     const sig = JSON.stringify(copy);
     if (last && last.sig === sig) { ep.histAt = Date.now(); return last; }
     const st = ep === S.ep && S.st ? S.st : C.analyzeEpisode(ep, P());
-    const h = { id: C.uid(), date: Date.now(), author: S.me.name, reason: reason || 'автоснимок', keep: !!keep, pages: st.pages, scenes: st.scenes.length, sig, blocks: copy.blocks, sceneMeta: copy.sceneMeta };
+    const h = { id: C.uid(), date: Date.now(), author: S.me.name, reason: reason || 'автоснимок', keep: !!keep, pages: st.pages, scenes: st.scenes.length, sig, blocks: copy.blocks, sceneMeta: copy.sceneMeta, lock: copy.lock };
     list.push(h);
     S.hist[ep.id] = C.thinHistory(list);
     ep.histAt = h.date;
@@ -1087,7 +1103,7 @@
           diffHTML({ name: 'снимок ' + fmtFull(h.date), blocks: h.blocks });
         $('#hsAll', m).onclick = async () => {
           await histAdd(S.ep, 'перед откатом', true);
-          pushUndo(); S.ep.blocks = JSON.parse(JSON.stringify(h.blocks)); S.ep.sceneMeta = JSON.parse(JSON.stringify(h.sceneMeta || {}));
+          pushUndo(); S.ep.blocks = JSON.parse(JSON.stringify(h.blocks)); S.ep.sceneMeta = JSON.parse(JSON.stringify(h.sceneMeta || {})); setLock(S.ep, h);
           closeModal(); renderEditor(); recompute(); renderEpisodes();
           toast('Серия возвращена к состоянию на ' + fmtFull(h.date) + '. Отменить: Ctrl+Z, текущий текст сохранён в истории.');
         };
@@ -1106,7 +1122,7 @@
       pick(start < 0 ? 0 : start);
     });
   }
-  $('#btnHistory').onclick = () => showHistory();
+  $('#btnHistory').onclick = () => readOnly('История') || showHistory();
 
   // trash: deleted episodes and projects wait 90 days and can be put back by anyone
   S.trash = { items: [] };
@@ -1164,6 +1180,7 @@
 
   // ---------- import ----------
   $('#btnImport').onclick = () => {
+    if (readOnly('Загрузка сценария')) return;
     modal('<h2>Загрузить готовый сценарий</h2><div class="drop" id="drop">Перетащите файл сюда или нажмите, чтобы выбрать<br><span class="small">Final Draft (.fdx), Word (.docx), PDF, Fountain или текст (.txt)</span></div>' +
       '<div class="form-grid"><label>Куда<select id="impWhere"><option value="new">Новая серия</option><option value="replace">Заменить текст этой серии</option></select></label><label>Сезон<input type="number" id="impSeason" min="1" value="' + S.ep.season + '"></label></div>' +
       '<p class="note">Сценарий переводится в формат Final Draft: заголовки сцен приводятся к виду «ИНТ. ОБЪЕКТ. ПОДОБЪЕКТ - ДЕНЬ», имена персонажей — к единому написанию, ремарки получают скобки. Персонажи и объекты сразу попадают в справочники проекта, сцены с ПАВ. — в павильон. Из КИТ Сценариста и Story Architect сохраните сценарий в .fdx или .docx.</p>' +
@@ -1212,7 +1229,7 @@
     for (let i = 1; i <= doc.numPages; i++) {
       const pg = await doc.getPage(i);
       const tc = await pg.getTextContent();
-      pages.push(tc.items.map((it) => ({ str: it.str, x: it.transform[4], y: it.transform[5], w: it.width })));
+      pages.push(tc.items.map((it) => ({ str: it.str, x: it.transform[4], y: it.transform[5], w: it.width, h: Math.hypot(it.transform[2], it.transform[3]), rot: Math.abs(it.transform[1]) > 0.01 || Math.abs(it.transform[2]) > 0.01 })));
     }
     return C.classifyLines(C.pdfLines(pages));
   }
@@ -1223,7 +1240,11 @@
     const fin = C.finalizeImport(rawBlocks, P());
     const blocks = fin.blocks, rep = fin.report;
     let ep;
-    if (where === 'replace') { histAdd(S.ep, 'перед загрузкой файла', true); pushUndo(); ep = S.ep; ep.blocks = blocks; ep.sceneMeta = fin.sceneMeta; }
+    if (where === 'replace') {
+      histAdd(S.ep, 'перед загрузкой файла', true); pushUndo(); ep = S.ep; ep.blocks = blocks; ep.sceneMeta = fin.sceneMeta;
+      // a new file brings its own numbering: the old lock no longer describes it (Ctrl+Z brings both back)
+      if (ep.lock) { ep.lockLog = (ep.lockLog || []).concat([{ at: Date.now(), by: S.me.name, role: S.me.role, reason: 'текст заменён загруженным файлом', was: ep.lock }]); delete ep.lock; }
+    }
     else {
       // a title line before the first scene names the episode
       let title = (source || '').replace(/\.[^.]+$/, '');
@@ -1266,7 +1287,22 @@
           }
           for (const d of e2.drafts || []) if (!e1.drafts.some((x) => x.id === d.id)) { e1.drafts.push(d); added++; }
           if ((e2.updated || 0) > (e1.updated || 0)) { e1.blocks = e2.blocks; e1.sceneMeta = e2.sceneMeta; e1.updated = e2.updated; }
+          // the numbering lock is production state, not text: the newest lock or unlock event wins whichever text copy won
+          const lockAt = (e) => Math.max(e.lock ? e.lock.at || 0 : 0, ...(e.lockLog || []).map((l) => l.at || 0), 0);
+          if (lockAt(e2) > lockAt(e1)) {
+            if (e2.lock) {
+              e1.lock = e2.lock;
+              const byNum = {}; (e2.lock.nums || []).forEach((n) => { byNum[n.num] = 1; });
+              // keep the producer's frozen numbers on the scenes that carry them in the incoming copy
+              e1.sceneMeta = e1.sceneMeta || {};
+              for (const [id, m] of Object.entries(e2.sceneMeta || {})) if (m && byNum[m.num]) (e1.sceneMeta[id] = e1.sceneMeta[id] || {}).num = m.num;
+            } else delete e1.lock;
+          }
+          const log = (e1.lockLog || []).slice();
+          for (const l of e2.lockLog || []) if (!log.some((x) => x.at === l.at)) log.push(l);
+          if (log.length) e1.lockLog = log.sort((a, b) => a.at - b.at);
         }
+        if (proj.secret && !ex.secret) ex.secret = proj.secret;
         Object.assign(ex.chars, Object.assign({}, proj.chars, ex.chars)); Object.assign(ex.locs, Object.assign({}, proj.locs, ex.locs));
         toast('Проект обновлён: добавлено ' + added + ' комментариев, ответов и драфтов');
         openProject(ex.id);
@@ -1306,7 +1342,9 @@
   function pdfDialog() {
     const sec = P().secret || {};
     const drafts = S.ep.drafts || [];
-    const label = drafts.length ? drafts[drafts.length - 1].name : 'Рабочий драфт';
+    // the newest draft the team named, not an automatic «Авто: перед восстановлением…» copy
+    const named = drafts.filter((d) => !/^Авто:/.test(d.name)).sort((a, b) => b.date - a.date);
+    const label = named.length ? named[0].name : 'Рабочий драфт';
     modal('<h2>PDF в формате Final Draft</h2><div class="form-grid"><label>Для кого (имя или почта)<input type="text" id="pdfTo" value="' + esc(S.me.name) + '"></label><label>Название драфта на титуле<input type="text" id="pdfLabel" value="' + esc(label) + '"></label></div>' +
       '<label class="row"><input type="checkbox" id="pdfWm" checked' + (S.me.role === 'reader' ? ' disabled' : '') + '> Водяной знак с именем получателя на каждой странице</label>' +
       (sec.org ? '<p class="note">Гриф: «Коммерческая тайна. ' + esc(sec.org) + (sec.addr ? ', ' + esc(sec.addr) : '') + '».</p>' : '<p class="note">Гриф коммерческой тайны не задан: заполните обладателя в «Настройках», иначе колонтитул будет без него.</p>') +
@@ -1369,9 +1407,9 @@
         const f = F[it.t] || F.action;
         it.lines.forEach((tx, j) => {
           const y = base + (line + j) * 12;
-          if (f.right) doc.text(tx, (f.indent + f.width / 10) * 72, y, { align: 'right' });
+          if (f.right) doc.text(tx, (paper.w - paper.right) * 72, y, { align: 'right' });
           else doc.text(tx, f.indent * 72, y);
-          if (j === 0 && it.t === 'scene' && sceneN[it.i] && !it.contd) { doc.text(String(sceneN[it.i]), (paper.left - 0.75) * 72, y); doc.text(String(sceneN[it.i]), (paper.w - paper.right + 0.3) * 72, y, { align: 'right' }); }
+          if (j === 0 && it.t === 'scene' && sceneN[it.i] && !it.contd) { doc.text(String(sceneN[it.i]), (paper.left - 0.75) * 72, y); doc.text(String(sceneN[it.i]), Math.min(paper.w - paper.right + 0.3, paper.w - 0.35) * 72, y, { align: 'right' }); }
         });
         line += it.lines.length;
         if (it.more) { doc.text('(ДАЛЬШЕ)', F.character.indent * 72, base + line * 12); line++; }
@@ -1487,6 +1525,9 @@
     const reader = S.me.role === 'reader';
     $('#btnImport').hidden = reader; $('#btnDraft').hidden = reader; $('#btnHistory').hidden = reader;
     $$('[data-exp]').forEach((b) => { b.hidden = reader && b.dataset.exp !== 'pdf'; });
+    // menu and toolbar entries that change the project are hidden for a reader, so the menus only offer what works
+    ['#tbImport', '#tbDraft', '#tbHistory', '#mNewEp', '#mNewSeason', '#mTrash', '#mExportFt', '#mLock', '#mRenum', '#mUndo', '#mRedo', '#tbUndo', '#tbRedo'].forEach((q) => { const x = $(q); if (x) x.hidden = reader; });
+    $$('[data-type]').forEach((b) => { b.disabled = ro; });
     applyWatermark();
   }
   function applyTheme() { const th = ls.get('draft.theme', ''); if (th) document.documentElement.dataset.theme = th; else delete document.documentElement.dataset.theme; }
@@ -1498,10 +1539,12 @@
     st.setProperty('--pg-w', paper.w + 'in'); st.setProperty('--pg-h', paper.h + 'in');
     st.setProperty('--pg-top', paper.top + 'in'); st.setProperty('--pg-bottom', paper.bottom + 'in');
     st.setProperty('--pg-left', paper.left + 'in'); st.setProperty('--pg-right', paper.right + 'in');
-    st.setProperty('--tx-w', (paper.w - paper.left - paper.right) + 'in');
+    // the text column is the action width (10 chars per inch), exactly what pagination wraps at
+    st.setProperty('--tx-w', (F.action.width / 10) + 'in');
     for (const [t, k] of [['character', 'char'], ['paren', 'paren'], ['dialogue', 'dial'], ['transition', 'tr']]) {
       st.setProperty('--in-' + k, (F[t].indent - paper.left) + 'in');
-      st.setProperty('--w-' + k, (F[t].width / 10) + 'in');
+      // a right-aligned transition ends flush with the right margin, as on paper
+      st.setProperty('--w-' + k, (F[t].right ? paper.w - paper.right - F[t].indent : F[t].width / 10) + 'in');
     }
   }
   const FONTS = { courier: '"Courier New", Courier, "Liberation Mono", "FreeMonoEmb", monospace', liberation: '"Liberation Mono", "Courier New", "FreeMonoEmb", monospace', ptmono: '"PT Mono", "Courier New", "FreeMonoEmb", monospace', freemono: '"FreeMonoEmb", "FreeMono", "Courier New", monospace' };
@@ -1514,7 +1557,12 @@
   function applyWatermark() {
     const on = S.me.role === 'reader' || !!ls.get('draft.wm', false);
     const pg = $('#page');
-    if (on) pg.dataset.wm = S.me.name + ' · ' + new Date().toLocaleDateString('ru-RU'); else delete pg.dataset.wm;
+    if (!on) { delete pg.dataset.wm; pg.style.removeProperty('--wm-img'); return; }
+    // tiled over the whole sheet, so any screenshot of any part of the text carries the name
+    const txt = S.me.name + ' · ' + new Date().toLocaleDateString('ru-RU');
+    pg.dataset.wm = txt;
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="460" height="300"><text x="230" y="160" text-anchor="middle" transform="rotate(-32 230 150)" font-family="Courier New, monospace" font-size="26" fill="#808080" fill-opacity="0.16">' + esc(txt) + '</text></svg>';
+    pg.style.setProperty('--wm-img', 'url("data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg) + '")');
   }
   $('#elemSelect').onchange = (e) => { const el = ed.querySelector('.b.cur') || curBlockEl(); if (el) { setType(el, e.target.value); setCaret(el.dataset.id, el.textContent.length); } };
   $('#btnFocus').onclick = () => { document.body.classList.toggle('focus'); syncViewMenu(); };
@@ -1546,7 +1594,7 @@
   $('#mNewEp').onclick = () => $('#addEp').click();
   $('#mNewSeason').onclick = () => $('#addSeason').click();
   $('#mDrafts').onclick = () => showDrafts();
-  $('#mTrash').onclick = () => showTrash();
+  $('#mTrash').onclick = () => readOnly('Корзина') || showTrash();
   $('#mEpisode').onclick = () => $('#renEp').click();
   $('#mProject').onclick = () => projectModal();
   $('#mTitlePage').onclick = () => $('#btnSettings').click();

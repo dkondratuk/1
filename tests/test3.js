@@ -9,12 +9,13 @@ const nm=require('path').resolve(__dirname,'../node_modules')+'/';
     if(u.includes('pdf.worker.min.js'))return r.fulfill({path:nm+'pdfjs-dist/build/pdf.worker.min.js',contentType:'text/javascript'});
     if(u.includes('pdf.min.js'))return r.fulfill({path:nm+'pdfjs-dist/build/pdf.min.js',contentType:'text/javascript'});
     if(u.startsWith('file:'))return r.continue(); return r.abort();});
+  await p.addInitScript(() => { try { localStorage.setItem('draft.started', 'true'); } catch (e) {} });
   await p.goto('file://'+require('path').resolve(__dirname,'../app/_test.html')); await p.waitForTimeout(600);
   await p.screenshot({path:'out/z1280.png'});
   let K=0; const EXT={fdx:'fdx',docx:'docx',pdf:'pdf',fountain:'txt',project:'json'};
-  async function exp(kind, extra){ await p.click('#btnExport'); const dl=p.waitForEvent('download'); await p.click(`[data-exp=${kind}]`); if(extra) await extra(); const d=await dl; const f='out/e'+(K++)+'.'+EXT[kind]; console.log('suggested',d.suggestedFilename()); await d.saveAs(f); console.log('saved',f); return f; }
+  async function exp(kind, extra){ await p.click('#btnExport'); const dl=p.waitForEvent('download'); await p.click(`#exportMenu [data-exp=${kind}]`); if(extra) await extra(); const d=await dl; const f='out/e'+(K++)+'.'+EXT[kind]; console.log('suggested',d.suggestedFilename()); await d.saveAs(f); console.log('saved',f); return f; }
   const fdx=await exp('fdx', async()=>{await p.click('#fxOk');});
-  const docx=await exp('docx'); const pdf=await exp('pdf'); const txt=await exp('fountain');
+  const docx=await exp('docx'); const pdf=await exp('pdf', async()=>{await p.click('#pdfOk');}); const txt=await exp('fountain');
   await exp('project');
   for (const f of [fdx,docx,pdf,txt]) {
     await p.locator('#btnImport').dispatchEvent('click'); await p.waitForTimeout(200);
