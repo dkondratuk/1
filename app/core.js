@@ -15,10 +15,24 @@
     dialogue:   { indent: 2.5, width: 35, sb: 0 },
     transition: { indent: 5.5, width: 20, sb: 1, right: true },
   };
-  const PAPER = {
-    letter: { name: 'Letter (Final Draft)', w: 8.5, h: 11, lines: 54 },
-    a4: { name: 'A4', w: 8.27, h: 11.69, lines: 58 },
+  // Russian «американка» (screenwriter.ru): A4, margins top/bottom 2.5 cm, left 3.75 cm, right 1.25 cm (text 16 cm = 63 chars);
+  // character 6.75 cm from the left margin, dialogue 3.75/3.75 cm, parenthetical 5.5/4.5 cm.
+  const cm = (x) => x / 2.54;
+  const FMT_RU = {
+    scene:      { indent: cm(3.75), width: 63, sb: 2 },
+    action:     { indent: cm(3.75), width: 63, sb: 1 },
+    character:  { indent: cm(3.75 + 6.75), width: 36, sb: 1 },
+    paren:      { indent: cm(3.75 + 5.5), width: 23, sb: 0 },
+    dialogue:   { indent: cm(3.75 + 3.75), width: 33, sb: 0 },
+    transition: { indent: cm(3.75 + 10), width: 23, sb: 1, right: true },
   };
+  // page templates: lines = text lines per page at 6 lines per inch; margins in inches
+  const PAPER = {
+    letter: { name: 'Letter (Final Draft)', w: 8.5, h: 11, lines: 54, fmt: FMT, top: 1, bottom: 1, left: 1.5, right: 1 },
+    a4: { name: 'A4 (Final Draft)', w: 8.27, h: 11.69, lines: 58, fmt: FMT, top: 1, bottom: 1, left: 1.5, right: 1 },
+    a4ru: { name: 'A4 «американка»', w: 8.27, h: 11.69, lines: 58, fmt: FMT_RU, top: cm(2.5), bottom: cm(2.5), left: cm(3.75), right: cm(1.25) },
+  };
+  const paperOf = (rules) => PAPER[(rules || {}).paper] || PAPER.letter;
 
   const TIMES = ['ДЕНЬ', 'НОЧЬ', 'УТРО', 'ВЕЧЕР', 'РЕЖИМ', 'РАССВЕТ', 'ЗАКАТ', 'СУМЕРКИ'];
   const PREFIXES = ['ИНТ.', 'НАТ.', 'ПАВ.', 'ИНТ./НАТ.'];
@@ -150,9 +164,10 @@
 
   function paginate(blocks, opts) {
     const lpp = (opts && opts.lines) || 54;
+    const F = (opts && opts.fmt) || FMT;
     const pages = [{ items: [] }];
     const info = blocks.map((b) => {
-      const f = FMT[b.t] || FMT.action;
+      const f = F[b.t] || F.action;
       const lines = wrap(displayText(b), f.width);
       return { lines, L: lines.length, sb: f.sb };
     });
@@ -248,9 +263,9 @@
 
   function analyzeEpisode(ep, project) {
     const rules = Object.assign({}, DEFAULT_RULES, project.rules || {});
-    const paper = PAPER[rules.paper] || PAPER.letter;
+    const paper = paperOf(rules);
     const blocks = ep.blocks || [];
-    const lay = paginate(blocks, { lines: paper.lines });
+    const lay = paginate(blocks, { lines: paper.lines, fmt: paper.fmt });
     const pages = lay.total;
     const minutes = pages * rules.minPerPage;
     const nominal = lay.info.map((inf, i) => (i === 0 ? 0 : inf.sb) + inf.L);
@@ -285,6 +300,7 @@
       const minors = [...cast].filter((n) => chars[n] && chars[n].minor);
       const guests = [...cast].filter((n) => chars[n] && chars[n].guest);
       const tags = meta.tags || [];
+      const omitted = !!meta.omitted || OMIT_RE.test(s.heading || '');
       const special = tags.some((t) => SPECIAL_TAGS.includes(t)) || minors.length > 0;
       const rate = pav ? rules.ratePav : (h.type === 'ext' || h.type === 'intext') ? rules.rateExt : rules.rateInt;
       const shifts = min / (special ? rate / rules.specialFactor : rate);
@@ -293,7 +309,7 @@
         lines, share, pages: share * pages, min, sec: Math.round(min * 60), cast: [...cast], speaking: [...speaking],
         silent: [...cast].filter((n) => !speaking.has(n)), minors, guests, tags, special, shifts, replicas, dialogueWords,
         synopsis: meta.synopsis || '', day: meta.day || h.day || '', num: meta.num || String(k + 1), fileNum: !!meta.num,
-        line: meta.line || '',
+        line: meta.line || '', omitted,
       };
     });
     for (const s of scenes) {
@@ -312,9 +328,10 @@
       const t = lineMap[s.line] || (s.line ? (lineMap[s.line] = { name: s.line, scenes: 0, min: 0, pages: 0, lines: 0 }) : unassigned);
       t.scenes++; t.min += s.min; t.pages += s.pages; t.lines += s.lines;
     }
-    // objects
+    // objects (omitted scenes keep their number but have no object, cast or time)
     const objects = {};
     for (const s of scenes) {
+      if (s.omitted) continue;
       const key = s.h.object || '(без объекта)';
       const o = objects[key] || (objects[key] = { name: key, scenes: 0, lines: 0, min: 0, pages: 0, shifts: 0, pav: false, type: s.h.type, subs: {} });
       o.scenes++; o.lines += s.lines; o.min += s.min; o.pages += s.pages; o.shifts += s.shifts;
@@ -370,8 +387,9 @@
     add('pages', 'Объём серии', p <= r.maxPages ? 'ok' : p <= r.maxPages * 1.05 ? 'warn' : 'fail',
       p.toFixed(1) + ' / ' + r.maxPages + ' стр.', [], 'Одна страница в формате Final Draft ≈ ' + r.minPerPage + ' мин.');
     const maxScenes = Math.max(1, Math.round(Math.max(p, 1) * r.scenesPerPage));
-    add('scenes', 'Количество сцен', st.scenes.length <= maxScenes ? 'ok' : st.scenes.length <= maxScenes + 2 ? 'warn' : 'fail',
-      st.scenes.length + ' / ' + maxScenes, [], 'Ориентир: не больше одной сцены на страницу.');
+    const nScenes = st.scenes.filter((s) => !s.omitted).length;
+    add('scenes', 'Количество сцен', nScenes <= maxScenes ? 'ok' : nScenes <= maxScenes + 2 ? 'warn' : 'fail',
+      nScenes + ' / ' + maxScenes, [], 'Ориентир: не больше одной сцены на страницу.');
     const shorts = st.scenes.filter((s, i) => {
       if (s.sec >= r.shortSceneSec) return false;
       const prev = st.scenes[i - 1], next = st.scenes[i + 1];
@@ -450,22 +468,91 @@
     return out;
   }
   // scene numbers taken from a file: duplicates, gaps, wrong order; a proposal keeps the file's "51-" prefix
-  function numberingCheck(scenes) {
+  // ---------- locked scene numbers (shooting script) ----------
+  // After the lock, numbers never move: a new scene between 12 and 13 becomes 12A (then 12B…), a scene inserted before the
+  // first one becomes A1, a deleted scene keeps its number as «ОПУЩЕНА» (OMITTED). Numbers may carry an episode prefix «3-12».
+  const OMIT_RE = /^\s*(ОПУЩЕНА|OMITTED)\b/i;
+  const NUM_PARTS = /^(\d+-)?([A-ZА-Я]*)(\d+)([A-ZА-Я]*)$/;
+  const LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+  function numParts(num) {
+    const m = String(num || '').match(NUM_PARTS);
+    return m ? { prefix: m[1] || '', pre: m[2], base: +m[3], post: m[4] } : null;
+  }
+  function nextLetter(used) {
+    for (const L of LETTERS) if (!used.has(L)) return L;
+    let i = 0; while (used.has('A' + LETTERS[i])) i++; return 'A' + LETTERS[i];
+  }
+  // scenes: analyzeEpisode's list; returns [{sceneId, num}] for scenes that had no fixed number yet
+  function lockAssign(scenes, sceneMeta) {
+    const out = [];
+    const taken = new Set(scenes.filter((s) => s.fileNum).map((s) => s.num));
+    const fixed = scenes.map((s) => (s.fileNum ? s.num : null));
+    for (let i = 0; i < scenes.length; i++) {
+      if (fixed[i]) continue;
+      let prev = null;
+      for (let k = i - 1; k >= 0; k--) if (fixed[k]) { prev = fixed[k]; break; }
+      let num;
+      if (prev) {
+        const p = numParts(prev);
+        if (!p) num = prev + 'A';
+        else {
+          const used = new Set();
+          for (const t of taken) { const q = numParts(t); if (q && q.prefix === p.prefix && q.base === p.base && !q.pre && q.post) used.add(q.post); }
+          num = p.prefix + p.base + nextLetter(used);
+        }
+      } else {
+        let next = null;
+        for (let k = i + 1; k < scenes.length; k++) if (fixed[k]) { next = fixed[k]; break; }
+        const p = next ? numParts(next) : null;
+        if (p) {
+          const used = new Set();
+          for (const t of taken) { const q = numParts(t); if (q && q.prefix === p.prefix && q.base === p.base && q.pre) used.add(q.pre); }
+          num = p.prefix + nextLetter(used) + p.base;
+        } else num = String(i + 1);
+      }
+      taken.add(num); fixed[i] = num;
+      out.push({ sceneId: scenes[i].id, num });
+      (sceneMeta[scenes[i].id] = sceneMeta[scenes[i].id] || {}).num = num;
+    }
+    return out;
+  }
+  // numbers that were locked but no longer appear in the script (the scene was deleted instead of omitted)
+  function lockMissing(lock, scenes) {
+    const have = new Set(scenes.map((s) => s.num));
+    return (lock && lock.nums || []).filter((n) => !have.has(n.num));
+  }
+  // where a restored OMITTED scene goes: after the last present scene that precedes it in the locked order
+  function lockInsertIndex(lock, scenes, num, blocksLength) {
+    const order = (lock && lock.nums || []).map((n) => n.num);
+    const pos = order.indexOf(num);
+    for (let k = pos - 1; k >= 0; k--) { const s = scenes.find((x) => x.num === order[k]); if (s) return s.to + 1; }
+    const first = scenes[0];
+    return first ? first.from : blocksLength;
+  }
+  function omittedHeading(num) { return 'ОПУЩЕНА'; }
+
+  function numberingCheck(scenes, lock) {
     const issues = [];
     const fromFile = scenes.filter((s) => s.fileNum).length;
     if (!fromFile) return { fromFile: 0, issues, proposal: null };
+    if (lock) {
+      // under a lock the order is whatever the shooting script says: only duplicates are a problem
+      const seen = {};
+      for (const s of scenes) { if (seen[s.num]) issues.push({ sceneId: s.id, text: s.num + ': номер повторяется' }); seen[s.num] = true; }
+      return { fromFile, issues, proposal: null, locked: true };
+    }
     const seen = {};
     let prevN = 0;
     let prefix = '';
     for (const s of scenes) {
-      const m = String(s.num).match(/^(\d+-)?(\d+)([А-ЯA-Z]?)$/);
+      const m = String(s.num).match(/^(\d+-)?([А-ЯA-Z]*)(\d+)([А-ЯA-Z]*)$/);
       if (!s.fileNum) { issues.push({ sceneId: s.id, text: s.n + '. нет номера в файле' }); continue; }
       if (!m) { issues.push({ sceneId: s.id, text: s.num + ': нестандартный номер' }); continue; }
       if (m[1] && !prefix) prefix = m[1];
-      const n = +m[2];
+      const n = +m[3];
       if (seen[s.num]) issues.push({ sceneId: s.id, text: s.num + ': номер повторяется' });
       seen[s.num] = true;
-      if (!m[3]) {
+      if (!m[2] && !m[4]) {
         if (n < prevN) issues.push({ sceneId: s.id, text: s.num + ': порядок нарушен (после ' + prevN + ')' });
         else if (n > prevN + 1) issues.push({ sceneId: s.id, text: s.num + ': пропущены номера ' + (prevN + 1) + (n - 1 > prevN + 1 ? '–' + (n - 1) : '') });
         prevN = n;
@@ -677,6 +764,7 @@
       if (t === 'paren' && !/^\(/.test(text)) text = '(' + text + ')';
       const nb = { id: uid(), t, x: text };
       if (t === 'scene' && fdxNum) nb.num = fdxNum;
+      if (t === 'scene' && OMIT_RE.test(text)) { nb.x = omittedHeading(fdxNum); nb.omitted = true; }
       blocks.push(nb);
     }
     return blocks;
@@ -694,6 +782,7 @@
         // numbering, script day and flashback marks come from the file and are kept in the scene card
         const num = h.num || b.num || '';
         if (h.day || h.flash || num) report.sceneMeta[b.id] = { day: h.day, tags: h.flash ? ['flashback'] : [], num };
+        if (b.omitted || OMIT_RE.test(b.x)) { (report.sceneMeta[b.id] = report.sceneMeta[b.id] || { num }).omitted = true; b.x = omittedHeading(num); delete b.omitted; continue; }
         delete b.num;
         if (h.guessed || b.guessed) { report.guessed.push(b.x); delete b.guessed; }
         if (!h.type) { report.untyped.push(b.x); continue; }
@@ -743,22 +832,24 @@
     const pageOf = {};
     lay.pages.forEach((pg, k) => pg.items.forEach((it) => { if (!(it.i in pageOf)) pageOf[it.i] = k + 1; }));
     const sceneByIdx = {}; st.scenes.forEach((s) => { sceneByIdx[s.from] = s; });
+    const paper = paperOf(project.rules);
+    const F = paper.fmt;
     const paras = (ep.blocks || []).map((b, i) => {
       const s = sceneByIdx[i];
       const num = s ? (opts.episodePrefix && !/-/.test(s.num) ? (ep.number || 1) + '-' + s.num : s.num) : '';
       const props = s ? '<SceneProperties Length="' + fmtPages(s.pages) + '" Page="' + (pageOf[i] || 1) + '" Title="' + xmlEsc(s.synopsis || '') + '"/>' : '';
-      const text = displayText(b);
+      const text = s && s.omitted ? 'OMITTED' : displayText(b);
       return '    <Paragraph' + (s ? ' Number="' + num + '"' : '') + ' Type="' + FDX_TYPE[b.t] + '">' + props + '<Text>' + xmlEsc(text) + '</Text></Paragraph>';
     });
-    const el = (name, f, behavior) => '    <ElementSettings Type="' + name + '"><FontSpec AdornmentStyle="0" Background="#FFFFFFFFFFFF" Color="#000000000000" Font="Courier New" RevisionID="0" Size="12" Style=""/><ParagraphSpec Alignment="' + (f.right ? 'Right' : 'Left') + '" FirstIndent="0.00" Leading="Regular" LeftIndent="' + f.indent.toFixed(2) + '" RightIndent="' + (f.indent + f.width / 10).toFixed(2) + '" SpaceBefore="' + (f.sb * 12) + '" Spacing="1" StartsNewPage="No"/><Behavior PaginateAs="' + name + '" ReturnKey="' + behavior + '" Shortcut=""/></ElementSettings>';
+    const el = (name, f, behavior) => '    <ElementSettings Type="' + name + '"><FontSpec AdornmentStyle="0" Background="#FFFFFFFFFFFF" Color="#000000000000" Font="Courier New" RevisionID="0" Size="12" Style=""/><ParagraphSpec Alignment="' + (f.right ? 'Right' : 'Left') + '" FirstIndent="0.00" Leading="Regular" LeftIndent="' + (f.indent - paper.left).toFixed(2) + '" RightIndent="' + (f.indent - paper.left + f.width / 10).toFixed(2) + '" SpaceBefore="' + (f.sb * 12) + '" Spacing="1" StartsNewPage="No"/><Behavior PaginateAs="' + name + '" ReturnKey="' + behavior + '" Shortcut=""/></ElementSettings>';
     const chars = Object.keys(project.chars || {}).sort();
     const locs = new Set();
     (ep.blocks || []).filter((b) => b.t === 'scene').forEach((b) => { const h = parseHeading(b.x); if (h.object) locs.add(h.object + (h.sub ? '. ' + h.sub : '')); });
     return '<?xml version="1.0" encoding="UTF-8" standalone="no" ?>\n<FinalDraft DocumentType="Script" Template="No" Version="5">\n  <Content>\n' + paras.join('\n') + '\n  </Content>\n' +
       '  <TitlePage>\n    <Content>\n' + [project.name, ep.title ? 'Серия ' + (ep.number || '') + '. ' + ep.title : '', project.author || ''].filter(Boolean).map((t) => '      <Paragraph Alignment="Center" Type="General"><Text>' + xmlEsc(t) + '</Text></Paragraph>').join('\n') + '\n    </Content>\n  </TitlePage>\n' +
-      el('Scene Heading', FMT.scene, 'Action') + '\n' + el('Action', FMT.action, 'Action') + '\n' + el('Character', FMT.character, 'Dialogue') + '\n' +
-      el('Parenthetical', FMT.paren, 'Dialogue') + '\n' + el('Dialogue', FMT.dialogue, 'Action') + '\n' + el('Transition', FMT.transition, 'Scene Heading') + '\n' +
-      '  <PageLayout BackgroundColor="#FFFFFFFFFFFF" BottomMargin="72" BreakDialogueAndActionAtSentences="Yes" DocumentLeading="Normal" FooterMargin="36" ForegroundColor="#000000000000" HeaderMargin="36" InvisiblesColor="#A0A0A0A0A0A0" TopMargin="72" UsesSmartQuotes="Yes"><AutoCastList AddParentheses="Yes" AutomaticallyGenerate="No" CastListElement="Cast List"/></PageLayout>\n' +
+      el('Scene Heading', F.scene, 'Action') + '\n' + el('Action', F.action, 'Action') + '\n' + el('Character', F.character, 'Dialogue') + '\n' +
+      el('Parenthetical', F.paren, 'Dialogue') + '\n' + el('Dialogue', F.dialogue, 'Action') + '\n' + el('Transition', F.transition, 'Scene Heading') + '\n' +
+      '  <PageLayout BackgroundColor="#FFFFFFFFFFFF" BottomMargin="' + Math.round(paper.bottom * 72) + '" BreakDialogueAndActionAtSentences="Yes" DocumentLeading="Normal" FooterMargin="36" ForegroundColor="#000000000000" HeaderMargin="36" InvisiblesColor="#A0A0A0A0A0A0" LeftMargin="' + Math.round(paper.left * 72) + '" RightMargin="' + Math.round(paper.right * 72) + '" PaperHeight="' + Math.round(paper.h * 72) + '" PaperWidth="' + Math.round(paper.w * 72) + '" TopMargin="' + Math.round(paper.top * 72) + '" UsesSmartQuotes="Yes"><AutoCastList AddParentheses="Yes" AutomaticallyGenerate="No" CastListElement="Cast List"/></PageLayout>\n' +
       '  <SmartType>\n    <Characters>\n' + chars.map((c) => '      <Character>' + xmlEsc(c) + '</Character>').join('\n') + '\n    </Characters>\n' +
       '    <Extensions>\n' + EXTENSIONS.map((x) => '      <Extension>' + xmlEsc(x) + '</Extension>').join('\n') + '\n    </Extensions>\n' +
       '    <SceneIntros>\n' + PREFIXES.map((x) => '      <SceneIntro>' + xmlEsc(x) + '</SceneIntro>').join('\n') + '\n    </SceneIntros>\n' +
@@ -796,12 +887,15 @@
     const sceneByIdx = {}; st.scenes.forEach((s) => { sceneByIdx[s.from] = s; });
     const run = (t) => '<w:r><w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New" w:cs="Courier New"/><w:sz w:val="24"/></w:rPr><w:t xml:space="preserve">' + xmlEsc(t) + '</w:t></w:r>';
     const br = '<w:r><w:br/></w:r>';
-    const paras = (ep.blocks || []).map((b, i) => {
+    // omitted scenes are not shot, so FilmToolz must not see them
+    const skip = new Set(); st.scenes.forEach((s) => { if (s.omitted) for (let i = s.from; i <= s.to; i++) skip.add(i); });
+    const paras = (ep.blocks || []).filter((b, i) => !skip.has(i)).map((b, i) => {
       const f = FMT[b.t];
       const left = tw(f.indent - 1.5), right = tw(7.5 - (f.indent + f.width / 10));
       const pPr = '<w:pPr><w:spacing w:before="' + (i === 0 ? 0 : f.sb * 240) + '" w:after="0" w:line="240" w:lineRule="exact"/><w:ind w:left="' + left + '" w:right="' + Math.max(0, right) + '"/>' + (f.right ? '<w:jc w:val="right"/>' : '') + (b.t === 'scene' || b.t === 'character' ? '<w:keepNext/>' : '') + '</w:pPr>';
-      if (b.t === 'scene' && sceneByIdx[i]) {
-        const ft = filmtoolzHeading(sceneByIdx[i], ep);
+      const s = st.scenes.find((x) => x.id === b.id);
+      if (b.t === 'scene' && s) {
+        const ft = filmtoolzHeading(s, ep);
         return '<w:p>' + pPr + run(ft.line) + br + run(ft.cast) + '</w:p>';
       }
       return '<w:p>' + pPr + run(displayText(b)) + '</w:p>';
@@ -1071,7 +1165,7 @@
   }
 
   root.Core = {
-    parseLines, LINE_COLORS, autoLine, listOf,
+    parseLines, LINE_COLORS, autoLine, listOf, paperOf, FMT_RU, lockAssign, lockMissing, lockInsertIndex, omittedHeading, OMIT_RE, numParts,
     TYPES, TYPE_LABEL, FMT, PAPER, TIMES, PREFIXES, TRANSITIONS, EXTENSIONS, TAGS, SPECIAL_TAGS, DEFAULT_RULES, MANUAL_CHECKS,
     uid, up, clean, parseHeading, formatHeading, charName, wrap, paginate, displayText, analyzeEpisode, evalRules, fmtPages, fmtTime,
     namingIssues, fixHomoglyphs, classifyLines, importText, importFDX, absorb, exportFDX, exportFountain, docxDocumentXML, DOCX_STATIC,

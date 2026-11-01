@@ -118,6 +118,7 @@
     S.db.currentProjectId = S.project.id;
     S.project.rules = Object.assign({}, C.DEFAULT_RULES, S.project.rules || {});
     S.project.relations = S.project.relations || [];
+    applyPaper();
     renderProjectSelect();
     openEpisode(S.db.currentEpId);
   }
@@ -424,6 +425,8 @@
     S.ep.blocks = readBlocks();
     S.ep.updated = Date.now();
     S.st = C.analyzeEpisode(S.ep, P());
+    // under a numbering lock every new scene gets its A-number at once, so it never shifts the others
+    if (S.ep.lock && C.lockAssign(S.st.scenes, S.ep.sceneMeta).length) S.st = C.analyzeEpisode(S.ep, P());
     S.rulesRes = C.evalRules(S.ep, P(), S.st, seasonContext());
     decorateEditor();
     if (S.zoom && S.zoom !== 1) sizePage();
@@ -451,13 +454,15 @@
       if (br) { if (el.dataset.pb !== String(br.page)) el.dataset.pb = br.page; } else if (el.dataset.pb) delete el.dataset.pb;
       if (el.dataset.t === 'scene') { const n = sceneN[el.dataset.id]; if (n && el.dataset.n !== String(n)) el.dataset.n = n; }
       else if (el.dataset.n) delete el.dataset.n;
+      const om = el.dataset.t === 'scene' && !!(S.ep.sceneMeta[el.dataset.id] || {}).omitted;
+      if (om !== el.classList.contains('omit')) el.classList.toggle('omit', om);
     });
   }
   function renderRuler() {
     const st = S.st;
     $('#pageInfo').textContent = 'стр. ' + st.pages.toFixed(2) + ' · ' + C.fmtTime(st.minutes) + ' · ' + st.scenes.length + ' сц. · павильон ' + Math.round(st.pavPct) + '%' +
       (st.lines && st.lines.length ? ' · ' + st.lines.map((l) => l.name + ' ' + (l.share * 100).toFixed(0) + '%').join(' / ') : '');
-    $('#roleInfo').textContent = (S.me.role === 'producer' ? 'Продюсер' : S.me.role === 'editor' ? 'Редактор' : 'Сценарист') + ': ' + S.me.name;
+    $('#roleInfo').textContent = roleName(S.me.role) + ': ' + S.me.name + (S.ep.lock ? ' · номера сцен залочены' : '');
   }
 
   // ---------- left: episodes ----------
@@ -554,12 +559,21 @@
     const pane = $('#pane-scenes'); if (pane.hidden) return;
     const r = P().rules;
     const insp = S.curScene && S.st.scenes.find((s) => s.id === S.curScene);
-    const nc = C.numberingCheck(S.st.scenes);
-    const numHTML = nc.fromFile ? '<div class="rule ' + (nc.issues.length ? 'warn' : 'ok') + '"><div class="top"><span class="dot"></span><span class="title">Нумерация из файла</span><span class="val">' + (nc.issues.length ? nc.issues.length + ' замеч.' : 'по порядку') + '</span></div>' +
+    const lock = S.ep.lock;
+    const nc = C.numberingCheck(S.st.scenes, lock);
+    const missing = lock ? C.lockMissing(lock, S.st.scenes) : [];
+    const lockHTML = lock
+      ? '<div class="rule ' + (missing.length || nc.issues.length ? 'warn' : 'ok') + '"><div class="top"><span class="dot"></span><span class="title">Номера сцен залочены</span><span class="val">' + fmtDate(lock.at) + '</span></div>' +
+        '<div class="note">' + esc(lock.by) + '. Новые сцены получают буквенные номера (12A), убранные остаются как «ОПУЩЕНА».</div>' +
+        (nc.issues.length ? '<ul>' + nc.issues.map((d) => '<li data-scene="' + d.sceneId + '">' + esc(d.text) + '</li>').join('') + '</ul>' : '') +
+        (missing.length ? '<div class="note">Удалены без пометки «опущена»: ' + missing.map((n) => esc(n.num)).join(', ') + '</div><div class="row">' + missing.map((n) => '<button class="btn small" data-restore-omit="' + esc(n.num) + '">Вернуть ' + esc(n.num) + ' как опущенную</button>').join('') + '</div>' : '') +
+        (canLock() ? '<div class="row"><button class="btn small ghost" id="unlockNum">Снять лок</button></div>' : '') + '</div>'
+      : (canLock() && S.st.scenes.length ? '<div class="rule"><div class="top"><span class="dot"></span><span class="title">Номера сцен не залочены</span></div><div class="note">Перед запуском в производство зафиксируйте номера: после этого вставка даёт 12A, удаление даёт «ОПУЩЕНА», и график группы не ломается.</div><div class="row"><button class="btn small" id="lockNum">Залочить номера сцен</button></div></div>' : '');
+    const numHTML = lockHTML + (nc.fromFile && !lock ? '<div class="rule ' + (nc.issues.length ? 'warn' : 'ok') + '"><div class="top"><span class="dot"></span><span class="title">Нумерация из файла</span><span class="val">' + (nc.issues.length ? nc.issues.length + ' замеч.' : 'по порядку') + '</span></div>' +
       (nc.partial ? '<div class="note">У части сцен номера нет.</div>' : '') +
       (nc.issues.length ? '<ul>' + nc.issues.map((d) => '<li data-scene="' + d.sceneId + '">' + esc(d.text) + '</li>').join('') + '</ul>' : '') +
-      '<div class="row"><button class="btn small" id="renum">Перенумеровать по порядку' + (nc.proposal[0].includes('-') ? ' (' + esc(nc.proposal[0]) + '…)' : '') + '</button><span class="small muted">отменить: Ctrl+Z</span></div></div>' : '';
-    pane.innerHTML = numHTML + S.st.scenes.map((s) => '<div class="sc' + (s.id === S.curScene ? ' active' : '') + (s.sec < r.shortSceneSec ? ' short' : '') + '" data-id="' + s.id + '"><span class="num">' + esc(s.num) + '</span><span class="hd">' + esc(s.heading || '(без заголовка)') + '</span>' +
+      '<div class="row"><button class="btn small" id="renum">Перенумеровать по порядку' + (nc.proposal[0].includes('-') ? ' (' + esc(nc.proposal[0]) + '…)' : '') + '</button><span class="small muted">отменить: Ctrl+Z</span></div></div>' : '');
+    pane.innerHTML = numHTML + S.st.scenes.map((s) => '<div class="sc' + (s.id === S.curScene ? ' active' : '') + (s.sec < r.shortSceneSec ? ' short' : '') + (s.omitted ? ' omitted' : '') + '" data-id="' + s.id + '"><span class="num">' + esc(s.num) + '</span><span class="hd">' + esc(s.heading || '(без заголовка)') + '</span>' +
       '<span class="meta"><span class="mono">' + C.fmtPages(s.pages) + ' · ' + C.fmtTime(s.min) + '</span>' + (s.pav ? '<span class="chip pav">павильон</span>' : '') + (s.night ? '<span class="chip night">ночь</span>' : '') +
       s.tags.map((t) => '<span class="chip tag">' + esc(C.TAGS[t]) + '</span>').join('') + (s.cast.length ? '<span>' + s.cast.length + ' арт.</span>' : '') + (s.day ? '<span>д.' + esc(s.day) + '</span>' : '') + (s.line ? '<span class="chip" style="border-color:' + lineColor(s.line) + ';color:' + lineColor(s.line) + '" title="' + (s.lineAuto ? 'авто: ' + esc(s.lineAuto) : 'задано вручную') + '">' + esc(s.line) + (s.lineAuto ? ' ·' : '') + '</span>' : '') + '</span>' +
       (s.synopsis ? '<span class="syn">' + esc(s.synopsis) + '</span>' : '') + '</div>').join('') +
@@ -576,12 +590,69 @@
       clearTimeout(toastT); toastT = setTimeout(() => { t.hidden = true; }, 8000);
       $('#undoRenum').onclick = () => { undo(); t.hidden = true; };
     };
+    const lk = $('#lockNum', pane); if (lk) lk.onclick = lockNumbers;
+    const ul = $('#unlockNum', pane); if (ul) ul.onclick = unlockNumbers;
+    $$('[data-restore-omit]', pane).forEach((b) => b.onclick = () => restoreMissing(b.dataset.restoreOmit));
     if (insp) bindInspector(insp);
   }
+  // ---------- numbering lock (shooting script) ----------
+  function lockNumbers() {
+    if (!canLock()) return needProducer('Залочить номера сцен');
+    histAdd(S.ep, 'перед локом номеров', true);
+    pushUndo();
+    S.st.scenes.forEach((s) => { (S.ep.sceneMeta[s.id] = S.ep.sceneMeta[s.id] || {}).num = s.num; });
+    S.ep.lock = { at: Date.now(), by: S.me.name + ' (' + roleName(S.me.role) + ')', nums: S.st.scenes.map((s) => ({ num: s.num, heading: s.heading })) };
+    recompute(); renderScenes();
+    toast('Номера сцен залочены: ' + S.st.scenes.length + ' сц.');
+  }
+  function unlockNumbers() {
+    if (!canLock()) return needProducer('Снять лок номеров');
+    modal('<h2>Снять лок номеров сцен</h2><p class="note">После снятия лока номера можно менять и перенумеровывать. Это ломает связь с графиком группы, поэтому действие записывается в историю с причиной.</p><label class="small muted">Причина<input type="text" id="ulReason" placeholder="Например: новый производственный драфт"></label><div class="actions"><button class="btn" id="ulC">Отмена</button><button class="btn primary" id="ulOk">Снять лок</button></div>', (m) => {
+      $('#ulC', m).onclick = closeModal;
+      $('#ulOk', m).onclick = () => {
+        const reason = $('#ulReason', m).value.trim() || 'без причины';
+        histAdd(S.ep, 'снят лок номеров: ' + reason, true);
+        pushUndo();
+        S.ep.lockLog = (S.ep.lockLog || []).concat([{ at: Date.now(), by: S.me.name, role: S.me.role, reason, was: S.ep.lock }]);
+        delete S.ep.lock;
+        closeModal(); recompute(); renderScenes(); toast('Лок снят');
+      };
+    });
+  }
+  // a scene that leaves the shooting script keeps its number as «ОПУЩЕНА»
+  function omitScene(s) {
+    pushUndo();
+    const blocks = readBlocks();
+    const meta = (S.ep.sceneMeta[s.id] = S.ep.sceneMeta[s.id] || {});
+    meta.num = s.num; meta.omitted = true; meta.omittedBlocks = JSON.parse(JSON.stringify(blocks.slice(s.from, s.to + 1)));
+    meta.omittedHeading = s.heading;
+    blocks.splice(s.from, s.to - s.from + 1, { id: s.id, t: 'scene', x: C.omittedHeading(s.num) });
+    S.ep.blocks = blocks; renderEditor(); recompute(); renderScenes();
+  }
+  function restoreScene(s) {
+    const meta = S.ep.sceneMeta[s.id] || {};
+    pushUndo();
+    const blocks = readBlocks();
+    const piece = meta.omittedBlocks && meta.omittedBlocks.length ? meta.omittedBlocks : [{ id: s.id, t: 'scene', x: meta.omittedHeading || '' }];
+    blocks.splice(s.from, s.to - s.from + 1, ...piece);
+    delete meta.omitted; delete meta.omittedBlocks; delete meta.omittedHeading;
+    S.ep.blocks = blocks; renderEditor(); recompute(); renderScenes();
+  }
+  function restoreMissing(num) {
+    pushUndo();
+    const blocks = readBlocks();
+    const at = C.lockInsertIndex(S.ep.lock, S.st.scenes, num, blocks.length);
+    const id = C.uid();
+    blocks.splice(at, 0, { id, t: 'scene', x: C.omittedHeading(num) });
+    const rec = (S.ep.lock.nums || []).find((n) => n.num === num);
+    S.ep.sceneMeta[id] = { num, omitted: true, omittedHeading: rec ? rec.heading : '' };
+    S.ep.blocks = blocks; renderEditor(); recompute(); renderScenes();
+  }
   function inspectorHTML(s) {
-    return '<div class="inspector"><div class="row between"><b>Сцена ' + s.n + '</b><span class="row"><button class="btn small" id="scUp" title="Переместить выше">↑</button><button class="btn small" id="scDown" title="Переместить ниже">↓</button></span></div>' +
+    const lock = !!S.ep.lock;
+    return '<div class="inspector"><div class="row between"><b>Сцена ' + esc(s.num) + (s.omitted ? ' · опущена' : '') + '</b><span class="row">' + (lock ? (s.omitted ? '<button class="btn small" id="scRestore">Вернуть сцену</button>' : '<button class="btn small ghost danger" id="scOmit" title="Сцена остаётся в нумерации как «ОПУЩЕНА»">Опустить</button>') : '') + '<button class="btn small" id="scUp" title="Переместить выше">↑</button><button class="btn small" id="scDown" title="Переместить ниже">↓</button></span></div>' +
       '<label class="small muted">Синопсис<textarea id="scSyn" rows="2">' + esc(s.synopsis) + '</textarea></label>' +
-      '<div class="row"><label class="small muted">Номер <input type="text" id="scNum" value="' + esc(s.fileNum ? s.num : '') + '" placeholder="' + esc(s.num) + '" style="width:70px"></label>' +
+      '<div class="row"><label class="small muted">Номер <input type="text" id="scNum" value="' + esc(s.fileNum ? s.num : '') + '" placeholder="' + esc(s.num) + '" style="width:70px"' + (lock ? ' readonly title="Номера залочены"' : '') + '></label>' +
       '<label class="small muted">Сценарный день <input type="text" id="scDay" value="' + esc(s.day) + '" style="width:70px"></label></div>' +
       ((P().lines || []).length ? '<label class="small muted">Линия <select id="scLine">' + lineOptions(s) + '</select></label>' : '') +
       '<div class="tags">' + Object.entries(C.TAGS).map(([k, v]) => '<label><input type="checkbox" data-tag="' + k + '"' + (s.tags.includes(k) ? ' checked' : '') + '>' + esc(v) + '</label>').join('') + '</div>' +
@@ -592,7 +663,9 @@
     const meta = () => (S.ep.sceneMeta[s.id] = S.ep.sceneMeta[s.id] || {});
     $('#scSyn').onchange = (e) => { meta().synopsis = e.target.value.trim(); recompute(); };
     $('#scDay').onchange = (e) => { meta().day = e.target.value.trim(); recompute(); };
-    $('#scNum').onchange = (e) => { pushUndo(); meta().num = e.target.value.trim(); recompute(); };
+    $('#scNum').onchange = (e) => { if (S.ep.lock) return; pushUndo(); meta().num = e.target.value.trim(); recompute(); };
+    const om = $('#scOmit'); if (om) om.onclick = () => omitScene(s);
+    const rs = $('#scRestore'); if (rs) rs.onclick = () => restoreScene(s);
     const sl = $('#scLine'); if (sl) sl.onchange = (e) => { pushUndo(); meta().line = e.target.value; recompute(); };
     $('#scExtras').onchange = (e) => { meta().extras = e.target.value.split(',').map((x) => C.charName(x)).filter(Boolean); recompute(); };
     $$('[data-tag]').forEach((c) => c.onchange = () => { const m = meta(); m.tags = m.tags || []; if (c.checked) m.tags.push(c.dataset.tag); else m.tags = m.tags.filter((t) => t !== c.dataset.tag); recompute(); });
@@ -734,7 +807,9 @@
       $('#cmText', m).focus();
     });
   }
-  const roleName = (r) => ({ producer: 'Продюсер', editor: 'Редактор', writer: 'Сценарист' }[r] || 'Сценарист');
+  const roleName = (r) => ({ producer: 'Продюсер', editor: 'Редактор', writer: 'Сценарист', reader: 'Читатель' }[r] || 'Сценарист');
+  const canEdit = () => S.me.role === 'writer' || S.me.role === 'editor';
+  const canLock = () => S.me.role === 'producer' || S.me.role === 'editor';
   function renderComments() {
     const marks = $('#cmarks'); marks.innerHTML = '';
     const ranges = [], active = [];
@@ -1083,7 +1158,7 @@
     });
   }
   function needProducer(what) {
-    modal('<h2>Удалять может только продюсер</h2><p class="note">' + what + ' Сценарист и редактор не могут удалять серии и проекты: это защита от случайной или намеренной потери текста. Смените роль в «Настройках», если вы продюсер. Удалённое попадает в корзину на ' + TRASH_DAYS + ' дней, и вернуть его может любой участник.</p><div class="actions"><button class="btn" id="npC">Понятно</button></div>', (m) => { $('#npC', m).onclick = closeModal; });
+    modal('<h2>Нужна роль продюсера</h2><p class="note">' + what + ' Сценарист и читатель не могут удалять серии и проекты и трогать лок номеров: это защита от случайной или намеренной потери текста. Смените роль в «Настройках», если вы продюсер. Удалённое попадает в корзину на ' + TRASH_DAYS + ' дней, и вернуть его может любой участник.</p><div class="actions"><button class="btn" id="npC">Понятно</button></div>', (m) => { $('#npC', m).onclick = closeModal; });
   }
 
   // ---------- import ----------
@@ -1221,48 +1296,89 @@
         z.file('word/document.xml', C.docxDocumentXML(S.ep, P(), S.st));
         saveFile(fileBase() + '.docx', await z.generateAsync({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }));
       }
-      if (k === 'pdf') await exportPDF();
+      if (k === 'pdf') pdfDialog();
       if (k === 'bible') saveFile(P().name + ' — библия персонажей.html', bibleHTML(), 'text/html');
     } catch (err) { toast('Экспорт не удался: ' + err.message); }
   });
   const stripCache = (p) => JSON.parse(JSON.stringify(p, (k, v) => (k === '_st' ? undefined : v)));
-  async function exportPDF() {
+  // every PDF is a named copy: the recipient is printed diagonally on each page and in the footer next to the trade-secret notice
+  function pdfDialog() {
+    const sec = P().secret || {};
+    const drafts = S.ep.drafts || [];
+    const label = drafts.length ? drafts[drafts.length - 1].name : 'Рабочий драфт';
+    modal('<h2>PDF в формате Final Draft</h2><div class="form-grid"><label>Для кого (имя или почта)<input type="text" id="pdfTo" value="' + esc(S.me.name) + '"></label><label>Название драфта на титуле<input type="text" id="pdfLabel" value="' + esc(label) + '"></label></div>' +
+      '<label class="row"><input type="checkbox" id="pdfWm" checked' + (S.me.role === 'reader' ? ' disabled' : '') + '> Водяной знак с именем получателя на каждой странице</label>' +
+      (sec.org ? '<p class="note">Гриф: «Коммерческая тайна. ' + esc(sec.org) + (sec.addr ? ', ' + esc(sec.addr) : '') + '».</p>' : '<p class="note">Гриф коммерческой тайны не задан: заполните обладателя в «Настройках», иначе колонтитул будет без него.</p>') +
+      '<div class="actions"><button class="btn" id="pdfC">Отмена</button><button class="btn primary" id="pdfOk">Сохранить PDF</button></div>', (m) => {
+      $('#pdfC', m).onclick = closeModal;
+      $('#pdfOk', m).onclick = () => { const o = { to: $('#pdfTo', m).value.trim() || S.me.name, label: $('#pdfLabel', m).value.trim(), wm: $('#pdfWm', m).checked }; closeModal(); exportPDF(o).catch((err) => toast('Экспорт не удался: ' + err.message)); };
+    });
+  }
+  async function exportPDF(opts) {
+    opts = opts || { to: S.me.name, label: '', wm: true };
     toast('Готовлю PDF…');
     const lib = await loadLib('jspdf');
-    const paper = C.PAPER[P().rules.paper] || C.PAPER.letter;
-    const doc = new lib.jsPDF({ unit: 'pt', format: [paper.w * 72, paper.h * 72] });
+    const paper = C.paperOf(P().rules);
+    const F = paper.fmt;
+    const W = paper.w * 72, H = paper.h * 72;
+    const doc = new lib.jsPDF({ unit: 'pt', format: [W, H] });
     doc.addFileToVFS('FreeMono.ttf', window.FONT_FREEMONO); doc.addFont('FreeMono.ttf', 'FreeMono', 'normal');
     doc.addFileToVFS('FreeMonoBold.ttf', window.FONT_FREEMONOBOLD); doc.addFont('FreeMonoBold.ttf', 'FreeMono', 'bold');
     doc.setFont('FreeMono', 'normal'); doc.setFontSize(12);
-    // title page
+    const today = new Date().toLocaleDateString('ru-RU');
+    const sec = P().secret || {};
+    const stamp = () => {
+      // footer: trade-secret notice (98-ФЗ: owner and address) and the recipient of this copy
+      doc.setFontSize(8);
+      const foot = (sec.org ? 'КОММЕРЧЕСКАЯ ТАЙНА. Обладатель: ' + sec.org + (sec.addr ? ', ' + sec.addr : '') + '. ' : '') + 'Экземпляр: ' + opts.to + ' · ' + today;
+      doc.text(doc.splitTextToSize(foot, W - 2 * 54), W / 2, H - 0.45 * 72, { align: 'center' });
+      doc.setFontSize(12);
+      if (!opts.wm) return;
+      doc.saveGraphicsState();
+      doc.setGState(new doc.GState({ opacity: 0.11 }));
+      doc.setFontSize(30);
+      const txt = opts.to + ' · ' + today;
+      doc.text(txt, W / 2, H / 2, { align: 'center', angle: 38 });
+      doc.text(txt, W / 2, H * 0.82, { align: 'center', angle: 38 });
+      doc.text(txt, W / 2, H * 0.18, { align: 'center', angle: 38 });
+      doc.restoreGraphicsState();
+      doc.setFontSize(12);
+    };
+    // title page: title and author centred, contacts bottom left, draft label and date bottom right (industry layout)
     doc.setFont('FreeMono', 'bold');
-    doc.text(C.up(P().name), paper.w * 36, 4 * 72, { align: 'center' });
+    doc.text(C.up(P().name), W / 2, 4 * 72, { align: 'center' });
     doc.setFont('FreeMono', 'normal');
-    doc.text('Серия ' + S.ep.number + (S.ep.title ? '. «' + S.ep.title + '»' : ''), paper.w * 36, 4 * 72 + 24, { align: 'center' });
-    if (P().author) doc.text(P().author, paper.w * 36, 4 * 72 + 60, { align: 'center' });
-    doc.text(new Date().toLocaleDateString('ru-RU'), 1.5 * 72, (paper.h - 1) * 72);
+    doc.text('Серия ' + S.ep.number + (S.ep.title ? '. «' + S.ep.title + '»' : ''), W / 2, 4 * 72 + 24, { align: 'center' });
+    if (P().author) doc.text(P().author, W / 2, 4 * 72 + 60, { align: 'center' });
+    const bottom = (paper.h - paper.bottom) * 72;
+    if (P().contact) doc.splitTextToSize(P().contact, 3.2 * 72).forEach((t, i) => doc.text(t, paper.left * 72, bottom - 36 + i * 12));
+    doc.text(opts.label || 'Рабочий драфт', W - paper.right * 72, bottom - 36, { align: 'right' });
+    doc.text(today, W - paper.right * 72, bottom - 24, { align: 'right' });
+    if (S.ep.lock) doc.text('Номера сцен залочены ' + new Date(S.ep.lock.at).toLocaleDateString('ru-RU'), W - paper.right * 72, bottom - 12, { align: 'right' });
+    stamp();
     const lay = S.st.lay;
-    const sceneN = {}; S.st.scenes.forEach((s) => { sceneN[s.from] = s.n; });
+    const sceneN = {}; S.st.scenes.forEach((s) => { sceneN[s.from] = s.num; });
     lay.pages.forEach((pg, k) => {
-      doc.addPage([paper.w * 72, paper.h * 72]);
-      if (k > 0) doc.text((k + 1) + '.', 7.5 * 72, 0.5 * 72 + 9, { align: 'right' });
+      doc.addPage([W, H]);
+      if (k > 0) doc.text((k + 1) + '.', (paper.w - paper.right) * 72, 0.5 * 72 + 9, { align: 'right' });
       let line = 0;
-      const base = 72 + 9.6;
+      const base = paper.top * 72 + 9.6;
       for (const it of pg.items) {
         line += it.sb;
-        const f = C.FMT[it.t] || C.FMT.action;
+        const f = F[it.t] || F.action;
         it.lines.forEach((tx, j) => {
           const y = base + (line + j) * 12;
           if (f.right) doc.text(tx, (f.indent + f.width / 10) * 72, y, { align: 'right' });
           else doc.text(tx, f.indent * 72, y);
-          if (j === 0 && it.t === 'scene' && sceneN[it.i] && !it.contd) { doc.text(String(sceneN[it.i]), 0.75 * 72, y); doc.text(String(sceneN[it.i]), 7.8 * 72, y, { align: 'right' }); }
+          if (j === 0 && it.t === 'scene' && sceneN[it.i] && !it.contd) { doc.text(String(sceneN[it.i]), (paper.left - 0.75) * 72, y); doc.text(String(sceneN[it.i]), (paper.w - paper.right + 0.3) * 72, y, { align: 'right' }); }
         });
         line += it.lines.length;
-        if (it.more) { doc.text('(ДАЛЬШЕ)', C.FMT.character.indent * 72, base + line * 12); line++; }
+        if (it.more) { doc.text('(ДАЛЬШЕ)', F.character.indent * 72, base + line * 12); line++; }
       }
+      stamp();
     });
     const blob = doc.output('blob');
-    await saveFile(fileBase() + '.pdf', blob, 'application/pdf');
+    await saveFile(fileBase() + (opts.to && opts.to !== S.me.name ? ' — ' + opts.to.replace(/[\\/:*?"<>|«»@]/g, '_') : '') + '.pdf', blob, 'application/pdf');
   }
   function bibleHTML() {
     const ps = projectCharStats();
@@ -1301,8 +1417,11 @@
   $('#btnSettings').onclick = () => {
     const r = P().rules;
     const num = (k, label, step) => '<label>' + label + '<input type="number" step="' + (step || 1) + '" data-r="' + k + '" value="' + r[k] + '"></label>';
-    modal('<h2>Настройки</h2><div class="h">Вы</div><div class="form-grid"><label>Имя в комментариях<input type="text" id="meName" value="' + esc(S.me.name) + '"></label><label>Роль<select id="meRole"><option value="writer">Сценарист</option><option value="editor">Редактор</option><option value="producer">Продюсер (только комментарии)</option></select></label><label>Тема<select id="meTheme"><option value="">Как в системе</option><option value="light">Светлая</option><option value="dark">Тёмная</option></select></label></div>' +
-      '<div class="h">Проект</div><div class="form-grid"><label>Название<input type="text" id="prName" value="' + esc(P().name) + '"></label><label>Автор (титульный лист)<input type="text" id="prAuthor" value="' + esc(P().author || '') + '"></label><label>Формат листа<select data-r="paper"><option value="letter">Letter, как Final Draft (54 строки)</option><option value="a4">A4 (58 строк)</option></select></label>' + num('minPerPage', 'Минут на страницу', 0.05) + '</div>' +
+    const sec = P().secret || {};
+    modal('<h2>Настройки</h2><div class="h">Вы</div><div class="form-grid"><label>Имя в комментариях<input type="text" id="meName" value="' + esc(S.me.name) + '"></label><label>Роль<select id="meRole"><option value="writer">Сценарист</option><option value="editor">Редактор</option><option value="producer">Продюсер (комментарии, лок, удаление)</option><option value="reader">Читатель (только чтение, PDF со знаком)</option></select></label><label>Тема<select id="meTheme"><option value="">Как в системе</option><option value="light">Светлая</option><option value="dark">Тёмная</option></select></label>' +
+      '<label>Шрифт на экране<select id="meFont"><option value="courier">Courier New (как Final Draft)</option><option value="liberation">Liberation Mono (метрики Courier New, кириллица)</option><option value="ptmono">PT Mono (веб-шрифт)</option><option value="freemono">FreeMono (встроенный)</option></select></label><label class="row"><input type="checkbox" id="meWm"> Водяной знак на экране (имя и дата)</label></div>' +
+      '<div class="h">Проект</div><div class="form-grid"><label>Название<input type="text" id="prName" value="' + esc(P().name) + '"></label><label>Автор (титульный лист)<input type="text" id="prAuthor" value="' + esc(P().author || '') + '"></label><label>Контакты (титульный лист, слева внизу)<input type="text" id="prContact" value="' + esc(P().contact || '') + '" placeholder="продюсер, телефон, почта"></label><label>Формат листа<select data-r="paper"><option value="letter">Letter, как Final Draft (54 строки)</option><option value="a4">A4, отступы Final Draft (58 строк)</option><option value="a4ru">A4 «американка» (русский стандарт, 58 строк)</option></select></label>' + num('minPerPage', 'Минут на страницу', 0.05) + '</div>' +
+      '<div class="h">Гриф коммерческой тайны (98-ФЗ, ст. 10)</div><div class="form-grid"><label>Обладатель информации<input type="text" id="secOrg" value="' + esc(sec.org || '') + '" placeholder="ООО «Студия»"></label><label>Место нахождения<input type="text" id="secAddr" value="' + esc(sec.addr || '') + '" placeholder="г. Москва, ул. …"></label></div><p class="note">Гриф печатается в нижнем колонтитуле каждой страницы PDF вместе с именем получателя. Без режима коммерческой тайны у владельца сценария привлечь к ответственности за утечку практически невозможно.</p>' +
       '<div class="h">Линии (сюжетные линии или съёмочные группы)</div><div id="lineEditor"></div><div class="row"><button class="btn small" id="addLine">+ Линия</button><button class="btn small ghost" id="lineExample">Пример: «Служанка»</button></div>' +
       '<div class="form-grid"><label>Спецкатегория (шаг 0)<input type="text" id="lrSpecialName" value="' + esc(((P().lineRules || {}).special || {}).name || '') + '" placeholder="ИИ"></label><label>Её слова в заголовке<input type="text" id="lrSpecialKw" value="' + esc(C.listOf(((P().lineRules || {}).special || {}).keywords).join(', ')) + '" placeholder="ЗАЯВОЧНЫЙ ПЛАН, ФЛЭШФОРВАРД"></label><label>Приоритет при пересечении<select id="lrPriority"></select></label>' + num('lineTolerance', 'Допуск по линиям, п.п.') + '</div>' +
       '<div class="h">Производственные параметры</div><div class="form-grid">' + num('maxPages', 'Макс. страниц в серии') + num('scenesPerPage', 'Сцен на страницу, не больше', 0.1) + num('shortSceneSec', 'Короткая сцена, сек') + num('maxShortScenes', 'Допустимо коротких сцен') +
@@ -1311,6 +1430,7 @@
       num('ratePav', 'Выработка павильон, мин/смена', 0.5) + num('rateInt', 'Выработка интерьер, мин/смена', 0.5) + num('rateExt', 'Выработка натура, мин/смена', 0.5) + num('specialFactor', 'Замедление на сложных сценах, раз', 0.1) + '</div>' +
       '<div class="actions"><button class="btn" id="stReset">Вернуть шаблон студии</button><button class="btn" id="stC">Отмена</button><button class="btn primary" id="stOk">Сохранить</button></div>', (m) => {
       $('#meRole', m).value = S.me.role; $('[data-r=paper]', m).value = r.paper; $('#meTheme', m).value = ls.get('draft.theme', '');
+      $('#meFont', m).value = ls.get('draft.font', 'courier'); $('#meWm', m).checked = !!ls.get('draft.wm', false);
       renderLineEditor(m, P().lines || [], (P().lineRules || {}).priority);
       $('#addLine', m).onclick = () => renderLineEditor(m, readLineEditor(m).concat([{ name: '', target: null }]), $('#lrPriority', m).value);
       $('#lineExample', m).onclick = () => {
@@ -1322,12 +1442,14 @@
       $('#stOk', m).onclick = () => {
         S.me = { name: $('#meName', m).value.trim() || 'Без имени', role: $('#meRole', m).value }; ls.set('draft.me', S.me);
         const th = $('#meTheme', m).value; ls.set('draft.theme', th); applyTheme();
-        P().name = $('#prName', m).value.trim() || P().name; P().author = $('#prAuthor', m).value.trim();
+        ls.set('draft.font', $('#meFont', m).value); applyFont(); ls.set('draft.wm', $('#meWm', m).checked);
+        P().name = $('#prName', m).value.trim() || P().name; P().author = $('#prAuthor', m).value.trim(); P().contact = $('#prContact', m).value.trim();
+        P().secret = { org: $('#secOrg', m).value.trim(), addr: $('#secAddr', m).value.trim() };
         P().lines = readLineEditor(m);
         P().lineRules = { special: { name: $('#lrSpecialName', m).value.trim(), keywords: C.listOf($('#lrSpecialKw', m).value) }, priority: $('#lrPriority', m).value };
         $$('[data-r]', m).forEach((i) => { P().rules[i.dataset.r] = i.type === 'number' ? parseFloat(i.value) : i.value; });
         P().episodes.forEach((e) => delete e._st);
-        closeModal(); applyRole(); renderProjectSelect(); recompute(); renderEpisodes();
+        closeModal(); applyRole(); applyPaper(); renderProjectSelect(); recompute(); renderEpisodes(); fitPage();
       };
     });
   };
@@ -1358,11 +1480,41 @@
     }).filter((l) => l.name);
   }
   function applyRole() {
-    const ro = S.me.role === 'producer';
+    const ro = !canEdit();
     ed.setAttribute('contenteditable', ro ? 'false' : 'true');
     $('#elemSelect').disabled = ro;
+    const reader = S.me.role === 'reader';
+    $('#btnImport').hidden = reader; $('#btnDraft').hidden = reader; $('#btnHistory').hidden = reader;
+    $$('[data-exp]').forEach((b) => { b.hidden = reader && b.dataset.exp !== 'pdf'; });
+    applyWatermark();
   }
   function applyTheme() { const th = ls.get('draft.theme', ''); if (th) document.documentElement.dataset.theme = th; else delete document.documentElement.dataset.theme; }
+  // the sheet follows the page template: paper size, margins and element indents come from Core.PAPER
+  function applyPaper() {
+    const paper = C.paperOf(P().rules);
+    const F = paper.fmt;
+    const st = document.documentElement.style;
+    st.setProperty('--pg-w', paper.w + 'in'); st.setProperty('--pg-h', paper.h + 'in');
+    st.setProperty('--pg-top', paper.top + 'in'); st.setProperty('--pg-bottom', paper.bottom + 'in');
+    st.setProperty('--pg-left', paper.left + 'in'); st.setProperty('--pg-right', paper.right + 'in');
+    st.setProperty('--tx-w', (paper.w - paper.left - paper.right) + 'in');
+    for (const [t, k] of [['character', 'char'], ['paren', 'paren'], ['dialogue', 'dial'], ['transition', 'tr']]) {
+      st.setProperty('--in-' + k, (F[t].indent - paper.left) + 'in');
+      st.setProperty('--w-' + k, (F[t].width / 10) + 'in');
+    }
+  }
+  const FONTS = { courier: '"Courier New", Courier, "Liberation Mono", "FreeMonoEmb", monospace', liberation: '"Liberation Mono", "Courier New", "FreeMonoEmb", monospace', ptmono: '"PT Mono", "Courier New", "FreeMonoEmb", monospace', freemono: '"FreeMonoEmb", "FreeMono", "Courier New", monospace' };
+  function applyFont() {
+    const f = ls.get('draft.font', 'courier');
+    if (f === 'ptmono' && !$('#ptmonoLink')) { const l = document.createElement('link'); l.id = 'ptmonoLink'; l.rel = 'stylesheet'; l.href = 'https://fonts.googleapis.com/css2?family=PT+Mono&display=swap'; document.head.appendChild(l); }
+    document.documentElement.style.setProperty('--script', FONTS[f] || FONTS.courier);
+  }
+  // on-screen watermark: name and date over the sheet, so a screenshot names its owner (readers always, others by choice)
+  function applyWatermark() {
+    const on = S.me.role === 'reader' || !!ls.get('draft.wm', false);
+    const pg = $('#page');
+    if (on) pg.dataset.wm = S.me.name + ' · ' + new Date().toLocaleDateString('ru-RU'); else delete pg.dataset.wm;
+  }
   $('#elemSelect').onchange = (e) => { const el = ed.querySelector('.b.cur') || curBlockEl(); if (el) { setType(el, e.target.value); setCaret(el.dataset.id, el.textContent.length); } };
   $('#btnFocus').onclick = () => document.body.classList.toggle('focus');
 
@@ -1381,15 +1533,17 @@
     }
     S.db = db;
     await trashLoad();
+    applyFont();
     openProject(db.currentProjectId);
     renderRight();
     fitPage();
   }
   // the sheet keeps its real 8.5in geometry and is scaled to fit narrow windows
   S.zoom = 1;
+  const pagePx = () => Math.round(C.paperOf(P().rules).w * 96);
   function fitPage() {
     const w = $('#desk').clientWidth - 24;
-    const z = Math.max(0.4, Math.min(1, w / 816));
+    const z = Math.max(0.4, Math.min(1, w / pagePx()));
     S.zoom = z;
     $('#page').style.transform = z === 1 ? '' : 'scale(' + z + ')';
     sizePage();
@@ -1397,11 +1551,11 @@
   }
   function sizePage() {
     const z = S.zoom || 1;
-    $('#pageWrap').style.width = (816 * z) + 'px';
+    $('#pageWrap').style.width = (pagePx() * z) + 'px';
     $('#pageWrap').style.height = z === 1 ? '' : ($('#page').offsetHeight * z) + 'px';
   }
   window.addEventListener('resize', debounce(fitPage, 150));
   $('#btnFocus').addEventListener('click', () => setTimeout(fitPage, 50));
   boot();
-  window.__draft = { S, C, recompute, readBlocks, histAdd, histLoad, showHistory, showTrash, autoSnap };
+  window.__draft = { S, C, recompute, readBlocks, histAdd, histLoad, showHistory, showTrash, autoSnap, lockNumbers, omitScene, restoreScene, restoreMissing, exportPDF, applyRole, applyPaper, renderScenes };
 })();

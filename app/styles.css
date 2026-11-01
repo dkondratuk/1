@@ -110,25 +110,32 @@ body.focus .left, body.focus .right { display: none; }
   color: var(--muted); border-bottom: 1px solid var(--line); background: var(--desk); flex: none; font-variant-numeric: tabular-nums;
 }
 .desk { flex: 1; overflow: auto; padding: 24px 12px 120px; }
-.page-wrap { margin: 0 auto; width: 8.5in; }
+/* page geometry comes from the template (Core.PAPER) through custom properties set by applyPaper(); defaults = Letter / Final Draft */
+.page-wrap { margin: 0 auto; width: var(--pg-w, 8.5in); }
 .page {
-  position: relative; width: 8.5in; box-sizing: border-box; transform-origin: 0 0; background: var(--paper); color: var(--paper-ink);
-  box-shadow: var(--shadow); padding: 1in 1in 1in 1.5in; min-height: 11in;
+  position: relative; width: var(--pg-w, 8.5in); box-sizing: border-box; transform-origin: 0 0; background: var(--paper); color: var(--paper-ink);
+  box-shadow: var(--shadow); padding: var(--pg-top, 1in) var(--pg-right, 1in) var(--pg-bottom, 1in) var(--pg-left, 1.5in); min-height: var(--pg-h, 11in);
 }
-.editor { outline: none; font-family: var(--script); font-size: 12pt; line-height: 12pt; width: 6in; caret-color: var(--accent); }
+.page[data-wm]::after {
+  content: attr(data-wm); position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none;
+  transform: rotate(-32deg); font-family: var(--script); font-size: 34pt; color: var(--paper-ink); opacity: .07; white-space: nowrap; overflow: hidden; z-index: 2;
+}
+.editor { outline: none; font-family: var(--script); font-size: 12pt; line-height: 12pt; width: var(--tx-w, 6in); caret-color: var(--accent); }
 .editor .b { white-space: pre-wrap; word-wrap: break-word; position: relative; min-height: 12pt; }
-.editor .t-scene { margin-top: 24pt; text-transform: uppercase; width: 6in; }
-.editor .t-action { margin-top: 12pt; width: 6in; }
-.editor .t-character { margin-top: 12pt; margin-left: 2.2in; width: 3.8in; text-transform: uppercase; }
-.editor .t-paren { margin-left: 1.6in; width: 2.5in; }
-.editor .t-dialogue { margin-left: 1in; width: 3.5in; }
-.editor .t-transition { margin-top: 12pt; margin-left: 4in; width: 2in; text-align: right; text-transform: uppercase; }
+.editor .t-scene { margin-top: 24pt; text-transform: uppercase; width: var(--tx-w, 6in); }
+.editor .t-action { margin-top: 12pt; width: var(--tx-w, 6in); }
+.editor .t-character { margin-top: 12pt; margin-left: var(--in-char, 2.2in); width: var(--w-char, 3.8in); text-transform: uppercase; }
+.editor .t-paren { margin-left: var(--in-paren, 1.6in); width: var(--w-paren, 2.5in); }
+.editor .t-dialogue { margin-left: var(--in-dial, 1in); width: var(--w-dial, 3.5in); }
+.editor .t-transition { margin-top: 12pt; margin-left: var(--in-tr, 4in); width: var(--w-tr, 2in); text-align: right; text-transform: uppercase; }
 .editor .b:first-child { margin-top: 0; }
 .editor .t-scene::after {
   content: attr(data-n); position: absolute; left: -0.75in; top: 0; color: var(--muted); font-size: 12pt;
 }
+.editor .t-scene.omit { color: var(--muted); text-decoration: line-through; }
+.sc.omitted .hd { color: var(--muted); text-decoration: line-through; }
 .editor .b[data-pb]::before {
-  content: "стр. " attr(data-pb); display: block; margin: 6pt -1in 12pt -1.5in; padding: 2px 1in 0 0; text-align: right;
+  content: "стр. " attr(data-pb); display: block; margin: 6pt calc(0px - var(--pg-right, 1in)) 12pt calc(0px - var(--pg-left, 1.5in)); padding: 2px var(--pg-right, 1in) 0 0; text-align: right;
   border-top: 1px dashed var(--line); color: var(--muted); font-family: var(--mono); font-size: 10px; line-height: 14px;
   text-transform: none; white-space: normal;
 }
