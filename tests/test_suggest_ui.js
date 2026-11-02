@@ -7,7 +7,7 @@ const os = require('os');
 let fails = 0, n = 0; const ok = (c, m, extra) => { n++; if (!c) { fails++; console.log('FAIL', m, extra === undefined ? '' : JSON.stringify(extra)); } else console.log('ok  ', m); };
 (async () => {
   const b = await chromium.launch(); const p = await b.newPage({ viewport: { width: 1440, height: 900 } });
-  await p.addInitScript(() => { try { localStorage.setItem('draft.started', 'true'); } catch (e) {} });
+  await p.addInitScript(() => { try { localStorage.setItem('draft.started', 'true'); localStorage.setItem('draft.team', 'true'); } catch (e) {} });
   const errs = []; p.on('pageerror', (e) => errs.push(e.message));
   const nm = path.resolve(__dirname, '../node_modules') + '/';
   await p.route('**/*', (r) => { const u = r.request().url();

@@ -82,7 +82,7 @@
     TAB.stale = true;
     rescueTab();
     if (S.ep) applyRole();
-    banner('Драфт изменён в другой вкладке. Здесь теперь только чтение, чтобы не затереть те правки. Обновите страницу — несохранённый текст этой вкладки появится в драфтах серии.', true);
+    banner('Драфт изменён в другой вкладке. Здесь теперь только чтение, чтобы не затереть те правки. Обновите страницу — несохранённый текст этой вкладки появится в версиях серии.', true);
   };
   const ls = { get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } }, set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* ignore */ } } };
 
@@ -195,7 +195,10 @@
   // (no <ins>, no proposed elements), readSugs the suggestions; S.ep.sugs follows the screen after every such edit, so a
   // re-render from the model keeps them. Typing inside a proposed element is plain typing (it is all a proposal).
   const canSuggest = () => !TAB.stale && S.me.role !== 'reader';
-  const sgOn = () => !!S.sgMode && canSuggest();
+  // team features (suggestion mode, «Кто правил», private versions) need shared work in the cloud; until then they stay
+  // out of sight. Suggestions already in a project can still be accepted or rejected.
+  const TEAM = ls.get('draft.team', false) === true; // a hidden switch, for tests and for the cloud version
+  const sgOn = () => TEAM && !!S.sgMode && canSuggest();
   const sgMarked = (el) => !!(el && el.dataset && (el.dataset.sga || el.dataset.sgr || el.querySelector('.sg')));
   const sgTitle = (by, at, what) => what + ': ' + (by || 'без имени') + (at ? ', ' + fmtDate(at) : '');
   function segsHTML(segs) {
@@ -451,6 +454,7 @@
   }
   function toggleSuggest(on) {
     const v = on == null ? !S.sgMode : !!on;
+    if (v && !TEAM) return;
     if (v && readOnly('Режим предложений')) return;
     S.sgMode = v; ls.set('draft.suggest', v);
     acHide(); applyRole(); syncViewMenu(); if (S.st) renderRuler(); renderSgInfo();
@@ -511,6 +515,9 @@
     const n = (S.ep && S.ep.sugs || []).length, el = $('#sgInfo'); if (!el) return;
     const on = sgOn();
     el.hidden = !on && !n;
+    // without the team features the list shows up only while there are suggestions to decide on
+    const tab = document.querySelector('[data-rtab="suggest"]');
+    if (!TEAM) { $('#mSugList').hidden = !n; if (tab) tab.hidden = !n; if (!n && S.rtab === 'suggest') { S.rtab = 'stats'; if (S.st) renderRight(); } }
     el.textContent = (on ? 'Режим предложений' : 'Предложения') + (n ? ': ' + C.sgList(S.ep.blocks, S.ep.sugs).length : '');
     el.classList.toggle('on', on);
     document.body.classList.toggle('sg-mode', on);
@@ -996,7 +1003,7 @@
   }
   // «Кто правил» (View): the text tinted by its last editor, with a legend; the stamps come from readBlocks
   const WHO_COLORS = 8;
-  const whoOn = () => !!ls.get('draft.who', false);
+  const whoOn = () => TEAM && !!ls.get('draft.who', false);
   function toggleWho(on) { ls.set('draft.who', on == null ? !whoOn() : !!on); decorateWho(); syncViewMenu(); }
   function decorateWho() {
     const on = whoOn() && S.ep, els = accEls(), lg = $('#whoLegend');
@@ -1153,17 +1160,13 @@
     const drafts = p.episodes.flatMap((e) => visibleDrafts(e).map((d) => ({ d, e }))).sort((a, b) => b.d.date - a.d.date).slice(0, 5);
     $('#pane-episodes').innerHTML = Object.keys(seasons).sort((a, b) => a - b).map((s) => '<div class="season"><h4>Сезон ' + s + '</h4>' +
       seasons[s].map((e) => '<div class="ep' + (e === S.ep ? ' active' : '') + '" data-id="' + e.id + '"><span class="t">Серия ' + e.number + (e.title ? '. ' + esc(e.title) : '') + '</span><span class="m" data-meta="' + e.id + '"></span></div>').join('') + '</div>').join('') +
-      '<div class="row"><button class="btn small" id="addEp">+ Серия</button><button class="btn small ghost" id="addSeason">+ Сезон</button><button class="btn small ghost" id="renEp">Серия…</button><button class="btn small ghost danger" id="delEp">Удалить серию</button></div>' +
-      '<div class="row"><button class="btn small ghost" id="projBtn">Проект: ' + esc(P().name) + '…</button><button class="btn small ghost" id="trashBtn">Корзина' + (S.trash.items.length ? ' · ' + S.trash.items.length : '') + '</button><button class="btn small ghost" id="histBtn">История</button></div>' +
-      '<div class="h">Последние драфты</div>' + (drafts.length ? drafts.map((x) => '<div class="draftrow" data-ep="' + x.e.id + '" data-d="' + x.d.id + '"><span>С' + x.e.season + 'Е' + x.e.number + ' · ' + esc(x.d.name) + '</span><span class="muted mono">' + fmtDate(x.d.date) + '</span></div>').join('') : '<p class="note">Драфтов пока нет. Кнопка «Сохранить драфт» фиксирует версию серии с датой.</p>');
+      // the rest (season, project, trash, history, deleting) lives in the menus, as in Final Draft
+      '<div class="row"><button class="btn small" id="addEp">+ Серия</button><button class="btn small ghost" id="renEp" title="Сезон, номер, название; удаление серии">Серия…</button></div>' +
+      '<div class="h">Последние версии</div>' + (drafts.length ? drafts.map((x) => '<div class="draftrow" data-ep="' + x.e.id + '" data-d="' + x.d.id + '"><span>С' + x.e.season + 'Е' + x.e.number + ' · ' + esc(x.d.name) + '</span><span class="muted mono">' + fmtDate(x.d.date) + '</span></div>').join('') : '<p class="note">Версий пока нет. Файл → «Сохранить версию» (Ctrl+Shift+S) фиксирует серию с датой; автоснимки — в «Истории».</p>');
+    $('#mTrash').textContent = 'Корзина…' + (S.trash.items.length ? ' (' + S.trash.items.length + ')' : '');
     renderEpisodesMeta();
     $$('.ep', $('#pane-episodes')).forEach((x) => x.onclick = () => { recompute(); openEpisode(x.dataset.id); });
     $('#addEp').onclick = () => { if (readOnly('Новая серия')) return; recompute(); const e = newEpisode(p, S.ep ? S.ep.season : 1, ''); openEpisode(e.id); };
-    $('#addSeason').onclick = () => { if (readOnly('Новый сезон')) return; recompute(); const e = newEpisode(p, Math.max(...p.episodes.map((x) => x.season)) + 1, ''); openEpisode(e.id); };
-    $('#delEp').onclick = () => deleteEpisode();
-    $('#projBtn').onclick = () => projectModal();
-    $('#trashBtn').onclick = () => showTrash();
-    $('#histBtn').onclick = () => showHistory();
     $('#renEp').onclick = () => readOnly('Изменение серии') || modal('<h2>Серия</h2><div class="form-grid"><label>Сезон<input type="number" id="reS" min="1" value="' + S.ep.season + '"></label><label>Номер серии<input type="number" id="reN" min="1" value="' + S.ep.number + '"></label><label>Название<input type="text" id="reT" value="' + esc(S.ep.title) + '"></label></div><div class="actions"><button class="btn danger" id="reDel">Удалить серию</button><button class="btn" id="reC">Отмена</button><button class="btn primary" id="reOk">Сохранить</button></div>', (m) => {
       $('#reC', m).onclick = closeModal;
       $('#reOk', m).onclick = () => { S.ep.season = +$('#reS', m).value || 1; S.ep.number = +$('#reN', m).value || 1; S.ep.title = $('#reT', m).value.trim(); sortEpisodes(p); closeModal(); renderEpisodes(); renderTitle(); persist(); };
@@ -1175,7 +1178,7 @@
   function deleteEpisode() {
     const p = P();
     if (!canDelete()) return needProducer('Серию ' + S.ep.number + ' может удалить только продюсер.');
-    modal('<h2>Удалить серию ' + S.ep.number + (S.ep.title ? ' «' + esc(S.ep.title) + '»' : '') + '?</h2><p class="note">Серия с текстом, драфтами, комментариями и историей уйдёт в корзину на ' + TRASH_DAYS + ' дней. Вернуть её можно кнопкой «Корзина» в списке серий.</p><div class="actions"><button class="btn" id="deC">Отмена</button><button class="btn danger" id="deOk">В корзину</button></div>', (m) => {
+    modal('<h2>Удалить серию ' + S.ep.number + (S.ep.title ? ' «' + esc(S.ep.title) + '»' : '') + '?</h2><p class="note">Серия с текстом, версиями, комментариями и историей уйдёт в корзину на ' + TRASH_DAYS + ' дней. Вернуть её можно кнопкой «Корзина» в списке серий.</p><div class="actions"><button class="btn" id="deC">Отмена</button><button class="btn danger" id="deOk">В корзину</button></div>', (m) => {
       $('#deC', m).onclick = closeModal;
       $('#deOk', m).onclick = async () => {
         closeModal(); recompute();
@@ -1456,6 +1459,7 @@
     return '<option value="">' + (s.lineAuto ? 'авто: ' + esc(s.line) + ' (' + esc(s.lineAuto) + ')' : '— не задана —') + '</option>' + names.map((n) => '<option value="' + esc(n) + '"' + (!s.lineAuto && s.line === n ? ' selected' : '') + '>' + esc(n) + '</option>').join('');
   };
   function linesHTML(st) {
+    if ((!st.lines || !st.lines.length) && !canLock()) return '';
     if (!st.lines || !st.lines.length) return '<div class="rule info"><div class="top"><span class="dot"></span><span class="title">Линии не настроены</span></div><div class="note">Если проект снимают две группы или нужно следить за балансом сюжетных линий, задайте линии и правила: сцены распределятся автоматически.</div><div class="row"><button class="btn small" id="setupLines">Настроить линии</button></div></div>';
     const tot = st.lines.reduce((a, l) => a + l.share, 0) + st.unassigned.share || 1;
     return '<div class="h">Линии · доля материала</div><div class="stack">' + st.lines.map((l) => '<i style="width:' + (l.share / tot * 100) + '%;background:' + l.color + '"></i>').join('') + '</div>' +
@@ -2027,7 +2031,7 @@
           C.BREAKDOWN.filter((c) => o.cats[c.id]).map((c) => '<div class="bdrow">' + bdSw(c.id) + esc(c.name) + ': ' + o.cats[c.id].map(esc).join(', ') + '</div>').join('') + '</div>').join('')
         : '<p class="note">Разбивка — список того, что нужно для съёмки каждой сцены: реквизит, костюм, грим, транспорт, массовка, трюки… Выделите слово в тексте и выберите категорию (Производство → «Пометить для разбивки…», Ctrl+Alt+T). Трюки и животные из разбивки учитываются в параметрах студии как особые сцены.</p>') +
       (lost.length ? '<div class="h">Текст удалён · ' + lost.length + '</div>' + lost.map((t) => '<div class="bdit">' + bdSw(t.cat) + '<span class="nm">«' + esc(t.quote) + '» <span class="small muted">' + esc((C.BD[t.cat] || {}).name || '') + '</span></span>' + (ro ? '' : '<button class="btn small ghost danger" data-untag="' + t.id + '" title="Убрать пометку">×</button>') + '</div>').join('') +
-        '<p class="note">Этих слов больше нет в тексте. Если текст вернётся (Ctrl+Z, драфт), пометка встанет на место.</p>' : '') +
+        '<p class="note">Этих слов больше нет в тексте. Если текст вернётся (Ctrl+Z, версия), пометка встанет на место.</p>' : '') +
       '<p class="note">Excel: листы «Сцены», «Объекты», «Персонажи» и «Разбивка» — для КПП и сметы.</p>';
     $$('[data-jump]', pane).forEach((b) => { b.onclick = () => { if (b.dataset.jump) { S.curScene = b.dataset.jump; jumpTo(b.dataset.jump); } }; });
     $$('[data-untag]', pane).forEach((b) => { b.onclick = () => removeTag(b.dataset.untag); });
@@ -2187,10 +2191,10 @@
 
   // ---------- drafts ----------
   $('#btnDraft').onclick = () => {
-    if (readOnly('Сохранение драфта')) return;
+    if (readOnly('Сохранение версии')) return;
     recompute();
     const cur = C.revName(S.ep.revLevel || 0), n = visibleDrafts(S.ep).filter((d) => d.name.indexOf(cur + ', версия ') === 0).length + 1;
-    modal('<h2>Сохранить версию драфта</h2><label class="small muted">Название<input type="text" id="drName" value="' + esc(cur + ', версия ' + n) + '"></label><label class="small muted">Что изменилось<textarea id="drNote" rows="2" placeholder="Например: правки продюсера по 3 и 5 сценам"></textarea></label><label class="row small"><input type="checkbox" id="drPrivate"> Личный: альтернативный вариант, который видите только вы (' + esc(S.me.name) + ')</label><label class="row small" id="drInFileRow" hidden><input type="checkbox" id="drInFile"> Включать в файл проекта</label><div class="actions"><button class="btn" id="drList">Все драфты</button><button class="btn" id="drC">Отмена</button><button class="btn primary" id="drOk">Сохранить</button></div>', (m) => {
+    modal('<h2>Сохранить версию</h2><label class="small muted">Название<input type="text" id="drName" value="' + esc(cur + ', версия ' + n) + '"></label><label class="small muted">Что изменилось<textarea id="drNote" rows="2" placeholder="Например: правки продюсера по 3 и 5 сценам"></textarea></label><label class="row small"' + (TEAM ? '' : ' hidden') + '><input type="checkbox" id="drPrivate"> Личный: альтернативный вариант, который видите только вы (' + esc(S.me.name) + ')</label><label class="row small" id="drInFileRow" hidden><input type="checkbox" id="drInFile"> Включать в файл проекта</label><div class="actions"><button class="btn" id="drList">Все драфты</button><button class="btn" id="drC">Отмена</button><button class="btn primary" id="drOk">Сохранить</button></div>', (m) => {
       $('#drC', m).onclick = closeModal; $('#drList', m).onclick = () => showDrafts();
       $('#drPrivate', m).onchange = (e) => { $('#drInFileRow', m).hidden = !e.target.checked; };
       $('#drOk', m).onclick = () => {
@@ -2205,23 +2209,23 @@
   const visibleDrafts = (ep) => (ep.drafts || []).filter((d) => !d.private || mine(d));
   function showDrafts(openId) {
     const ds = visibleDrafts(S.ep).sort((a, b) => b.date - a.date);
-    modal('<h2>Драфты · серия ' + S.ep.number + '</h2>' + (ds.length ? '<div class="tbl-wrap"><table class="t"><thead><tr><th>Драфт</th><th>Дата</th><th class="n">Стр.</th><th class="n">Сцен</th><th></th></tr></thead><tbody>' +
-      ds.map((d) => '<tr><td><b>' + esc(d.name) + '</b>' + (d.note ? '<div class="small muted">' + esc(d.note) + '</div>' : '') + '<div class="small muted">' + esc(d.author || '') + (d.private ? ' · <span class="chip priv">личный</span>' : '') + '</div>' + (mine(d) && !/^Авто:/.test(d.name) ? '<div class="small"><label><input type="checkbox" data-priv="' + d.id + '"' + (d.private ? ' checked' : '') + '> Личный</label>' + (d.private ? ' <label><input type="checkbox" data-infile="' + d.id + '"' + (d.inFile ? ' checked' : '') + '> в файл проекта</label>' : '') + '</div>' : '') + '</td><td class="mono small">' + fmtDate(d.date) + '</td><td class="n">' + (d.pages || 0).toFixed(1) + '</td><td class="n">' + (d.scenes || 0) + '</td><td><div class="row"><button class="btn small" data-cmp="' + d.id + '">Сравнить с текущим</button><button class="btn small" data-rest="' + d.id + '">Восстановить</button></div></td></tr>').join('') +
-      '</tbody></table></div>' : '<p class="note">У этой серии ещё нет драфтов.</p>') + '<div id="drDiff"></div><div class="actions"><button class="btn" id="drClose">Закрыть</button></div>', (m) => {
+    modal('<h2>Версии · серия ' + S.ep.number + '</h2>' + (ds.length ? '<div class="tbl-wrap"><table class="t"><thead><tr><th>Версия</th><th>Дата</th><th class="n">Стр.</th><th class="n">Сцен</th><th></th></tr></thead><tbody>' +
+      ds.map((d) => '<tr><td><b>' + esc(d.name) + '</b>' + (d.note ? '<div class="small muted">' + esc(d.note) + '</div>' : '') + '<div class="small muted">' + esc(d.author || '') + (d.private ? ' · <span class="chip priv">личный</span>' : '') + '</div>' + (TEAM && mine(d) && !/^Авто:/.test(d.name) ? '<div class="small"><label><input type="checkbox" data-priv="' + d.id + '"' + (d.private ? ' checked' : '') + '> Личный</label>' + (d.private ? ' <label><input type="checkbox" data-infile="' + d.id + '"' + (d.inFile ? ' checked' : '') + '> в файл проекта</label>' : '') + '</div>' : '') + '</td><td class="mono small">' + fmtDate(d.date) + '</td><td class="n">' + (d.pages || 0).toFixed(1) + '</td><td class="n">' + (d.scenes || 0) + '</td><td><div class="row"><button class="btn small" data-cmp="' + d.id + '">Сравнить с текущим</button><button class="btn small" data-rest="' + d.id + '">Восстановить</button></div></td></tr>').join('') +
+      '</tbody></table></div>' : '<p class="note">У этой серии ещё нет сохранённых версий.</p>') + '<div id="drDiff"></div><div class="actions"><button class="btn" id="drClose">Закрыть</button></div>', (m) => {
       $('#drClose', m).onclick = closeModal;
       $$('[data-cmp]', m).forEach((b) => b.onclick = () => { $('#drDiff', m).innerHTML = diffHTML(ds.find((d) => d.id === b.dataset.cmp)); });
       $$('[data-priv]', m).forEach((c) => c.onchange = () => { if (readOnly('Драфт')) return; const d = ds.find((x) => x.id === c.dataset.priv); if (!d || !mine(d)) return; if (c.checked) d.private = true; else { delete d.private; delete d.inFile; } persist(); renderEpisodes(); showDrafts(); });
       $$('[data-infile]', m).forEach((c) => c.onchange = () => { const d = ds.find((x) => x.id === c.dataset.infile); if (!d || !mine(d)) return; if (c.checked) d.inFile = true; else delete d.inFile; persist(); });
       $$('[data-rest]', m).forEach((b) => b.onclick = () => {
-        if (readOnly('Восстановление драфта')) return;
+        if (readOnly('Восстановление версии')) return;
         const d = ds.find((x) => x.id === b.dataset.rest);
         S.ep.drafts.push({ id: C.uid(), name: 'Авто: перед восстановлением «' + d.name + '»', date: Date.now(), author: S.me.name, ...epCopy(S.ep), pages: S.st.pages, scenes: S.st.scenes.length });
-        histAdd(S.ep, 'перед восстановлением драфта', true);
+        histAdd(S.ep, 'перед восстановлением версии', true);
         const meta0 = S.ep.sceneMeta || {};
         pushUndo(); S.ep.blocks = JSON.parse(JSON.stringify(d.blocks)); S.ep.sceneMeta = JSON.parse(JSON.stringify(d.sceneMeta || {}));
-        const kept = restoreLock(d, 'восстановлен драфт «' + d.name + '»', meta0);
-        audit('rollback', 'Восстановлен драфт «' + d.name + '»');
-        closeModal(); renderEditor(); recompute(); renderEpisodes(); toast('Восстановлен «' + d.name + '». Текущий текст сохранён отдельным драфтом.' + keptNote(kept));
+        const kept = restoreLock(d, 'восстановлена версия «' + d.name + '»', meta0);
+        audit('rollback', 'Восстановлена версия «' + d.name + '»');
+        closeModal(); renderEditor(); recompute(); renderEpisodes(); toast('Восстановлен «' + d.name + '». Текущий текст сохранён отдельной версией.' + keptNote(kept));
       });
       if (openId && ds.find((d) => d.id === openId)) $('#drDiff', m).innerHTML = diffHTML(ds.find((d) => d.id === openId));
     });
@@ -2525,7 +2529,7 @@
       (thin ? '<div class="rule warn" id="hsThin"><div class="top"><span class="dot"></span><span class="title">Не хватило места: удалено старых автоснимков — ' + thin.n + '</span><span class="val">' + fmtDate(thin.at) + '</span></div><div class="note">Снимки «перед …» сохранены. Освободите место в браузере или сохраните файл проекта.</div></div>' : '') +
       (all.length ? '<div class="row"><label class="small muted">Автор <select id="hsAuthor"><option value="">все</option>' + authors.map((a) => '<option>' + esc(a) + '</option>').join('') + '</select></label><span class="small muted" id="hsCount"></span></div>' +
         '<input type="range" class="hs" id="hsRange" min="0" max="' + (all.length - 1) + '" value="' + (all.length - 1) + '" title="Влево — раньше, вправо — позже"><div class="hist-wrap"><div class="hist-list" id="hsList"></div><div class="hist-view" id="hsView"></div></div>' : '<p class="note">Снимков пока нет: они появятся после первых 15 минут работы над серией.</p>') +
-      '<div class="actions"><button class="btn" id="hsDrafts">Именованные драфты</button><button class="btn" id="hsClose">Закрыть</button></div>', (m) => {
+      '<div class="actions"><button class="btn" id="hsDrafts">Сохранённые версии</button><button class="btn" id="hsClose">Закрыть</button></div>', (m) => {
       $('#hsClose', m).onclick = closeModal; $('#hsDrafts', m).onclick = () => showDrafts();
       if (!all.length) return;
       let list = all;
@@ -2850,7 +2854,7 @@
         if ((proj.auditLog || []).length) ex.auditLog = C.mergeAuditLog(ex.auditLog, proj.auditLog);
         if (proj.secret && !ex.secret) ex.secret = proj.secret;
         Object.assign(ex.chars, Object.assign({}, proj.chars, ex.chars)); Object.assign(ex.locs, Object.assign({}, proj.locs, ex.locs));
-        toast('Проект обновлён: добавлено ' + added + ' комментариев, ответов и драфтов' + (sgAdded ? ', предложений: ' + sgAdded : '') + (replaced ? '; текст серий (' + replaced + ') заменён более новым из файла, прежний сохранён в драфтах' : ''));
+        toast('Проект обновлён: добавлено ' + added + ' комментариев, ответов и версий' + (sgAdded ? ', предложений: ' + sgAdded : '') + (replaced ? '; текст серий (' + replaced + ') заменён более новым из файла, прежний сохранён в драфтах' : ''));
         openProject(ex.id);
       } else { S.db.projects.push(proj); S.db.currentEpId = null; openProject(proj.id); toast('Проект «' + proj.name + '» открыт'); }
       persist();
@@ -3197,18 +3201,26 @@
     const ro = !canEdit();
     // in the suggestion mode a producer may type too: every edit is then a suggestion
     ed.setAttribute('contenteditable', ro && !sgOn() ? 'false' : 'true');
-    $('#mSuggest').hidden = S.me.role === 'reader';
+    $('#mSuggest').hidden = !TEAM || S.me.role === 'reader';
+    $('#mWho').hidden = !TEAM;
     $('#elemSelect').disabled = ro;
     const reader = S.me.role === 'reader';
     $('#btnImport').hidden = reader; $('#btnDraft').hidden = reader; $('#btnHistory').hidden = reader;
     $$('[data-exp]').forEach((b) => { b.hidden = reader && b.dataset.exp !== 'pdf'; });
     // menu and toolbar entries that change the project are hidden for a reader, so the menus only offer what works
-    ['#tbImport', '#tbDraft', '#tbHistory', '#mNewEp', '#mNewSeason', '#mTrash', '#mExportFt', '#mLock', '#mPageLock', '#mRenum', '#mTag', '#tbTag', '#mUndo', '#mRedo', '#tbUndo', '#tbRedo', '#mReplace'].forEach((q) => { const x = $(q); if (x) x.hidden = reader; });
+    ['#tbImport', '#mNewEp', '#mNewSeason', '#mTrash', '#mExportFt', '#mLock', '#mPageLock', '#mRenum', '#mTag', '#mUndo', '#mRedo', '#tbUndo', '#tbRedo', '#mReplace'].forEach((q) => { const x = $(q); if (x) x.hidden = reader; });
     if (!$('#findBox').hidden) { $('#fbRepl').disabled = ro; $('#fbRep').disabled = ro; $('#fbAll').disabled = ro; fbStatus(); }
     $$('[data-type]').forEach((b) => { b.disabled = ro; });
     if ($('#mDual')) $('#mDual').disabled = ro;
     // the audit log is for the producer and the editor
     if ($('#mAudit')) $('#mAudit').hidden = !canLock();
+    // production tools are for the producer and the editor: a writer's menus stay short (Final Draft-like)
+    const prod = canLock();
+    ['#mLock', '#mRenum', '#mRevisions', '#mPageLock', '#mSides', '#mTag', '#mBreakdown', '#mLines', '#mFilmtoolz', '#mExportFt'].forEach((q) => { const x = $(q); if (x) x.hidden = !prod; });
+    $$('[data-exp=xlsx]').forEach((b) => { b.hidden = !prod; });
+    const bdTab = document.querySelector('[data-rtab="breakdown"]'); if (bdTab) bdTab.hidden = !prod;
+    if (!prod && S.rtab === 'breakdown') { S.rtab = 'stats'; if (S.st) renderRight(); }
+    if ($('#mBdMarks')) $('#mBdMarks').hidden = !prod;
     $$('[data-paper]').forEach((b) => { b.disabled = reader; });
     applyWatermark();
   }
@@ -3330,13 +3342,13 @@
   window.addEventListener('blur', () => { altAlone = false; });
   // toolbar buttons repeat the most used menu commands
   const same = (from, to) => { $(from).onclick = () => $(to).click(); };
-  same('#tbUndo', '#mUndo'); same('#tbRedo', '#mRedo'); same('#tbComment', '#btnComment'); same('#tbDraft', '#btnDraft'); same('#tbHistory', '#btnHistory'); same('#tbImport', '#btnImport');
+  same('#tbUndo', '#mUndo'); same('#tbRedo', '#mRedo'); same('#tbComment', '#btnComment'); same('#tbImport', '#btnImport');
   $('#mUndo').onclick = () => { undo(); ed.focus(); };
   $('#mRedo').onclick = () => { redo(); ed.focus(); };
   $('#mFind').onclick = () => openFind(false);
   $('#mReplace').onclick = () => openFind(true);
   $('#mNewEp').onclick = () => $('#addEp').click();
-  $('#mNewSeason').onclick = () => $('#addSeason').click();
+  $('#mNewSeason').onclick = () => { if (readOnly('Новый сезон')) return; recompute(); const p = P(), e = newEpisode(p, Math.max(...p.episodes.map((x) => x.season)) + 1, ''); openEpisode(e.id); };
   $('#mDrafts').onclick = () => showDrafts();
   $('#mTrash').onclick = () => readOnly('Корзина') || showTrash();
   $('#mEpisode').onclick = () => $('#renEp').click();
@@ -3364,7 +3376,6 @@
   $('#mSugList').onclick = () => showRight('suggest');
   $('#sgInfo').onclick = () => showRight('suggest');
   $('#mAudit').onclick = () => showAudit();
-  same('#tbTag', '#mTag');
   $('#mDual').onclick = () => toggleDual();
   $('#mPageLock').onclick = () => { if (S.ep.pageLock) unlockPages(); else if (!readOnly('Лок страниц')) lockPages(); };
   $$('[data-type]').forEach((b) => b.onclick = () => { const el = ed.querySelector('.b.cur') || curBlockEl(); if (el) { setType(el, b.dataset.type); setCaret(el.dataset.id, el.textContent.length); } });
@@ -3466,7 +3477,7 @@
     }
     if (mod && e.shiftKey && (e.key === 'S' || e.key === 'Ы' || e.key === 's' || e.key === 'ы')) { e.preventDefault(); $('#btnDraft').click(); }
     // Ctrl+Shift+E: the suggestion mode on and off (Word's key for Track Changes)
-    if (mod && e.shiftKey && !e.altKey && (e.code === 'KeyE' || /^[eу]$/i.test(e.key))) { e.preventDefault(); toggleSuggest(); }
+    if (TEAM && mod && e.shiftKey && !e.altKey && (e.code === 'KeyE' || /^[eу]$/i.test(e.key))) { e.preventDefault(); toggleSuggest(); }
     // Ctrl+S saves wherever the focus is (the editor's keydown bubbles here too), so the browser's «Save page as» never opens
     if (mod && !e.shiftKey && !e.altKey && S.db && (e.code === 'KeyS' && !/^[a-z]$/i.test(e.key) || /^[sы]$/i.test(e.key))) { e.preventDefault(); recompute(); persist.cancel(); DB.put('db', S.db).then((ok) => toast(saved(ok) ? 'Сохранено на этом компьютере' : TAB.stale ? 'Не сохранено: Драфт изменён в другой вкладке. Обновите страницу.' : 'Не удалось сохранить в браузере. Сохраните файл проекта: «Экспорт → Файл проекта».')); }
     if (mod && (e.key === '=' || e.key === '+')) { e.preventDefault(); $('#mZoomIn').click(); }
@@ -3498,7 +3509,7 @@
         try { Object.keys(localStorage).filter((k) => k === 'draft.pending' || k.startsWith('draft.rescue.')).forEach((k) => localStorage.removeItem(k)); } catch (e) { /* ignore */ }
         if (rescue) await DB.del('rescue');
       }
-      if (n) setTimeout(() => toast('Восстановлен несохранённый текст из другой вкладки: ' + n + ' — смотрите драфты и замечания серий.'), 800);
+      if (n) setTimeout(() => toast('Восстановлен несохранённый текст из другой вкладки: ' + n + ' — смотрите версии серии и замечания серий.'), 800);
     }
     await trashLoad();
     applyFont();

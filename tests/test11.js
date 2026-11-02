@@ -25,24 +25,24 @@ const { chromium } = require('playwright');
   // history now has the 'перед откатом сцены' entry
   console.log('hist n', await p.evaluate(async()=>(await window.__draft.histLoad(window.__draft.S.ep)).map(h=>h.reason).join(', ')));
   // writer cannot delete
-  await p.click('#delEp'); await p.waitForTimeout(200); console.log('writer delete modal:', await p.locator('#modal h2').innerText()); await p.click('#npC');
+  await p.locator('#renEp').dispatchEvent('click'); await p.locator('#reDel').dispatchEvent('click'); await p.waitForTimeout(200); console.log('writer delete modal:', await p.locator('#modal h2').innerText()); await p.click('#npC');
   // switch role to producer
   await p.evaluate(()=>{ window.__draft.S.me={name:'Продюсер Петров',role:'producer'}; });
-  await p.click('#delEp'); await p.waitForTimeout(200); console.log('producer modal:', await p.locator('#modal h2').innerText());
+  await p.locator('#renEp').dispatchEvent('click'); await p.locator('#reDel').dispatchEvent('click'); await p.waitForTimeout(200); console.log('producer modal:', await p.locator('#modal h2').innerText());
   await p.click('#deOk'); await p.waitForTimeout(600);
-  console.log('eps after delete', await p.locator('.ep').count(), 'trash btn', await p.locator('#trashBtn').innerText());
-  await p.click('#trashBtn'); await p.waitForTimeout(300); await p.screenshot({path:'out/trash1.png'});
+  console.log('eps after delete', await p.locator('.ep').count(), 'trash btn', await p.locator('#mTrash').textContent());
+  await p.locator('#mTrash').dispatchEvent('click'); await p.waitForTimeout(300); await p.screenshot({path:'out/trash1.png'});
   console.log('trash rows', await p.locator('.trash-row').count());
   await p.click('[data-restore]'); await p.waitForTimeout(600);
   console.log('eps after restore', await p.locator('.ep').count(), await p.locator('#epTitle').innerText());
   console.log('hist after restore', await p.evaluate(async()=>(await window.__draft.histLoad(window.__draft.S.ep)).length));
   // delete the project
-  await p.click('#projBtn'); await p.click('#pmDel'); await p.click('#pmDel2'); await p.waitForTimeout(600);
-  console.log('project after delete', await p.locator('#projBtn').innerText());
-  await p.click('#trashBtn'); await p.waitForTimeout(300); await p.click('[data-restore]'); await p.waitForTimeout(800);
-  console.log('project after restore', await p.locator('#projBtn').innerText(), await p.locator('.ep').count());
+  await p.locator('#mProject').dispatchEvent('click'); await p.click('#pmDel'); await p.click('#pmDel2'); await p.waitForTimeout(600);
+  console.log('project after delete', await p.locator('#projectSelect option:checked').innerText());
+  await p.locator('#mTrash').dispatchEvent('click'); await p.waitForTimeout(300); await p.click('[data-restore]'); await p.waitForTimeout(800);
+  console.log('project after restore', await p.locator('#projectSelect option:checked').innerText(), await p.locator('.ep').count());
   // reload: trash and history persist
   await p.reload(); await p.waitForTimeout(800);
-  console.log('after reload hist', await p.evaluate(async()=>(await window.__draft.histLoad(window.__draft.S.ep)).length), await p.locator('#trashBtn').innerText());
+  console.log('after reload hist', await p.evaluate(async()=>(await window.__draft.histLoad(window.__draft.S.ep)).length), await p.locator('#mTrash').textContent());
   await b.close();
 })();

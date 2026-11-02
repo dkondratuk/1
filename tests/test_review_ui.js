@@ -13,7 +13,7 @@ let fails = 0, n = 0; const ok = (c, m, x) => { n++; if (!c) { fails++; console.
   const errs = [];
   const fresh = async () => {
     const ctx = await b.newContext({ viewport: { width: 1440, height: 900 } });
-    await ctx.addInitScript(() => { try { localStorage.setItem('draft.started', 'true'); } catch (e) {} });
+    await ctx.addInitScript(() => { try { localStorage.setItem('draft.started', 'true'); localStorage.setItem('draft.team', 'true'); } catch (e) {} });
     await ctx.route('**/*', (r) => { const u = r.request().url();
       if (u.includes('jszip.min.js')) return r.fulfill({ path: nm + 'jszip/dist/jszip.min.js', contentType: 'text/javascript' });
       if (u.includes('jspdf.umd.min.js')) return r.fulfill({ path: nm + 'jspdf/dist/jspdf.umd.min.js', contentType: 'text/javascript' });

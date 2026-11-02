@@ -71,7 +71,7 @@ async function fresh(b) { const ctx = await b.newContext(); await setup(ctx); co
       ok(/Не удалось/.test(await p.textContent('#toast')), 'Ctrl+S does not claim success');
       const n0 = await p.evaluate(() => window.__draft.S.project.episodes.length);
       await p.evaluate(() => { const d = window.__draft; d.S.me = Object.assign({}, d.S.me, { role: 'producer' }); d.applyRole(); });
-      await p.locator('#delEp').dispatchEvent('click');
+      await p.locator('#renEp').dispatchEvent('click'); await p.locator('#reDel').dispatchEvent('click');
       await p.locator('#deOk').dispatchEvent('click'); await p.waitForTimeout(500);
       ok(await p.evaluate(() => window.__draft.S.project.episodes.length) === n0, 'episode stays when the trash cannot be written');
       await p.evaluate(() => { IDBObjectStore.prototype.put = window.__put; });

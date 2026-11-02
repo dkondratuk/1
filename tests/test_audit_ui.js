@@ -9,7 +9,7 @@ let fails = 0, n = 0; const ok = (c, m, x) => { n++; if (!c) { fails++; console.
 (async () => {
   const b = await chromium.launch();
   const ctx = await b.newContext({ viewport: { width: 1440, height: 900 } });
-  await ctx.addInitScript(() => { try { localStorage.setItem('draft.started', 'true'); } catch (e) {} });
+  await ctx.addInitScript(() => { try { localStorage.setItem('draft.started', 'true'); localStorage.setItem('draft.team', 'true'); } catch (e) {} });
   await ctx.route('**/*', (r) => { const u = r.request().url();
     if (u.includes('jszip.min.js')) return r.fulfill({ path: nm + 'jszip/dist/jszip.min.js', contentType: 'text/javascript' });
     if (u.includes('jspdf.umd.min.js')) return r.fulfill({ path: nm + 'jspdf/dist/jspdf.umd.min.js', contentType: 'text/javascript' });
@@ -147,7 +147,7 @@ let fails = 0, n = 0; const ok = (c, m, x) => { n++; if (!c) { fails++; console.
   // the second episode: deleted and brought back
   const ep2 = await ev(() => window.__draft.S.project.episodes[1].id);
   await ev((id) => { window.__draft.recompute(); window.__draft.openEpisode(id); }, ep2); await p.waitForTimeout(300);
-  await p.locator('#delEp').dispatchEvent('click'); await p.locator('#deOk').dispatchEvent('click'); await p.waitForTimeout(700);
+  await p.locator('#renEp').dispatchEvent('click'); await p.locator('#reDel').dispatchEvent('click'); await p.locator('#deOk').dispatchEvent('click'); await p.waitForTimeout(700);
   await ev(() => window.__draft.showTrash()); await p.waitForTimeout(300);
   await p.locator('[data-restore]').first().dispatchEvent('click'); await p.waitForTimeout(700);
   // an unlock recorded only in an episode (from before the project log)

@@ -244,7 +244,7 @@ let fails = 0, n = 0; const ok = (c, m) => { n++; if (!c) { fails++; console.log
   await role('editor', 'Редактор Иванова');
   await menu('#mDrafts'); await p.locator('[data-rest]').nth(1).click(); await p.waitForTimeout(300);
   st = await ev(() => { const e = window.__draft.S.ep; return { pl: !!e.pageLock, lv: e.revLevel || 0, log: (e.pageLockLog || []).map((l) => l.reason) }; });
-  ok(!st.pl && !st.lv && st.log.length === 1 && /восстановлен драфт «До лока»/.test(st.log[0]), 'editor restore drops the lock and logs it: ' + JSON.stringify(st));
+  ok(!st.pl && !st.lv && st.log.length === 1 && /восстановлена версия «До лока»/.test(st.log[0]), 'editor restore drops the lock and logs it: ' + JSON.stringify(st));
 
   ok(!errs.length, 'no page errors: ' + errs.join('; '));
   console.log(fails ? fails + ' of ' + n + ' revision UI checks FAILED' : 'all ' + n + ' revision UI checks passed');

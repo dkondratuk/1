@@ -62,7 +62,7 @@ let fails = 0, n = 0; const ok = (c, m) => { n++; if (!c) { fails++; console.log
 
   // 3. toolbar button, note, category by click
   await select('сырники');
-  await p.locator('#tbTag').dispatchEvent('click'); await p.waitForTimeout(150);
+  await p.locator('#mTag').dispatchEvent('click'); await p.waitForTimeout(150);
   await p.fill('#bdNote', 'на 3 дубля');
   await p.click('#bdPop [data-bdcat=props]'); await p.waitForTimeout(150);
   t = await tags();
@@ -146,7 +146,7 @@ let fails = 0, n = 0; const ok = (c, m) => { n++; if (!c) { fails++; console.log
   t = await tags();
   ok(t.length === 5 && t[4].cat === 'costume', 'producer can tag');
   await role('reader', 'Читатель');
-  ok(await p.locator('#mTag').isHidden() && await p.locator('#tbTag').isHidden() && await p.locator('#menubar [data-exp=xlsx]').isHidden(), 'reader: no tag entries and no export');
+  ok(await p.locator('#mTag').isHidden() && await p.locator('#menubar [data-exp=xlsx]').isHidden(), 'reader: no tag entries and no export');
   await select('Учительница'); await p.keyboard.press('Control+Alt+t'); await p.waitForTimeout(150);
   ok(await p.locator('#bdPop').isHidden() && (await tags()).length === 5, 'reader: Ctrl+Alt+T does nothing');
   await menu('#mBreakdown');
@@ -163,7 +163,7 @@ let fails = 0, n = 0; const ok = (c, m) => { n++; if (!c) { fails++; console.log
   // the save is written before the reload, and the reloaded page has booted before it is read
   await p.waitForFunction(() => /Сохранено/.test(document.querySelector('#toast').textContent), null, { timeout: 5000 }).catch(() => {});
   await p.reload(); await p.waitForFunction(() => window.__draft && window.__draft.S.ep, null, { timeout: 5000 }).catch(() => {}); await p.waitForTimeout(500);
-  ok((await tags()).length === 5 && await hl('costume') === 1, 'tags survive a reload, marks on');
+  { const tn = (await tags()).length, hc = await hl('costume'); ok(tn === 5 && hc === 1, 'tags survive a reload, marks on: ' + tn + ' tags, ' + hc + ' costume marks'); }
 
   // 12. regressions: cut and paste, a double space, the occurrence of a repeated word, Enter in the note, Ctrl+Z for a producer
   const setBlocks = (bl) => ev((bl) => {
