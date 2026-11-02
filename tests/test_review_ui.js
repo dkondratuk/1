@@ -1,7 +1,6 @@
-// Review fixes, UI: a tab that adopts another tab's data does not write over its snapshots; «Заменить все» keeps other
-// users' suggestions; a restore keeps (writer) or logs (producer) the numbering lock; the safety copy of replaced text is
-// never only a private draft; «перед …» snapshots of other episodes are kept; a character rename reaches scene cards
-// (extras) and relationships
+// Review fixes, UI: a tab that adopts another tab's data does not write over its snapshots; a restore keeps (writer) or
+// logs (producer) the numbering lock; the safety copy of replaced text is a draft in the project file; «перед …» snapshots
+// of other episodes are kept; a character rename reaches scene cards (extras) and relationships
 const { chromium } = require('playwright');
 const path = require('path'), fs = require('fs'), os = require('os');
 const nm = path.resolve(__dirname, '../node_modules') + '/';
@@ -13,7 +12,7 @@ let fails = 0, n = 0; const ok = (c, m, x) => { n++; if (!c) { fails++; console.
   const errs = [];
   const fresh = async () => {
     const ctx = await b.newContext({ viewport: { width: 1440, height: 900 } });
-    await ctx.addInitScript(() => { try { localStorage.setItem('draft.started', 'true'); localStorage.setItem('draft.team', 'true'); } catch (e) {} });
+    await ctx.addInitScript(() => { try { localStorage.setItem('draft.started', 'true'); } catch (e) {} });
     await ctx.route('**/*', (r) => { const u = r.request().url();
       if (u.includes('jszip.min.js')) return r.fulfill({ path: nm + 'jszip/dist/jszip.min.js', contentType: 'text/javascript' });
       if (u.includes('jspdf.umd.min.js')) return r.fulfill({ path: nm + 'jspdf/dist/jspdf.umd.min.js', contentType: 'text/javascript' });
@@ -42,33 +41,7 @@ let fails = 0, n = 0; const ok = (c, m, x) => { n++; if (!c) { fails++; console.
     await ctx.close();
   }
 
-  // 2. «Заменить все» and «Заменить» in the open episode keep another user's pending suggestion
-  {
-    const { ctx, p } = await fresh();
-    await role(p, 'editor', 'Редактор');
-    const info = await p.evaluate(() => { const d = window.__draft; const b = d.S.ep.blocks.find((x) => x.t === 'action' && x.x.length > 20);
-      const w = b.x.split(/\s+/).find((t) => /^[А-Яа-яЁё]{4,}$/.test(t));
-      d.S.ep.sugs = [{ id: 'sgX', k: 'ins', bid: b.id, off: b.x.length, x: ' ПРЕДЛОЖЕНИЕ_ВАСИ', ctx: b.x.slice(-12), by: 'Вася', at: Date.now() }];
-      d.renderEditor(); d.recompute(); return { bid: b.id, w }; });
-    await p.keyboard.press('Control+f'); await p.waitForTimeout(150);
-    await p.evaluate((w) => { const s = (q, v) => { const el = document.querySelector(q); el.value = v; el.dispatchEvent(new Event(el.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true })); };
-      document.getElementById('findBox').hidden = false; s('#fbScope', 'ep'); s('#fbType', ''); s('#fbFind', w); s('#fbRepl', w + 'Ъ'); }, info.w);
-    await p.locator('#fbAll').dispatchEvent('click'); await p.waitForTimeout(300);
-    const r = await p.evaluate(([bid, w]) => { const d = window.__draft, status = document.getElementById('fbStatus').textContent; d.recompute(); const b = d.S.ep.blocks.find((x) => x.id === bid); return { status, sugs: (d.S.ep.sugs || []).map((s) => s.id), gone: d.S.ep.sugGone || [], text: b.x.includes(w + 'Ъ'), screen: document.querySelector('#editor [data-id="' + bid + '"]').textContent }; }, [info.bid, info.w]);
-    ok(/Заменено: 1/.test(r.status) && r.text, '«Заменить все» replaced the accepted text', r);
-    ok(r.sugs.includes('sgX') && !r.gone.includes('sgX') && /ПРЕДЛОЖЕНИЕ_ВАСИ/.test(r.screen), 'the suggestion survives «Заменить все» and stays on screen', r);
-    // single «Заменить» on the same element
-    await p.evaluate((w) => { const s = (q, v) => { const el = document.querySelector(q); el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); }; s('#fbFind', w + 'Ъ'); s('#fbRepl', w + 'Ё'); }, info.w);
-    await p.locator('#fbNext').dispatchEvent('click'); await p.waitForTimeout(150);
-    await p.locator('#fbRep').dispatchEvent('click'); await p.waitForTimeout(300);
-    const r2 = await p.evaluate(([bid, w]) => { const d = window.__draft; d.recompute(); const b = d.S.ep.blocks.find((x) => x.id === bid); return { sugs: (d.S.ep.sugs || []).map((s) => s.id), text: b.x.includes(w + 'Ё'), screen: document.querySelector('#editor [data-id="' + bid + '"]').textContent }; }, [info.bid, info.w]);
-    ok(r2.text && r2.sugs.includes('sgX') && /ПРЕДЛОЖЕНИЕ_ВАСИ/.test(r2.screen), 'the suggestion survives a single «Заменить»', r2);
-    await p.evaluate(() => window.__draft.undo()); await p.waitForTimeout(200);
-    ok(await p.evaluate((w) => window.__draft.readBlocks().some((x) => x.x.includes(w + 'Ъ')), info.w), 'Ctrl+Z undoes the replace');
-    await ctx.close();
-  }
-
-  // 3. restoring a draft or a snapshot from before the numbering lock
+  // 2. restoring a draft or a snapshot from before the numbering lock
   for (const r of ['producer', 'writer']) {
     const { ctx, p } = await fresh();
     await role(p, 'producer', 'Продюсер');
@@ -101,8 +74,8 @@ let fails = 0, n = 0; const ok = (c, m, x) => { n++; if (!c) { fails++; console.
     await ctx.close();
   }
 
-  // 4. the safety copy of text replaced by a newer project file is a draft everyone sees, even when a private draft
-  //    of someone else holds the same text
+  // 3. text replaced by a newer project file is kept in a version everyone sees and the project file carries (a saved
+  //    version with the same text counts, so it is not copied twice)
   {
     const { ctx, p } = await fresh();
     const F = path.join(tmp, 'newer.json');
@@ -110,19 +83,20 @@ let fails = 0, n = 0; const ok = (c, m, x) => { n++; if (!c) { fails++; console.
     fs.writeFileSync(F, await p.evaluate(() => { const d = window.__draft; const pr = JSON.parse(JSON.stringify(d.S.project, (k, v) => (k === '_st' ? undefined : v))); const e = pr.episodes.find((x) => x.id === d.S.ep.id); e.blocks = e.blocks.concat([{ id: 'zz9', t: 'action', x: 'ТЕКСТ_ИЗ_ФАЙЛА' }]); e.textAt = Date.now() + 60000; e.drafts = []; return JSON.stringify({ app: 'draft', version: 1, project: pr }); }));
     await role(p, 'writer', 'Аня');
     await p.evaluate(() => document.getElementById('btnDraft').click()); await p.waitForTimeout(150);
-    await p.evaluate(() => { document.getElementById('drPrivate').checked = true; document.getElementById('drOk').click(); });
+    await p.evaluate(() => { document.getElementById('drOk').click(); });
     await role(p, 'writer', 'Боря');
     await p.evaluate(() => document.getElementById('btnDraft').click()); await p.waitForTimeout(150);
-    ok(/версия 1$/.test(await p.inputValue('#drName')), 'version numbering counts only drafts this user sees', await p.inputValue('#drName'));
+    ok(/версия 2$/.test(await p.inputValue('#drName')), 'version numbering counts every saved version of the episode', await p.inputValue('#drName'));
     await p.evaluate(() => window.__draft.S && document.getElementById('drC').click());
     await p.evaluate(() => { document.getElementById('fileInput').dataset.mode = 'project'; });
     await p.setInputFiles('#fileInput', F); await p.waitForTimeout(1000);
-    const r = await p.evaluate(() => { const d = window.__draft; return { vis: d.S.ep.drafts.filter((x) => !x.private || x.author === 'Боря').map((x) => x.name), file: d.projectFileData(d.S.project).episodes.find((e) => e.id === d.S.ep.id).drafts.map((x) => x.name), text: d.S.ep.blocks.some((x) => x.x === 'ТЕКСТ_ИЗ_ФАЙЛА') }; });
-    ok(r.text && r.vis.some((x) => /^Авто: перед открытием файла проекта/.test(x)) && r.file.some((x) => /^Авто: перед открытием файла проекта/.test(x)), 'the replaced text is kept as a draft Боря sees and the file carries', r);
+    const r = await p.evaluate(() => { const d = window.__draft; return { vis: d.S.ep.drafts.map((x) => x.name), file: d.projectFileData(d.S.project).episodes.find((e) => e.id === d.S.ep.id).drafts.map((x) => x.name), text: d.S.ep.blocks.some((x) => x.x === 'ТЕКСТ_ИЗ_ФАЙЛА') }; });
+    // Аня's saved version already holds that text, so no second («Авто: …») copy of it is made
+    ok(r.text && r.vis.length === 1 && /версия 1$/.test(r.vis[0]) && r.file.length === 1 && r.file[0] === r.vis[0], 'the replaced text is kept once, in a version everyone sees and the file carries', r);
     await ctx.close();
   }
 
-  // 5. a character rename across the project: «перед переименованием» snapshots of other episodes are keep (and survive
+  // 4. a character rename across the project: «перед переименованием» snapshots of other episodes are keep (and survive
   //    thinning), the scene cards' silent cast and the relationships follow the new name
   {
     const { ctx, p } = await fresh();
@@ -157,7 +131,7 @@ let fails = 0, n = 0; const ok = (c, m, x) => { n++; if (!c) { fails++; console.
     await ctx.close();
   }
 
-  // 6. «перед заменой» snapshots of other episodes are keep too
+  // 5. «перед заменой» snapshots of other episodes are keep too
   {
     const { ctx, p } = await fresh();
     await role(p, 'writer', 'Автор');

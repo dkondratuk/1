@@ -86,7 +86,7 @@
   };
   const ls = { get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } }, set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* ignore */ } } };
 
-  const S = { db: null, project: null, ep: null, st: null, rulesRes: [], me: ls.get('draft.me', { name: 'Сценарист', role: 'writer' }), activeComment: null, curScene: null, ltab: 'episodes', rtab: ls.get('draft.rtab', 'stats'), graphScope: 'project', selChar: null, sgMode: !!ls.get('draft.suggest', false) };
+  const S = { db: null, project: null, ep: null, st: null, rulesRes: [], me: ls.get('draft.me', { name: 'Сценарист', role: 'writer' }), activeComment: null, curScene: null, ltab: 'episodes', rtab: ls.get('draft.rtab', 'stats'), graphScope: 'project', selChar: null };
   const persist = debounce(() => { if (S.db) DB.put('db', S.db).then(saved); }, 700);
   // a failed save is never silent: the bar stays until a later save goes through
   function saved(ok) { if (!TAB.stale) banner(ok ? '' : 'Не удалось сохранить в браузере (нет места или хранилище недоступно). Сохраните файл проекта: «Экспорт → Файл проекта».'); return ok; }
@@ -173,6 +173,16 @@
     S.ep = ep; S.db.currentEpId = ep.id; S.undo = []; S.redo = []; S.activeComment = null; S.textSig = null;
     renderEditor(); recompute(true); renderEpisodes(); persist();
   }
+  // data of features that are gone (the suggestion mode, editor stamps, private versions): a project saved by an older
+  // version still opens, these fields are simply dropped
+  function dropTeamFields(p) {
+    for (const e of p.episodes || []) {
+      delete e.sugs; delete e.sugGone;
+      for (const b of e.blocks || []) { delete b.lastBy; delete b.lastAt; }
+      for (const d of e.drafts || []) { delete d.private; delete d.inFile; }
+    }
+    return p;
+  }
   function openProject(id) {
     S.project = S.db.projects.find((p) => p.id === id) || S.db.projects[0];
     S.db.currentProjectId = S.project.id;
@@ -187,368 +197,29 @@
   const ed = $('#editor');
   // a dual cue (the second speech of a dual dialogue pair) keeps its flag in data-dual, so readBlocks gives it back
   function blockHTML(b) { return '<div class="b t-' + b.t + '" data-t="' + b.t + '" data-id="' + b.id + '"' + (b.dual && b.t === 'character' ? ' data-dual="1"' : '') + '>' + (b.x ? esc(b.x) : '<br>') + '</div>'; }
-  function renderEditor() { ed.innerHTML = viewHTML(S.ep.blocks, S.ep.sugs); applyRole(); }
-  // ---------- suggestions (Правка → «Режим предложений», like Track Changes) ----------
-  // While the mode is on, typing and deleting do not change the text: they are recorded as this user's suggestions
-  // (Core: sgView, sgEdit, sgSerialize). On screen an inserted run is <ins class="sg">, a struck one <del class="sg">, a
-  // proposed element carries data-sga, an element proposed for deletion data-sgr. readBlocks reads the accepted text only
-  // (no <ins>, no proposed elements), readSugs the suggestions; S.ep.sugs follows the screen after every such edit, so a
-  // re-render from the model keeps them. Typing inside a proposed element is plain typing (it is all a proposal).
-  const canSuggest = () => !TAB.stale && S.me.role !== 'reader';
-  // team features (suggestion mode, «Кто правил», private versions) need shared work in the cloud; until then they stay
-  // out of sight. Suggestions already in a project can still be accepted or rejected.
-  const TEAM = ls.get('draft.team', false) === true; // a hidden switch, for tests and for the cloud version
-  const sgOn = () => TEAM && !!S.sgMode && canSuggest();
-  const sgMarked = (el) => !!(el && el.dataset && (el.dataset.sga || el.dataset.sgr || el.querySelector('.sg')));
-  const sgTitle = (by, at, what) => what + ': ' + (by || 'без имени') + (at ? ', ' + fmtDate(at) : '');
-  function segsHTML(segs) {
-    if (!segs || !segs.some((g) => g.x)) return '<br>';
-    return segs.map((g) => {
-      if (g.k === '=') return esc(g.x);
-      const tag = g.k === '+' ? 'ins' : 'del';
-      return '<' + tag + ' class="sg" data-sg="' + esc(g.id) + '" data-by="' + esc(g.by || '') + '" data-at="' + (g.at || 0) + '" title="' + esc(sgTitle(g.by, g.at, g.k === '+' ? 'Предложена вставка' : 'Предложено удаление')) + '">' + esc(g.x) + '</' + tag + '>';
-    }).join('');
-  }
-  function itemHTML(it) {
-    const b = it.b;
-    if (!it.add && !it.rm && it.segs.every((g) => g.k === '=')) return blockHTML(Object.assign({}, b, { x: C.sgText(it.segs, 'view') }));
-    let attrs = '';
-    if (it.add) attrs = ' data-sga="' + esc(it.add.id) + '" data-sgby="' + esc(it.add.by || '') + '" data-sgat="' + (it.add.at || 0) + '" title="' + esc(sgTitle(it.add.by, it.add.at, 'Предложен новый элемент')) + '"';
-    else if (it.rm) attrs = ' data-sgr="' + esc(it.rm.id) + '" data-sgrby="' + esc(it.rm.by || '') + '" data-sgrat="' + (it.rm.at || 0) + '" title="' + esc(sgTitle(it.rm.by, it.rm.at, 'Предложено удалить элемент')) + '"';
-    return '<div class="b t-' + b.t + '" data-t="' + b.t + '" data-id="' + b.id + '"' + (b.dual && b.t === 'character' ? ' data-dual="1"' : '') + attrs + '>' + segsHTML(it.add ? [{ k: '=', x: b.x || '' }] : it.segs) + '</div>';
-  }
-  function viewHTML(blocks, sugs) {
-    if (!(sugs || []).length) return blocks.map(blockHTML).join('');
-    return C.sgView(blocks, sugs).items.map(itemHTML).join('');
-  }
-  // a proposed element (by this user, or by whoever proposed the element it is split from)
-  function addHTML(b, by, at) { return itemHTML({ b, add: { id: C.uid(), by: by || S.me.name, at: at || Date.now() }, rm: null, segs: [] }); }
-  const newBlockHTML = (b, ref) => (sgOn() ? addHTML(b) : ref && ref.dataset.sga ? addHTML(b, ref.dataset.sgby, +ref.dataset.sgat) : blockHTML(b));
-  function segsOf(el) {
-    const out = [];
-    for (const n of el.childNodes) {
-      if (n.nodeType === 3) { if (n.data) out.push({ k: '=', x: n.data }); continue; }
-      if (n.nodeType !== 1 || n.nodeName === 'BR') continue;
-      const x = n.textContent; if (!x) continue;
-      if (n.classList.contains('sg') && n.dataset.sg) out.push({ k: n.nodeName === 'INS' ? '+' : '-', x, id: n.dataset.sg, by: n.dataset.by || '', at: +n.dataset.at || 0 });
-      else out.push({ k: '=', x });
-    }
-    return C.sgGroup(C.sgChars(out));
-  }
-  // the accepted text of an element (what readBlocks reads): inserted runs are not text yet
-  function accText(el) {
-    if (!el.querySelector('ins.sg')) return el.textContent;
-    let s = '';
-    for (const n of el.childNodes) if (!(n.nodeType === 1 && n.nodeName === 'INS' && n.classList.contains('sg'))) s += n.textContent;
-    return s;
-  }
-  // the elements of the text model, in the order of S.ep.blocks and the layout (proposed elements are not in it)
-  const accEls = () => [...ed.children].filter((el) => !el.dataset.sga);
-  function readSugs() {
-    if (!ed.querySelector('.sg, [data-sga], [data-sgr]')) return [];
-    const items = [];
-    for (const el of ed.children) {
-      if (!el.classList.contains('b') || !el.dataset.id) continue;
-      const add = el.dataset.sga ? { id: el.dataset.sga, by: el.dataset.sgby || '', at: +el.dataset.sgat || 0 } : null;
-      const rm = !add && el.dataset.sgr ? { id: el.dataset.sgr, by: el.dataset.sgrby || '', at: +el.dataset.sgrat || 0 } : null;
-      const b = { id: el.dataset.id, t: el.dataset.t || 'action', x: add ? el.textContent.replace(/\n/g, ' ') : '' };
-      if (el.dataset.dual) b.dual = true;
-      items.push({ b, add, rm, segs: !add && el.querySelector('.sg') ? segsOf(el) : null });
-    }
-    return C.sgSerialize(items).sugs;
-  }
-  function syncSugs() {
-    if (!S.ep) return;
-    const now = readSugs(), old = S.ep.sugs || [];
-    if (!now.length && !old.length) return;
-    C.sgTrackGone(S.ep, old, now);
-    if (now.length) S.ep.sugs = now; else delete S.ep.sugs;
-  }
-  function afterSgEdit() { syncSugs(); acHide(); scheduleRecompute(); }
-  const sgOpts = (extra) => Object.assign({ mode: sgOn() ? 'sug' : 'direct', by: S.me.name, at: Date.now(), uid: C.uid }, extra || {});
-  function blkOf(n) { while (n && n !== ed) { if (n.nodeType === 1 && n.classList && n.classList.contains('b')) return n; n = n.parentNode; } return null; }
-  // a DOM position as { el, off } (off: an offset in the element's text on screen)
-  function posOf(node, offset) {
-    if (node === ed) {
-      const kids = [...ed.children];
-      if (offset < kids.length) return { el: kids[offset], off: 0 };
-      const last = kids[kids.length - 1];
-      return last ? { el: last, off: last.textContent.length } : null;
-    }
-    const el = blkOf(node); if (!el) return null;
-    const r = document.createRange(); r.selectNodeContents(el);
-    try { r.setEnd(node, offset); } catch (e) { return { el, off: 0 }; }
-    return { el, off: r.toString().length };
-  }
-  function markRm(el) {
-    if (el.dataset.sgr || el.dataset.sga) return;
-    const at = Date.now();
-    el.dataset.sgr = C.uid(); el.dataset.sgrby = S.me.name; el.dataset.sgrat = at; el.title = sgTitle(S.me.name, at, 'Предложено удалить элемент');
-  }
-  // one edit from position s to position z, then text typed at the caret; back: a Backspace (the caret stays before
-  // what it struck). In the mode the struck text stays on screen; whole elements in between are proposed for deletion.
-  function sgRangeEdit(s, z, text, back) {
-    const o = sgOpts({ back }), sug = o.mode === 'sug';
-    const els = [...ed.children], i0 = els.indexOf(s.el), i1 = els.indexOf(z.el);
-    if (i0 < 0 || i1 < i0) return;
-    const edit = (el, a, b, txt) => {
-      if (el.dataset.sga) {
-        const x = el.textContent, add = String(txt || '').replace(/[\r\n]+/g, ' '), y = x.slice(0, a) + add + x.slice(b);
-        if (y) el.textContent = y; else el.innerHTML = '<br>';
-        return a + add.length;
-      }
-      const r = C.sgEdit(segsOf(el), a, b, txt, o);
-      el.innerHTML = segsHTML(r.segs);
-      return r.caret;
-    };
-    const first = s.el;
-    let caret;
-    if (i0 === i1) caret = edit(first, s.off, z.off, text);
-    else {
-      const last = z.el, lastAll = z.off >= last.textContent.length;
-      caret = edit(first, s.off, first.textContent.length, '');
-      for (let k = i0 + 1; k < i1; k++) { if (!sug || els[k].dataset.sga) els[k].remove(); else markRm(els[k]); }
-      if (sug) { if (lastAll && last.dataset.sga) last.remove(); else if (lastAll) markRm(last); else edit(last, 0, z.off, ''); }
-      else {
-        edit(last, 0, z.off, '');
-        const plain = (el) => !el.dataset.sga && !el.dataset.sgr;
-        if (plain(first) && plain(last)) { first.innerHTML = segsHTML(C.sgGroup(C.sgChars(segsOf(first)).concat(C.sgChars(segsOf(last))))); last.remove(); }
-        else if (!last.textContent.length) last.remove();
-      }
-      if (text) caret = edit(first, caret, caret, text);
-    }
-    setCaret(first.dataset.id, caret);
-    afterSgEdit();
-  }
-  // Backspace at the start of an element, Delete at its end
-  function sgBoundary(el, back) {
-    const sug = sgOn(), nb = back ? el.previousElementSibling : el.nextElementSibling;
-    if (sug) {
-      const gone = back ? el : nb;
-      if (gone && !gone.textContent.length) {
-        // an empty element: proposed for deletion (one's own proposed element simply goes)
-        pushUndo();
-        if (gone.dataset.sga) gone.remove(); else markRm(gone);
-        if (back && nb) setCaret(nb.dataset.id, nb.textContent.length);
-        afterSgEdit(); return;
-      }
-      // joining two elements is not recorded as a suggestion: the caret just moves
-      if (nb) setCaret(nb.dataset.id, back ? nb.textContent.length : 0);
-      return;
-    }
-    if (!nb || !canEdit()) return;
-    const a = back ? nb : el, z = back ? el : nb;
-    if (a.dataset.sga || a.dataset.sgr || z.dataset.sga || z.dataset.sgr) {
-      if (!z.textContent.length && z.dataset.sga) { pushUndo(); z.remove(); setCaret(a.dataset.id, a.textContent.length); afterSgEdit(); return; }
-      setCaret(nb.dataset.id, back ? nb.textContent.length : 0); return;
-    }
-    pushUndo();
-    const off = a.textContent.length;
-    a.innerHTML = segsHTML(C.sgGroup(C.sgChars(segsOf(a)).concat(C.sgChars(segsOf(z)))));
-    z.remove(); setCaret(a.dataset.id, off); afterSgEdit();
-  }
-  // beforeinput: true when the edit was taken over (in the mode, or next to suggestions outside it)
-  function sgBeforeInput(e) {
-    const t = e.inputType;
-    if (t === 'insertCompositionText' || !S.ep) return false;
-    const sug = sgOn(), sel = window.getSelection();
-    if (!sel.rangeCount) return false;
-    const r0 = sel.getRangeAt(0), isDel = /^delete/.test(t), back = /Backward/.test(t);
-    let tr = e.getTargetRanges ? e.getTargetRanges()[0] : null;
-    if (tr && !ed.contains(tr.startContainer)) tr = null;
-    let s, z;
-    if (tr && !(isDel && tr.collapsed)) { s = posOf(tr.startContainer, tr.startOffset); z = posOf(tr.endContainer, tr.endOffset); }
-    else {
-      s = posOf(r0.startContainer, r0.startOffset); z = posOf(r0.endContainer, r0.endOffset);
-      if (s && z && isDel && r0.collapsed) {
-        const len = s.el.textContent.length;
-        if (back) { if (s.off > 0) s = { el: s.el, off: s.off - 1 }; else if (s.el.previousElementSibling) { const p = s.el.previousElementSibling; s = { el: p, off: p.textContent.length }; } }
-        else if (z.off < len) z = { el: z.el, off: z.off + 1 }; else if (z.el.nextElementSibling) z = { el: z.el.nextElementSibling, off: 0 };
-      }
-    }
-    if (!s || !z) return false;
-    const els = [...ed.children], i0 = els.indexOf(s.el), i1 = els.indexOf(z.el);
-    if (i0 < 0 || i1 < i0) return false;
-    const span = els.slice(i0, i1 + 1);
-    if (!sug && !span.some(sgMarked)) return false;
-    // typing inside one proposed element is plain typing
-    if (sug && i0 === i1 && s.el.dataset.sga && (/^insert(Text|ReplacementText)$/.test(t) || (isDel && s.off < z.off))) return false;
-    e.preventDefault();
-    if (!sug && !canEdit()) return true;
-    const boundary = i1 === i0 + 1 && s.off >= s.el.textContent.length && z.off === 0;
-    if (isDel) {
-      if (boundary) { sgBoundary(back ? z.el : s.el, back); return true; }
-      if (i0 === i1 && s.off === z.off) return true;
-      if (Date.now() - lastEdit > 900 || !r0.collapsed) pushUndo();
-      lastEdit = Date.now();
-      sgRangeEdit(s, z, '', back);
-      return true;
-    }
-    if (/^insert(Text|ReplacementText)$/.test(t)) {
-      const text = e.data != null ? e.data : e.dataTransfer ? e.dataTransfer.getData('text/plain') : '';
-      if (!text) return true;
-      if (Date.now() - lastEdit > 900 || !r0.collapsed) pushUndo();
-      lastEdit = Date.now();
-      sgRangeEdit(s, z, text, false);
-    }
-    // drag and drop, formatting: nothing
-    return true;
-  }
-  // Enter in the mode (or outside it on an element with suggestions): true when done here
-  function sgEnter() {
-    const sug = sgOn(), sel = window.getSelection();
-    if (!sel.rangeCount || !S.ep) return false;
-    let el = curBlockEl(); if (!el) return false;
-    const r0 = sel.getRangeAt(0);
-    if (!r0.collapsed) {
-      const s = posOf(r0.startContainer, r0.startOffset), z = posOf(r0.endContainer, r0.endOffset);
-      if (!s || !z) return false;
-      const els = [...ed.children], span = els.slice(els.indexOf(s.el), els.indexOf(z.el) + 1);
-      if (!sug && !span.some(sgMarked)) return false;
-      pushUndo(); sgRangeEdit(s, z, '', false);
-      el = curBlockEl(); if (!el) return true;
-    } else if (!sug && !sgMarked(el)) return false;
-    // a proposed element splits like any text (its new half is proposed too); an empty one changes type
-    if (el.dataset.sga) return false;
-    const t = el.dataset.t, view = el.textContent, off = caretOffset(el);
-    if (!view.trim()) return false;
-    if (!sug && !canEdit()) return true;
-    pushUndo();
-    let nb;
-    if (off === 0) { el.insertAdjacentHTML('beforebegin', newBlockHTML({ id: C.uid(), t, x: '' }, el)); afterSgEdit(); return true; }
-    if (off >= view.length) nb = insertBlockAfter(el, NEXT[t], '');
-    else if (sug) {
-      const r = C.sgSplitSug(segsOf(el), off, sgOpts());
-      el.innerHTML = segsHTML(r.segs);
-      const tail = r.tail.replace(/^\s+/, '');
-      nb = insertBlockAfter(el, tail.trim() ? t : NEXT[t], tail);
-    } else {
-      const [l, r] = C.sgSplit(segsOf(el), off), nt = C.sgText(r, 'view').trim() ? t : NEXT[t], id = C.uid();
-      el.innerHTML = segsHTML(l);
-      el.insertAdjacentHTML('afterend', itemHTML({ b: { id, t: nt, x: '' }, add: null, rm: null, segs: r }));
-      nb = ed.querySelector('[data-id="' + id + '"]');
-    }
-    setCaret(nb.dataset.id, 0); $('#elemSelect').value = nb.dataset.t;
-    afterSgEdit();
-    return true;
-  }
-  // paste in the mode (or next to suggestions): one line goes in as typed text, several lines as proposed elements after
-  // the current one. Returns true when done here
-  function sgPaste(text) {
-    const sug = sgOn(), sel = window.getSelection();
-    if (!sel.rangeCount || !S.ep) return false;
-    const r0 = sel.getRangeAt(0), s = posOf(r0.startContainer, r0.startOffset), z = posOf(r0.endContainer, r0.endOffset);
-    if (!s || !z) return false;
-    const els = [...ed.children], span = els.slice(els.indexOf(s.el), els.indexOf(z.el) + 1);
-    if (!sug && !span.some(sgMarked)) return false;
-    if (!sug && !canEdit()) return true;
-    pushUndo();
-    if (!/\n/.test(text.trim())) { sgRangeEdit(s, z, text.replace(/\s+/g, ' '), false); return true; }
-    if (!r0.collapsed) sgRangeEdit(s, z, '', false);
-    const fin = C.finalizeImport(C.importText(text), P());
-    let el = curBlockEl() || s.el;
-    for (const b of fin.blocks) { el.insertAdjacentHTML('afterend', newBlockHTML(b, el)); el = el.nextElementSibling; }
-    setCaret(el.dataset.id, el.textContent.length);
-    afterSgEdit();
-    return true;
-  }
-  function toggleSuggest(on) {
-    const v = on == null ? !S.sgMode : !!on;
-    if (v && !TEAM) return;
-    if (v && readOnly('Режим предложений')) return;
-    S.sgMode = v; ls.set('draft.suggest', v);
-    acHide(); applyRole(); syncViewMenu(); if (S.st) renderRuler(); renderSgInfo();
-    if (S.rtab === 'suggest') renderRight();
-    toast(v ? 'Режим предложений: правки записываются как предложения с вашим именем, текст сценария не меняется' : 'Режим предложений выключен: правки снова меняют текст');
-  }
-  // accept or reject: ids (null: all). Accepting is for the editor or the producer; a suggestion can also be rejected by its author
-  function sgDecide(ids, accept) {
-    if (readOnly(accept ? 'Принятие предложений' : 'Отклонение предложений')) return false;
-    recompute();
-    const all = S.ep.sugs || [], pick = ids ? all.filter((s) => ids.includes(s.id)) : all;
-    if (!pick.length) return false;
-    const own = pick.every((s) => s.by === S.me.name);
-    if (!canLock() && (accept || !own)) { toast(accept ? 'Принимать предложения может редактор или продюсер' : 'Отклонить чужое предложение может редактор или продюсер, своё — автор'); return false; }
-    if (!ids) histAdd(S.ep, accept ? 'перед «Принять все»' : 'перед «Отклонить все»', true);
-    pushUndo();
-    const r = C.sgResolve(S.ep.blocks, all, ids, accept);
-    C.sgTrackGone(S.ep, all, r.sugs);
-    S.ep.blocks = stampNow(r.blocks);
-    if (r.sugs.length) S.ep.sugs = r.sugs; else delete S.ep.sugs;
-    renderEditor(); recompute();
-    toast((accept ? 'Принято' : 'Отклонено') + ' предложений: ' + r.n);
-    return true;
-  }
-  const SG_KIND = { ins: 'Вставка', del: 'Удаление', rep: 'Замена', add: 'Новый элемент', rm: 'Удаление элемента' };
-  function renderSuggest(pane) {
-    const list = C.sgList(S.ep.blocks, S.ep.sugs || []);
-    const may = canSuggest(), boss = may && canLock();
-    const scenes = (S.st && S.st.scenes) || [], idx = new Map(S.ep.blocks.map((b, i) => [b.id, i]));
-    const sceneOf = (bi) => { let r = null; for (const sc of scenes) { const k = idx.get(sc.id); if (k != null && k <= bi) r = sc; } return r; };
-    const body = (s) => {
-      const lab = '<span class="chip">' + esc(C.TYPE_LABEL[s.t] || s.t) + '</span> ';
-      if (s.k === 'ins') return '<ins class="sg">' + esc(s.x) + '</ins>';
-      if (s.k === 'del') return '<del class="sg">' + esc(s.x) + '</del>';
-      if (s.k === 'rep') return '<del class="sg">' + esc(s.old) + '</del> <ins class="sg">' + esc(s.x) + '</ins>';
-      if (s.k === 'add') return lab + '<ins class="sg">' + (esc(s.x) || '<i>пустой</i>') + '</ins>';
-      return lab + '<del class="sg">' + (esc(s.x) || '<i>пустой</i>') + '</del>';
-    };
-    pane.innerHTML = '<div class="row between"><span class="small muted" id="sgCount">' + (list.length ? 'Предложений: ' + list.length : 'Предложений нет') + '</span>' +
-      (may ? '<button class="btn small' + (sgOn() ? ' primary' : '') + '" id="sgToggle">' + (sgOn() ? 'Выключить режим' : 'Режим предложений') + '</button>' : '') + '</div>' +
-      (boss && list.length ? '<div class="row"><button class="btn small" id="sgAcceptAll">Принять все</button><button class="btn small" id="sgRejectAll">Отклонить все</button></div>' : '') +
-      list.map((s, q) => {
-        const sc = sceneOf(s.bi);
-        return '<div class="sgi" data-q="' + q + '"><div class="who"><b>' + esc(s.by || 'без имени') + '</b> · ' + (s.at ? fmtDate(s.at) : '') + ' · ' + SG_KIND[s.k] + (sc ? ' · сц. ' + esc(sc.num) : '') + '</div>' +
-          '<div class="q">' + body(s) + '</div>' +
-          ((boss || (may && s.by === S.me.name)) ? '<div class="row">' + (boss ? '<button class="btn small" data-sgok="' + q + '">Принять</button>' : '') + '<button class="btn small ghost" data-sgno="' + q + '">Отклонить</button></div>' : '') + '</div>';
-      }).join('') +
-      '<p class="note">' + (list.length ? '' : 'Правка → «Режим предложений» (Ctrl+Shift+E): вставленный текст подчёркивается, удалённый зачёркивается, текст сценария не меняется, пока предложение не принято. ') +
-      'Принимает редактор или продюсер; своё предложение автор может отклонить. Хронометраж, страницы, драфты и экспорт видят только принятый текст.</p>';
-    const tg = $('#sgToggle', pane); if (tg) tg.onclick = () => toggleSuggest();
-    const aa = $('#sgAcceptAll', pane); if (aa) aa.onclick = () => sgDecide(null, true);
-    const ra = $('#sgRejectAll', pane); if (ra) ra.onclick = () => sgDecide(null, false);
-    $$('[data-sgok]', pane).forEach((b) => b.onclick = (e) => { e.stopPropagation(); sgDecide(list[+b.dataset.sgok].ids, true); });
-    $$('[data-sgno]', pane).forEach((b) => b.onclick = (e) => { e.stopPropagation(); sgDecide(list[+b.dataset.sgno].ids, false); });
-    $$('.sgi', pane).forEach((x) => x.addEventListener('click', (e) => { if (e.target.closest('button')) return; jumpTo(list[+x.dataset.q].bid, true); }));
-  }
-  function renderSgInfo() {
-    const n = (S.ep && S.ep.sugs || []).length, el = $('#sgInfo'); if (!el) return;
-    const on = sgOn();
-    el.hidden = !on && !n;
-    // without the team features the list shows up only while there are suggestions to decide on
-    const tab = document.querySelector('[data-rtab="suggest"]');
-    if (!TEAM) { $('#mSugList').hidden = !n; if (tab) tab.hidden = !n; if (!n && S.rtab === 'suggest') { S.rtab = 'stats'; if (S.st) renderRight(); } }
-    el.textContent = (on ? 'Режим предложений' : 'Предложения') + (n ? ': ' + C.sgList(S.ep.blocks, S.ep.sugs).length : '');
-    el.classList.toggle('on', on);
-    document.body.classList.toggle('sg-mode', on);
-  }
+  function renderEditor() { ed.innerHTML = S.ep.blocks.map(blockHTML).join(''); applyRole(); }
   function readBlocks() {
     const out = [];
     for (const el of [...ed.childNodes]) {
       if (el.nodeType === 3) { if (el.textContent.trim()) out.push({ id: C.uid(), t: 'action', x: el.textContent }); continue; }
       if (el.nodeType !== 1) continue;
-      // a proposed element is not text until it is accepted
-      if (el.dataset.sga) continue;
       let t = el.dataset.t || 'action';
       let id = el.dataset.id;
       if (!id || out.some((b) => b.id === id)) { id = C.uid(); el.dataset.id = id; }
-      const x = accText(el).replace(/\n/g, ' ');
+      const x = el.textContent.replace(/\n/g, ' ');
       out.push(t === 'character' && el.dataset.dual ? { id, t, x, dual: true } : { id, t, x });
     }
     if (!out.length) out.push({ id: C.uid(), t: 'action', x: '' });
-    // who changed what: an element keeps the last editor and time it had, a new or changed one gets this user
-    return C.stampBlocks(S.ep && S.ep.blocks, out, S.me.name, Date.now());
+    return out;
   }
-  // blocks put together in code (a scene omitted or moved back, a page from history): changed elements get this user
-  const stampNow = (blocks) => C.stampBlocks(S.ep.blocks, blocks, S.me.name, Date.now());
   function normalizeDom() {
     let bad = false;
     for (const el of [...ed.childNodes]) if (el.nodeType === 3 || (el.nodeType === 1 && !el.classList.contains('b'))) bad = true;
     if (!ed.childNodes.length) bad = true;
     if (bad) {
       const caret = getCaret();
-      const blocks = readBlocks(), sugs = readSugs();
-      ed.innerHTML = viewHTML(blocks, sugs);
+      const blocks = readBlocks();
+      ed.innerHTML = blocks.map(blockHTML).join('');
       if (caret) setCaret(blocks[blocks.length - 1].id, (blocks[blocks.length - 1].x || '').length);
     }
   }
@@ -587,30 +258,26 @@
         if (s && end <= pos + n.length) { r.setEnd(n, end - pos); e = true; }
         pos += n.length; return;
       }
-      // offsets count the accepted text: a suggested insertion is not part of it
-      for (const c of n.childNodes) if (!(c.nodeType === 1 && c.nodeName === 'INS' && c.classList.contains('sg'))) walk(c);
+      for (const c of n.childNodes) walk(c);
     };
     walk(el);
     return s && e ? r : null;
   }
   function setType(el, t) {
-    // in the suggestion mode anyone who suggests may set the type of a proposed element (type changes apply directly)
-    if (!el || !(canEdit() || (sgOn() && el.dataset.sga))) return;
+    if (!el || !canEdit()) return;
     pushUndo();
     el.dataset.t = t; el.className = 'b t-' + t;
     // only a cue can be the dual one: another type ends the pair (Ctrl+Z brings it back)
     if (t !== 'character') delete el.dataset.dual;
-    const plain = !sgMarked(el) && !sgOn() || el.dataset.sga;
-    if (plain && t === 'paren' && !el.textContent.trim()) { el.textContent = '()'; setCaret(el.dataset.id, 1); }
-    if (plain && t !== 'paren' && el.textContent === '()') { el.innerHTML = '<br>'; setCaret(el.dataset.id, 0); }
-    if (el.dataset.sga) syncSugs();
+    if (t === 'paren' && !el.textContent.trim()) { el.textContent = '()'; setCaret(el.dataset.id, 1); }
+    if (t !== 'paren' && el.textContent === '()') { el.innerHTML = '<br>'; setCaret(el.dataset.id, 0); }
     $('#elemSelect').value = t;
     scheduleRecompute(); acUpdate();
     if (typeof renderHint === 'function') renderHint();
   }
   function insertBlockAfter(el, t, x) {
     const id = C.uid();
-    el.insertAdjacentHTML('afterend', newBlockHTML({ id, t, x }, el));
+    el.insertAdjacentHTML('afterend', blockHTML({ id, t, x }));
     return ed.querySelector('[data-id="' + id + '"]');
   }
   const NEXT = { scene: 'action', action: 'action', character: 'dialogue', paren: 'dialogue', dialogue: 'action', transition: 'scene', shot: 'action' };
@@ -626,7 +293,6 @@
     if (!a.textContent) { a.innerHTML = '<br>'; setCaret(a.dataset.id, 0); }
   }
   function onEnter() {
-    if (sgEnter()) return;
     const sel = window.getSelection(), wasSel = sel.rangeCount && !sel.isCollapsed;
     // Enter over a selection replaces it with a split at the join, so the tail takes the first element's type
     if (wasSel) { pushUndo(); deleteSelection(); }
@@ -637,7 +303,7 @@
     if (!wasSel) pushUndo();
     const off = caretOffset(el);
     const full = el.textContent;
-    if (off === 0) { const id = C.uid(); el.insertAdjacentHTML('beforebegin', newBlockHTML({ id, t, x: '' }, el)); if (el.dataset.sga) syncSugs(); scheduleRecompute(); return; }
+    if (off === 0) { const id = C.uid(); el.insertAdjacentHTML('beforebegin', blockHTML({ id, t, x: '' })); scheduleRecompute(); return; }
     const before = full.slice(0, off), after = full.slice(off);
     if (t === 'character') registerChar(before);
     el.textContent = before || '';
@@ -677,7 +343,7 @@
   function toggleDual() {
     if (readOnly('Двойной диалог') || !canEdit()) return;
     const el = ed.querySelector('.b.cur') || curBlockEl();
-    const els = accEls(), sp = (x) => x && (x.dataset.t === 'paren' || x.dataset.t === 'dialogue');
+    const els = [...ed.children], sp = (x) => x && (x.dataset.t === 'paren' || x.dataset.t === 'dialogue');
     let c = el ? els.indexOf(el) : -1;
     while (c >= 0 && sp(els[c])) c--;
     const nope = () => toast('Двойной диалог: поставьте курсор в одну из двух реплик подряд (персонаж и его реплика), которые звучат одновременно');
@@ -725,7 +391,7 @@
     }
   }
   function decorateDual() {
-    const els = accEls(), col = new Map();
+    const els = [...ed.children], col = new Map();
     for (const p of (S.st && S.st.lay.duals) || []) for (let q = p.a; q <= p.e; q++) col.set(q, q < p.b ? 'dl' : 'dr');
     els.forEach((el, i) => {
       const c = col.get(i) || '';
@@ -740,7 +406,7 @@
   S.undo = []; S.redo = [];
   let lastEdit = 0;
   // revision bases never change once taken, so undo shares them instead of copying every base on each keystroke
-  function snapshot() { return { blocks: readBlocks(), caret: getCaret(), sceneMeta: JSON.parse(JSON.stringify(S.ep.sceneMeta || {})), lock: S.ep.lock ? JSON.parse(JSON.stringify(S.ep.lock)) : null, revisions: S.ep.revisions ? S.ep.revisions.slice() : null, revLevel: S.ep.revLevel || 0, pageLock: S.ep.pageLock || null, tags: jcopy(S.ep.tags || []), titlePage: S.ep.titlePage ? jcopy(S.ep.titlePage) : null, sugs: readSugs() }; }
+  function snapshot() { return { blocks: readBlocks(), caret: getCaret(), sceneMeta: JSON.parse(JSON.stringify(S.ep.sceneMeta || {})), lock: S.ep.lock ? JSON.parse(JSON.stringify(S.ep.lock)) : null, revisions: S.ep.revisions ? S.ep.revisions.slice() : null, revLevel: S.ep.revLevel || 0, pageLock: S.ep.pageLock || null, tags: jcopy(S.ep.tags || []), titlePage: S.ep.titlePage ? jcopy(S.ep.titlePage) : null }; }
   function pushUndo() { S.undo.push(snapshot()); if (S.undo.length > 200) S.undo.shift(); S.redo = []; lastEdit = Date.now(); }
   function restore(sn) { S.ep.blocks = sn.blocks; if (sn.sceneMeta) S.ep.sceneMeta = sn.sceneMeta; setLock(S.ep, sn); renderEditor(); if (sn.caret) setCaret(sn.caret.id, sn.caret.off); recompute(); }
   function undo() { if (!S.undo.length || S.me.role === 'reader') return; S.redo.push(snapshot()); restore(S.undo.pop()); }
@@ -750,8 +416,6 @@
     if (e.inputType === 'historyUndo') { e.preventDefault(); undo(); return; }
     if (e.inputType === 'historyRedo') { e.preventDefault(); redo(); return; }
     if (e.inputType === 'insertParagraph' || e.inputType === 'insertLineBreak') { e.preventDefault(); onEnter(); return; }
-    // the suggestion mode, or an edit next to suggestions: recorded by Core.sgEdit instead of the browser
-    if (sgBeforeInput(e)) return;
     if (Date.now() - lastEdit > 900 || /delete/.test(e.inputType) && !window.getSelection().isCollapsed) pushUndo();
     lastEdit = Date.now();
   });
@@ -759,12 +423,10 @@
     normalizeDom();
     const el = curBlockEl();
     // Chrome's own join of two elements wraps the moved text in style spans (caps, white-space): the element keeps plain text only
-    if (el && !e.isComposing && el.querySelector('*:not(br)') && !el.querySelector('.sg')) { const off = caretOffset(el), txt = el.textContent; if (txt) el.textContent = txt; else el.innerHTML = '<br>'; setCaret(el.dataset.id, off); }
+    if (el && !e.isComposing && el.querySelector('*:not(br)')) { const off = caretOffset(el), txt = el.textContent; if (txt) el.textContent = txt; else el.innerHTML = '<br>'; setCaret(el.dataset.id, off); }
     if (el && el.dataset.t === 'action' && /^(ИНТ|НАТ|ПАВ)[.\s]/i.test(el.textContent) && el.textContent.length < 8) { el.dataset.t = 'scene'; el.className = 'b t-scene'; $('#elemSelect').value = 'scene'; }
     // typing in a dual pair: the columns stay side by side at once, not only after the next recompute
     if (el && (el.classList.contains('dl') || el.classList.contains('dr'))) layoutDual();
-    // typing in a proposed element changes the suggestion
-    if (el && el.dataset.sga) syncSugs();
     scheduleRecompute(); acUpdate();
   });
   ed.addEventListener('keydown', (e) => {
@@ -796,7 +458,6 @@
     e.preventDefault();
     const text = (e.clipboardData || window.clipboardData).getData('text/plain');
     if (!text) return;
-    if (sgPaste(text)) return;
     pushUndo();
     if (!/\n/.test(text.trim())) {
       const ins = text.replace(/\s+/g, ' ');
@@ -888,8 +549,6 @@
   function acUpdate() {
     const el = curBlockEl();
     if (!el || ed.getAttribute('contenteditable') === 'false') return acHide();
-    // suggestions inside the element: the list would replace the marked text, so it waits for plain text
-    if (el.querySelector('.sg') || (sgOn() && !el.dataset.sga)) return acHide();
     const t = el.dataset.t, text = el.textContent, off = caretOffset(el);
     if (off < text.length && t !== 'character') return acHide();
     const U = C.up(text.slice(0, off));
@@ -976,8 +635,7 @@
   const scheduleRecompute = debounce(() => recompute(), 250);
   function recompute(full) {
     if (!S.ep) return;
-    syncSugs();
-    const nb = readBlocks(), sig = JSON.stringify(nb) + C.sgSig(S.ep.sugs);
+    const nb = readBlocks(), sig = JSON.stringify(nb);
     // 'updated' moves on every recompute; textAt only when the words change, so merging two copies can tell which text is newer
     if (S.textSig && S.textSig.id === S.ep.id && S.textSig.sig !== sig) S.ep.textAt = Date.now();
     S.textSig = { id: S.ep.id, sig };
@@ -994,37 +652,11 @@
     delete S.ep._st;
     S.rulesRes = C.evalRules(S.ep, P(), S.st, seasonContext());
     decorateEditor();
-    decorateWho();
     if (S.zoom && S.zoom !== 1) sizePage();
-    renderScenes(); renderRight(); renderRuler(); renderComments(); renderTags(); renderEpisodesMeta(); renderSgInfo();
+    renderScenes(); renderRight(); renderRuler(); renderComments(); renderTags(); renderEpisodesMeta();
     if (!$('#findBox').hidden) fbRefresh(false);
     persist();
     void full;
-  }
-  // «Кто правил» (View): the text tinted by its last editor, with a legend; the stamps come from readBlocks
-  const WHO_COLORS = 8;
-  const whoOn = () => TEAM && !!ls.get('draft.who', false);
-  function toggleWho(on) { ls.set('draft.who', on == null ? !whoOn() : !!on); decorateWho(); syncViewMenu(); }
-  function decorateWho() {
-    const on = whoOn() && S.ep, els = accEls(), lg = $('#whoLegend');
-    document.body.classList.toggle('who-on', !!on);
-    if (!on) {
-      els.forEach((el) => { if (el.dataset.who != null) { delete el.dataset.who; el.removeAttribute('title'); } });
-      lg.hidden = true; return;
-    }
-    const authors = C.blockAuthors(S.ep.blocks), idx = new Map(authors.map((a, k) => [a.name, k % WHO_COLORS]));
-    const byId = new Map(S.ep.blocks.map((b) => [b.id, b]));
-    let none = 0;
-    els.forEach((el) => {
-      const b = byId.get(el.dataset.id), k = b && b.lastBy ? idx.get(b.lastBy) : null;
-      if (k == null) { none++; if (el.dataset.who != null) { delete el.dataset.who; el.removeAttribute('title'); } return; }
-      if (el.dataset.who !== String(k)) el.dataset.who = k;
-      const t = 'Правил: ' + b.lastBy + (b.lastAt ? ', ' + fmtDate(b.lastAt) : '');
-      if (el.title !== t) el.title = t;
-    });
-    lg.innerHTML = '<b>Кто правил</b>' + authors.map((a, k) => '<span class="wl" data-who="' + (k % WHO_COLORS) + '"><i></i>' + esc(a.name) + ' <span class="muted">' + a.n + '</span></span>').join('') +
-      (none ? '<span class="wl"><i class="none"></i>без отметки <span class="muted">' + none + '</span></span>' : '') + (authors.length ? '' : '<span class="small muted">Правок с отметкой автора ещё нет: она ставится на каждый изменённый элемент.</span>');
-    lg.hidden = false;
   }
   function seasonContext() {
     const objPages = {};
@@ -1038,7 +670,7 @@
     return { objPages };
   }
   function decorateEditor() {
-    const els = accEls();
+    const els = [...ed.children];
     const breaks = S.st.lay.breaks, labels = S.st.lay.labels;
     const sceneN = {}; S.st.scenes.forEach((s) => { sceneN[s.id] = s.num; });
     els.forEach((el, i) => {
@@ -1157,7 +789,7 @@
   function renderEpisodes() {
     const p = P(); const seasons = {};
     p.episodes.forEach((e) => { (seasons[e.season] = seasons[e.season] || []).push(e); });
-    const drafts = p.episodes.flatMap((e) => visibleDrafts(e).map((d) => ({ d, e }))).sort((a, b) => b.d.date - a.d.date).slice(0, 5);
+    const drafts = p.episodes.flatMap((e) => (e.drafts || []).map((d) => ({ d, e }))).sort((a, b) => b.d.date - a.d.date).slice(0, 5);
     $('#pane-episodes').innerHTML = Object.keys(seasons).sort((a, b) => a - b).map((s) => '<div class="season"><h4>Сезон ' + s + '</h4>' +
       seasons[s].map((e) => '<div class="ep' + (e === S.ep ? ' active' : '') + '" data-id="' + e.id + '"><span class="t">Серия ' + e.number + (e.title ? '. ' + esc(e.title) : '') + '</span><span class="m" data-meta="' + e.id + '"></span></div>').join('') + '</div>').join('') +
       // the rest (season, project, trash, history, deleting) lives in the menus, as in Final Draft
@@ -1371,7 +1003,7 @@
     meta.num = s.num; meta.omitted = true; meta.omittedBlocks = JSON.parse(JSON.stringify(blocks.slice(s.from, s.to + 1)));
     meta.omittedHeading = s.heading;
     blocks.splice(s.from, s.to - s.from + 1, { id: s.id, t: 'scene', x: C.omittedHeading(s.num) });
-    S.ep.blocks = stampNow(blocks); renderEditor(); recompute(); renderScenes();
+    S.ep.blocks = blocks; renderEditor(); recompute(); renderScenes();
   }
   function restoreScene(s) {
     if (readOnly('Возврат сцены')) return;
@@ -1382,7 +1014,7 @@
     // only the «УДАЛЕНА» heading is replaced: anything typed under it stays after the restored text
     blocks.splice(s.from, 1, ...piece);
     delete meta.omitted; delete meta.omittedBlocks; delete meta.omittedHeading;
-    S.ep.blocks = stampNow(blocks); renderEditor(); recompute(); renderScenes();
+    S.ep.blocks = blocks; renderEditor(); recompute(); renderScenes();
   }
   function restoreMissing(num) {
     if (readOnly('Возврат номера') || !S.ep.lock) return;
@@ -1393,7 +1025,7 @@
     blocks.splice(at, 0, { id, t: 'scene', x: C.omittedHeading(num) });
     const rec = (S.ep.lock.nums || []).find((n) => n.num === num);
     S.ep.sceneMeta[id] = { num, omitted: true, omittedHeading: rec ? rec.heading : '' };
-    S.ep.blocks = stampNow(blocks); renderEditor(); recompute(); renderScenes();
+    S.ep.blocks = blocks; renderEditor(); recompute(); renderScenes();
   }
   function inspectorHTML(s) {
     const lock = !!S.ep.lock;
@@ -1446,11 +1078,12 @@
   // ---------- right panel ----------
   $$('[data-rtab]').forEach((b) => b.onclick = () => { S.rtab = b.dataset.rtab; ls.set('draft.rtab', S.rtab); renderRight(); });
   function renderRight() {
+    if (!$('#pane-' + S.rtab)) S.rtab = 'stats';
     $$('[data-rtab]').forEach((x) => x.classList.toggle('active', x.dataset.rtab === S.rtab));
     $$('.rpane').forEach((p) => { p.hidden = p.id !== 'pane-' + S.rtab; });
     const pane = $('#pane-' + S.rtab);
     if (pane.contains(document.activeElement) && document.activeElement.matches('input, textarea, select')) return;
-    ({ stats: renderStats, rules: renderRules, comments: renderCommentList, bible: renderBible, objects: renderObjects, breakdown: renderBreakdown, suggest: renderSuggest })[S.rtab](pane);
+    ({ stats: renderStats, rules: renderRules, comments: renderCommentList, bible: renderBible, objects: renderObjects, breakdown: renderBreakdown })[S.rtab](pane);
   }
   const lineColor = (name) => { const l = (P().lines || []).find((x) => x.name === name); return l ? l.color : 'var(--muted)'; };
   const lineOptions = (s) => {
@@ -1540,7 +1173,7 @@
       n += changed;
       // a character listed in a scene card without lines (extras) is renamed there too, once per card
       const meta = kind === 'char' ? renameExtras(ep.sceneMeta, from, to) : null;
-      if (cur) { S.ep.blocks = stampNow(blocks); if (meta) S.ep.sceneMeta = meta; }
+      if (cur) { S.ep.blocks = blocks; if (meta) S.ep.sceneMeta = meta; }
       else if (changed || meta) editOtherEpisode(ep, changed ? blocks : jcopy(ep.blocks), 'перед переименованием «' + from + '»', meta);
       delete ep._st;
     }
@@ -1584,7 +1217,7 @@
     histAdd(ep, reason, true);
     if (meta) ep.sceneMeta = meta;
     if (ep.tags && ep.tags.length) C.anchorTags(blocks, ep.tags, ep.blocks);
-    ep.blocks = C.stampBlocks(ep.blocks, blocks, S.me.name, Date.now()); ep.textAt = ep.updated = Date.now(); delete ep._st;
+    ep.blocks = blocks; ep.textAt = ep.updated = Date.now(); delete ep._st;
     persist();
   }
 
@@ -1685,17 +1318,10 @@
     if (!el || !b || !C.findMatches([b], q, fbOpts()).some((x) => x.start === m.start && x.end === m.end)) { fbRefresh(true); return; }
     pushUndo();
     const x = (b.x || '').slice(0, m.start) + repl + (b.x || '').slice(m.end);
-    if (sgMarked(el)) fbApplyOpen(readBlocks().map((y) => (y.id === b.id ? Object.assign({}, y, { x }) : y)));
-    else { if (x) el.textContent = x; else el.innerHTML = '<br>'; recompute(); }
+    if (x) el.textContent = x; else el.innerHTML = '<br>';
+    recompute();
     FB.list = fbSearch(); FB.cur = -1; FB.from = { id: m.id, off: m.start + repl.length };
     if (FB.list.length) fbStep(1); else fbStatus();
-  }
-  // the open episode's new text goes through the model (as fixName does): viewHTML/sgView put the pending suggestions back
-  // on it, and the breakdown tags follow the words
-  function fbApplyOpen(blocks, cur) {
-    cur = cur || readBlocks();
-    if (S.ep.tags && S.ep.tags.length) C.anchorTags(blocks, S.ep.tags, cur);
-    S.ep.blocks = stampNow(blocks); renderEditor(); recompute();
   }
   function fbReplaceAll() {
     if (!fbMayReplace()) return;
@@ -1709,13 +1335,8 @@
         const cur = readBlocks(), r = C.replaceMatches(cur, q, repl, o);
         if (!r.count) continue;
         pushUndo();
-        // an element carrying someone's pending suggestions is re-rendered from the model, so the suggestions are placed
-        // again on the new text instead of being wiped with it
-        if (r.blocks.some((b, i) => b !== cur[i] && sgMarked(ed.querySelector('[data-id="' + b.id + '"]')))) fbApplyOpen(r.blocks, cur);
-        else {
-          r.blocks.forEach((b, i) => { if (b === cur[i]) return; const el = ed.querySelector('[data-id="' + b.id + '"]'); if (el) { if (b.x) el.textContent = b.x; else el.innerHTML = '<br>'; } });
-          recompute();
-        }
+        r.blocks.forEach((b, i) => { if (b === cur[i]) return; const el = ed.querySelector('[data-id="' + b.id + '"]'); if (el) { if (b.x) el.textContent = b.x; else el.innerHTML = '<br>'; } });
+        recompute();
         total += r.count; eps++;
       } else {
         const r = C.replaceMatches(ep.blocks, q, repl, o);
@@ -1808,15 +1429,15 @@
     for (const c of S.ep.comments || []) {
       let el = ed.querySelector('[data-id="' + c.blockId + '"]');
       // joining or splitting elements moves the quoted text to another element: follow it, nearest to the old place first
-      if ((!el || accText(el).indexOf(c.quote) < 0) && c.quote) {
+      if ((!el || el.textContent.indexOf(c.quote) < 0) && c.quote) {
         all = all || [...ed.querySelectorAll('.b[data-id]:not([data-sga])')];
         const start = Math.max(0, Math.min(el ? all.indexOf(el) : blockIndex(c.blockId), all.length - 1));
-        const hit = all[C.findAnchor(all.map((x) => accText(x)), c.quote, start)];
+        const hit = all[C.findAnchor(all.map((x) => x.textContent), c.quote, start)];
         if (hit) { el = hit; c.blockId = hit.dataset.id; }
       }
       c.lost = !el;
       if (!el) continue;
-      const i = accText(el).indexOf(c.quote);
+      const i = el.textContent.indexOf(c.quote);
       c.changed = i < 0;
       const r = i >= 0 ? rangeIn(el, i, i + c.quote.length) : null;
       if (r && !c.resolved) (c.id === S.activeComment ? active : ranges).push(r);
@@ -1956,7 +1577,7 @@
     for (const t of S.ep.tags || []) {
       if (t.lost || !C.BD[t.cat]) continue;
       const el = ed.querySelector('[data-id="' + t.blockId + '"]'); if (!el) continue;
-      const i = C.quoteAt(accText(el), t.quote, t.at);
+      const i = C.quoteAt(el.textContent, t.quote, t.at);
       if (i >= 0) out.push({ t, el, i });
     }
     return out;
@@ -2193,29 +1814,22 @@
   $('#btnDraft').onclick = () => {
     if (readOnly('Сохранение версии')) return;
     recompute();
-    const cur = C.revName(S.ep.revLevel || 0), n = visibleDrafts(S.ep).filter((d) => d.name.indexOf(cur + ', версия ') === 0).length + 1;
-    modal('<h2>Сохранить версию</h2><label class="small muted">Название<input type="text" id="drName" value="' + esc(cur + ', версия ' + n) + '"></label><label class="small muted">Что изменилось<textarea id="drNote" rows="2" placeholder="Например: правки продюсера по 3 и 5 сценам"></textarea></label><label class="row small"' + (TEAM ? '' : ' hidden') + '><input type="checkbox" id="drPrivate"> Личный: альтернативный вариант, который видите только вы (' + esc(S.me.name) + ')</label><label class="row small" id="drInFileRow" hidden><input type="checkbox" id="drInFile"> Включать в файл проекта</label><div class="actions"><button class="btn" id="drList">Все драфты</button><button class="btn" id="drC">Отмена</button><button class="btn primary" id="drOk">Сохранить</button></div>', (m) => {
+    const cur = C.revName(S.ep.revLevel || 0), n = (S.ep.drafts || []).filter((d) => d.name.indexOf(cur + ', версия ') === 0).length + 1;
+    modal('<h2>Сохранить версию</h2><label class="small muted">Название<input type="text" id="drName" value="' + esc(cur + ', версия ' + n) + '"></label><label class="small muted">Что изменилось<textarea id="drNote" rows="2" placeholder="Например: правки продюсера по 3 и 5 сценам"></textarea></label><div class="actions"><button class="btn" id="drList">Все драфты</button><button class="btn" id="drC">Отмена</button><button class="btn primary" id="drOk">Сохранить</button></div>', (m) => {
       $('#drC', m).onclick = closeModal; $('#drList', m).onclick = () => showDrafts();
-      $('#drPrivate', m).onchange = (e) => { $('#drInFileRow', m).hidden = !e.target.checked; };
       $('#drOk', m).onclick = () => {
         const d = { id: C.uid(), name: $('#drName', m).value.trim() || 'Драфт ' + n, note: $('#drNote', m).value.trim(), date: Date.now(), author: S.me.name, ...epCopy(S.ep), pages: S.st.pages, scenes: S.st.scenes.length };
-        if ($('#drPrivate', m).checked) { d.private = true; if ($('#drInFile', m).checked) d.inFile = true; }
         S.ep.drafts.push(d); closeModal(); renderEpisodes(); persist(); toast('Сохранён «' + d.name + '»');
       };
     });
   };
-  // a private draft («Личный») is seen only by its author and stays out of the project file unless the author lets it in
-  const mine = (d) => d.author === S.me.name;
-  const visibleDrafts = (ep) => (ep.drafts || []).filter((d) => !d.private || mine(d));
   function showDrafts(openId) {
-    const ds = visibleDrafts(S.ep).sort((a, b) => b.date - a.date);
+    const ds = (S.ep.drafts || []).slice().sort((a, b) => b.date - a.date);
     modal('<h2>Версии · серия ' + S.ep.number + '</h2>' + (ds.length ? '<div class="tbl-wrap"><table class="t"><thead><tr><th>Версия</th><th>Дата</th><th class="n">Стр.</th><th class="n">Сцен</th><th></th></tr></thead><tbody>' +
-      ds.map((d) => '<tr><td><b>' + esc(d.name) + '</b>' + (d.note ? '<div class="small muted">' + esc(d.note) + '</div>' : '') + '<div class="small muted">' + esc(d.author || '') + (d.private ? ' · <span class="chip priv">личный</span>' : '') + '</div>' + (TEAM && mine(d) && !/^Авто:/.test(d.name) ? '<div class="small"><label><input type="checkbox" data-priv="' + d.id + '"' + (d.private ? ' checked' : '') + '> Личный</label>' + (d.private ? ' <label><input type="checkbox" data-infile="' + d.id + '"' + (d.inFile ? ' checked' : '') + '> в файл проекта</label>' : '') + '</div>' : '') + '</td><td class="mono small">' + fmtDate(d.date) + '</td><td class="n">' + (d.pages || 0).toFixed(1) + '</td><td class="n">' + (d.scenes || 0) + '</td><td><div class="row"><button class="btn small" data-cmp="' + d.id + '">Сравнить с текущим</button><button class="btn small" data-rest="' + d.id + '">Восстановить</button></div></td></tr>').join('') +
+      ds.map((d) => '<tr><td><b>' + esc(d.name) + '</b>' + (d.note ? '<div class="small muted">' + esc(d.note) + '</div>' : '') + '<div class="small muted">' + esc(d.author || '') + '</div></td><td class="mono small">' + fmtDate(d.date) + '</td><td class="n">' + (d.pages || 0).toFixed(1) + '</td><td class="n">' + (d.scenes || 0) + '</td><td><div class="row"><button class="btn small" data-cmp="' + d.id + '">Сравнить с текущим</button><button class="btn small" data-rest="' + d.id + '">Восстановить</button></div></td></tr>').join('') +
       '</tbody></table></div>' : '<p class="note">У этой серии ещё нет сохранённых версий.</p>') + '<div id="drDiff"></div><div class="actions"><button class="btn" id="drClose">Закрыть</button></div>', (m) => {
       $('#drClose', m).onclick = closeModal;
       $$('[data-cmp]', m).forEach((b) => b.onclick = () => { $('#drDiff', m).innerHTML = diffHTML(ds.find((d) => d.id === b.dataset.cmp)); });
-      $$('[data-priv]', m).forEach((c) => c.onchange = () => { if (readOnly('Драфт')) return; const d = ds.find((x) => x.id === c.dataset.priv); if (!d || !mine(d)) return; if (c.checked) d.private = true; else { delete d.private; delete d.inFile; } persist(); renderEpisodes(); showDrafts(); });
-      $$('[data-infile]', m).forEach((c) => c.onchange = () => { const d = ds.find((x) => x.id === c.dataset.infile); if (!d || !mine(d)) return; if (c.checked) d.inFile = true; else delete d.inFile; persist(); });
       $$('[data-rest]', m).forEach((b) => b.onclick = () => {
         if (readOnly('Восстановление версии')) return;
         const d = ds.find((x) => x.id === b.dataset.rest);
@@ -2264,7 +1878,7 @@
     return S.hist[ep.id];
   }
   const jcopy = (v) => JSON.parse(JSON.stringify(v));
-  function epCopy(ep) { return { blocks: jcopy(ep.blocks), sceneMeta: jcopy(ep.sceneMeta || {}), lock: ep.lock ? jcopy(ep.lock) : null, revisions: ep.revisions ? jcopy(ep.revisions) : null, revLevel: ep.revLevel || 0, pageLock: ep.pageLock ? jcopy(ep.pageLock) : null, tags: jcopy(ep.tags || []), titlePage: ep.titlePage ? jcopy(ep.titlePage) : null, sugs: jcopy(ep.sugs || []) }; }
+  function epCopy(ep) { return { blocks: jcopy(ep.blocks), sceneMeta: jcopy(ep.sceneMeta || {}), lock: ep.lock ? jcopy(ep.lock) : null, revisions: ep.revisions ? jcopy(ep.revisions) : null, revLevel: ep.revLevel || 0, pageLock: ep.pageLock ? jcopy(ep.pageLock) : null, tags: jcopy(ep.tags || []), titlePage: ep.titlePage ? jcopy(ep.titlePage) : null }; }
   // the numbering lock travels with the numbers it froze, revisions and locked pages with the text they describe:
   // a saved state without the key (older data) leaves it as is
   function setLock(ep, sn) {
@@ -2276,8 +1890,6 @@
     if ('tags' in sn) { ep.tags = jcopy(sn.tags || []); if (ep.untagged) ep.untagged = ep.untagged.filter((id) => !ep.tags.some((t) => t.id === id)); }
     // the title page read from a .fdx or Fountain file (written back on export) belongs to the text it came with
     if ('titlePage' in sn) { if (sn.titlePage) ep.titlePage = jcopy(sn.titlePage); else delete ep.titlePage; }
-    // suggestions are marks on the text: they come back with it (ids they drop are remembered for merges, ids back leave that list)
-    if ('sugs' in sn) { const ns = jcopy(sn.sugs || []); C.sgTrackGone(ep, ep.sugs, ns); if (ns.length) ep.sugs = ns; else delete ep.sugs; }
   }
   // restoring a draft or a history snapshot: the numbering lock (with the numbers it froze), the page lock and the
   // revisions are a producer's or an editor's call, so for anyone else they stay as they are (only the text and its marks
@@ -2412,7 +2024,7 @@
     scheduleRecompute.cancel(); recompute(); persist.cancel();
     // a stale tab cannot edit, and rescueTab already set aside what it had not saved
     if (TAB.stale) return;
-    const pend = { tab: TAB.id, at: Date.now(), epId: S.ep.id, blocks: S.ep.blocks, sceneMeta: S.ep.sceneMeta || {}, lock: S.ep.lock || null, revisions: S.ep.revisions || null, revLevel: S.ep.revLevel || 0, pageLock: S.ep.pageLock || null, tags: S.ep.tags || [], titlePage: S.ep.titlePage || null, sugs: S.ep.sugs || [], sugGone: S.ep.sugGone || [], textAt: S.ep.textAt || 0, updated: S.ep.updated };
+    const pend = { tab: TAB.id, at: Date.now(), epId: S.ep.id, blocks: S.ep.blocks, sceneMeta: S.ep.sceneMeta || {}, lock: S.ep.lock || null, revisions: S.ep.revisions || null, revLevel: S.ep.revLevel || 0, pageLock: S.ep.pageLock || null, tags: S.ep.tags || [], titlePage: S.ep.titlePage || null, textAt: S.ep.textAt || 0, updated: S.ep.updated };
     ls.set('draft.pending', pend);
     DB.put('db', S.db).then((ok) => { saved(ok); if (ok && (ls.get('draft.pending', null) || {}).at === pend.at) try { localStorage.removeItem('draft.pending'); } catch (e) { /* ignore */ } });
   }
@@ -2422,11 +2034,10 @@
   window.addEventListener('beforeunload', () => { try { saveNow(); } catch (e) { /* the pagehide pass will try again */ } });
   // text that would otherwise be dropped is kept as a named draft of its episode (the same text only once)
   function keepDraft(ep, name, src, exact) {
-    const c = epCopy(src), sig = C.blocksSig(c.blocks) + C.sgSig(c.sugs);
+    const c = epCopy(src), sig = C.blocksSig(c.blocks);
     ep.drafts = ep.drafts || [];
     // a finished draft (exact name) is a milestone: kept under its number even when a saved version has the same text
-    // only a draft everyone sees and the project file carries counts: a private one would hide the safety copy from the others
-    if (ep.drafts.some((d) => !d.private && C.blocksSig(d.blocks) + C.sgSig(d.sugs) === sig && (!exact || d.name === name))) return false;
+    if (ep.drafts.some((d) => C.blocksSig(d.blocks) === sig && (!exact || d.name === name))) return false;
     let st = { pages: 0, scenes: [] };
     try { const p = S.db.projects.find((x) => x.episodes.includes(ep)) || P(); st = C.analyzeEpisode({ ...ep, blocks: c.blocks, sceneMeta: c.sceneMeta }, { ...p, rules: Object.assign({}, C.DEFAULT_RULES, p.rules || {}) }); } catch (e) { /* the counts are cosmetic */ }
     ep.drafts.push({ id: C.uid(), name: exact ? name : name + ' ' + fmtDate(Date.now()), date: Date.now(), author: S.me.name, ...c, pages: st.pages, scenes: st.scenes.length });
@@ -2441,7 +2052,7 @@
     const items = [];
     for (const p of S.db.projects) for (const e of p.episodes) {
       const o = curEp[e.id];
-      const text = (e.textAt || 0) > since && (!o || C.blocksSig(o.blocks) !== C.blocksSig(e.blocks) || C.sgSig(o.sugs) !== C.sgSig(e.sugs));
+      const text = (e.textAt || 0) > since && (!o || C.blocksSig(o.blocks) !== C.blocksSig(e.blocks));
       const cms = (e.comments || []).filter((c) => (c.date || 0) > since || (c.resolvedAt || 0) > since || (c.replies || []).some((x) => (x.date || 0) > since));
       if (text || cms.length) items.push({ at: Date.now(), projectId: p.id, projectName: p.name, ep: JSON.parse(JSON.stringify({ ...e, drafts: [], _st: undefined, comments: cms })), text });
     }
@@ -2453,7 +2064,7 @@
     const rev = (await DB.get('rev')) || { n: 0 };
     const db = await DB.get('db');
     if (!db || !db.projects || !db.projects.length) return false;
-    db.projects.forEach((p) => (p.episodes || []).forEach((e) => delete e._st));
+    db.projects.forEach((p) => { dropTeamFields(p); (p.episodes || []).forEach((e) => delete e._st); });
     const epId = S.ep && S.ep.id, caret = document.activeElement === ed ? getCaret() : null;
     TAB.rev = TAB.last = rev.n || 0; TAB.savedAt = Date.now();
     // the other tab's snapshots are in the database now: a cached list would write over them
@@ -2481,9 +2092,9 @@
     const pend = ls.get('draft.pending', null);
     if (pend && pend.epId && pend.blocks) {
       const f = find(pend.epId);
-      if (f && (C.blocksSig(f.e.blocks) !== C.blocksSig(pend.blocks) || C.sgSig(f.e.sugs) !== C.sgSig(pend.sugs))) {
+      if (f && C.blocksSig(f.e.blocks) !== C.blocksSig(pend.blocks)) {
         // the same tab wrote last and its unload copy is newer: that is just the tail the database missed
-        if (rev.tab === pend.tab && (pend.textAt || 0) >= (f.e.textAt || 0)) { f.e.blocks = pend.blocks; f.e.sceneMeta = pend.sceneMeta || {}; setLock(f.e, pend); if ((pend.sugGone || []).length) f.e.sugGone = [...new Set([...(f.e.sugGone || []), ...pend.sugGone])].filter((id) => !(f.e.sugs || []).some((x) => x.id === id)); f.e.textAt = pend.textAt; f.e.updated = Math.max(f.e.updated || 0, pend.updated || 0); }
+        if (rev.tab === pend.tab && (pend.textAt || 0) >= (f.e.textAt || 0)) { f.e.blocks = pend.blocks; f.e.sceneMeta = pend.sceneMeta || {}; setLock(f.e, pend); f.e.textAt = pend.textAt; f.e.updated = Math.max(f.e.updated || 0, pend.updated || 0); }
         else if (rev.tab !== pend.tab && keepDraft(f.e, 'Несохранённое из другой вкладки', pend)) n++;
       }
     }
@@ -2497,7 +2108,7 @@
         if (!p) { p = { id: it.projectId, name: it.projectName || 'Восстановленный проект', author: '', rules: Object.assign({}, C.DEFAULT_RULES), chars: {}, locs: {}, relations: [], episodes: [], created: Date.now() }; db.projects.push(p); }
         p.episodes.push(Object.assign(e2, { drafts: [], comments: e2.comments || [] })); sortEpisodes(p); n++; continue;
       }
-      if (it.text && (C.blocksSig(f.e.blocks) !== C.blocksSig(e2.blocks) || C.sgSig(f.e.sugs) !== C.sgSig(e2.sugs)) && keepDraft(f.e, 'Из другой вкладки', e2)) n++;
+      if (it.text && C.blocksSig(f.e.blocks) !== C.blocksSig(e2.blocks) && keepDraft(f.e, 'Из другой вкладки', e2)) n++;
       for (const c of e2.comments || []) {
         if ((f.e.deletedComments || []).some((x) => x.id === c.id)) continue;
         const c1 = (f.e.comments = f.e.comments || []).find((x) => x.id === c.id);
@@ -2521,13 +2132,12 @@
     recompute();
     const stored = await histLoad(S.ep);
     const all = stored.map((h, i) => ({ h, i })).sort((a, b) => b.h.date - a.h.date);
-    const authors = [...new Set(all.map((x) => x.h.author || ''))].filter(Boolean).sort();
     const fmtFull = (t) => new Date(t).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' });
     const thin = S.ep.histThinned;
     modal('<h2>Откат по времени · серия ' + S.ep.number + '</h2>' +
       '<p class="note">Снимок серии делается автоматически каждые 15 минут работы, при переключении серии и перед крупными изменениями (загрузка файла, восстановление драфта, перенумерация). Хранятся все снимки: каждый записывается как разница с соседним, поэтому история занимает мало места. Только если в браузере кончается место, старые автоснимки прореживаются, и об этом появляется предупреждение; снимки «перед …» не удаляются никогда. Можно вернуть всю серию, одну сцену или одну страницу; текущий текст перед откатом тоже сохраняется.</p>' +
       (thin ? '<div class="rule warn" id="hsThin"><div class="top"><span class="dot"></span><span class="title">Не хватило места: удалено старых автоснимков — ' + thin.n + '</span><span class="val">' + fmtDate(thin.at) + '</span></div><div class="note">Снимки «перед …» сохранены. Освободите место в браузере или сохраните файл проекта.</div></div>' : '') +
-      (all.length ? '<div class="row"><label class="small muted">Автор <select id="hsAuthor"><option value="">все</option>' + authors.map((a) => '<option>' + esc(a) + '</option>').join('') + '</select></label><span class="small muted" id="hsCount"></span></div>' +
+      (all.length ? '<div class="row"><span class="small muted" id="hsCount"></span></div>' +
         '<input type="range" class="hs" id="hsRange" min="0" max="' + (all.length - 1) + '" value="' + (all.length - 1) + '" title="Влево — раньше, вправо — позже"><div class="hist-wrap"><div class="hist-list" id="hsList"></div><div class="hist-view" id="hsView"></div></div>' : '<p class="note">Снимков пока нет: они появятся после первых 15 минут работы над серией.</p>') +
       '<div class="actions"><button class="btn" id="hsDrafts">Сохранённые версии</button><button class="btn" id="hsClose">Закрыть</button></div>', (m) => {
       $('#hsClose', m).onclick = closeModal; $('#hsDrafts', m).onclick = () => showDrafts();
@@ -2551,7 +2161,7 @@
           if (readOnly('Откат')) return;
           await histAdd(S.ep, 'перед откатом', true);
           const meta0 = S.ep.sceneMeta || {};
-          pushUndo(); S.ep.blocks = stampNow(jcopy(st.blocks)); S.ep.sceneMeta = jcopy(st.sceneMeta || {});
+          pushUndo(); S.ep.blocks = jcopy(st.blocks); S.ep.sceneMeta = jcopy(st.sceneMeta || {});
           const kept = restoreLock(st, 'возврат к снимку ' + when, meta0);
           audit('rollback', 'Серия возвращена к снимку ' + when);
           closeModal(); renderEditor(); recompute(); renderEpisodes();
@@ -2562,7 +2172,7 @@
           const r = C.restoreScene(readBlocks(), st.blocks, $('#hsScene', m).value);
           if (!r) { toast('Сцена не найдена в снимке'); return; }
           await histAdd(S.ep, 'перед откатом сцены', true);
-          pushUndo(); S.ep.blocks = stampNow(r.blocks);
+          pushUndo(); S.ep.blocks = r.blocks;
           const sc = st.blocks.find((b) => b.id === $('#hsScene', m).value);
           audit('rollback', 'Сцена «' + (sc ? C.up(sc.x) : '') + '» возвращена из снимка ' + when);
           closeModal(); renderEditor(); recompute(); renderEpisodes();
@@ -2574,7 +2184,7 @@
           const r = C.restoreRange(readBlocks(), st.blocks, pr.from, pr.to);
           if (!r) { toast('Страница не найдена в снимке'); return; }
           await histAdd(S.ep, 'перед откатом страницы ' + pr.label, true);
-          pushUndo(); S.ep.blocks = stampNow(r.blocks);
+          pushUndo(); S.ep.blocks = r.blocks;
           // scene cards of headings the page brings back (a scene deleted since) come with them
           const back = new Set(r.ids || r.blocks.slice(r.at, r.at + r.count).map((b) => b.id));
           for (const b of r.blocks.filter((x) => back.has(x.id))) if (b.t === 'scene' && !S.ep.sceneMeta[b.id] && (st.sceneMeta || {})[b.id]) S.ep.sceneMeta[b.id] = jcopy(st.sceneMeta[b.id]);
@@ -2585,14 +2195,12 @@
         };
       };
       const draw = () => {
-        const who = $('#hsAuthor', m).value;
-        list = who ? all.filter((x) => x.h.author === who) : all;
+        list = all;
         $('#hsList', m).innerHTML = list.map((x, i) => { const h = x.h; return '<div class="hist-row" data-i="' + i + '"><span class="when">' + fmtFull(h.date) + '</span><span>' + esc(h.reason) + (h.keep ? ' ·' : '') + ' <span class="muted">' + esc(h.author || '') + '</span></span><span class="small muted">' + (h.pages || 0).toFixed(1) + ' стр · ' + (h.scenes || 0) + ' сц</span></div>'; }).join('');
-        $('#hsCount', m).textContent = 'снимков: ' + list.length + (who ? ' из ' + all.length : '');
+        $('#hsCount', m).textContent = 'снимков: ' + list.length;
         $('#hsRange', m).max = Math.max(0, list.length - 1);
         $$('.hist-row', m).forEach((r) => r.onclick = () => pick(+r.dataset.i));
       };
-      $('#hsAuthor', m).onchange = () => { draw(); pick(0); };
       $('#hsRange', m).oninput = (e) => pick(list.length - 1 - +e.target.value);
       draw();
       const start = openId ? list.findIndex((x) => x.h.id === openId) : 0;
@@ -2752,8 +2360,6 @@
       // the same for locked pages and revisions: they describe the old text's elements
       if (ep.pageLock) { ep.pageLockLog = (ep.pageLockLog || []).concat([{ at, by: S.me.name, role: S.me.role, reason: why, was: { at: ep.pageLock.at, by: ep.pageLock.by, pages: (ep.pageLock.pages || []).length } }]); audit('lockdrop', 'Лок страниц снят загрузкой файла', { at, reason: why, ep }); delete ep.pageLock; }
       delete ep.revisions; delete ep.revLevel; delete ep.titlePage;
-      // suggestions were marks on the old text (the snapshot «перед загрузкой файла» and Ctrl+Z keep them)
-      if (ep.sugs) { C.sgTrackGone(ep, ep.sugs, []); delete ep.sugs; }
     }
     else {
       // a title line before the first scene names the episode
@@ -2789,12 +2395,13 @@
       const data = JSON.parse(t);
       const proj = data.project || data;
       if (!proj.episodes) throw new Error('Это не файл проекта Драфта.');
+      dropTeamFields(proj);
       const ex = S.db.projects.find((p) => p.id === proj.id);
       if (ex) {
         // merge: add comments and drafts that are new; the text is taken only from a copy whose words changed later,
         // and the local text is kept as a draft first
         if (S.ep) recompute();
-        let added = 0, replaced = 0, sgAdded = 0;
+        let added = 0, replaced = 0;
         for (const e2 of proj.episodes) {
           const e1 = ex.episodes.find((e) => e.id === e2.id);
           if (!e1) { ex.episodes.push(e2); added++; continue; }
@@ -2820,14 +2427,6 @@
           // like the numbering lock, from the newest lock or unlock event
           const revAt = (e) => Math.max(0, ...(e.revisions || []).map((r) => r.date || 0));
           if (revAt(e2) > revAt(e1) || (textWon && revAt(e2) === revAt(e1))) setLock(e1, { revisions: e2.revisions || null, revLevel: e2.revLevel || 0 });
-          // suggestions: both copies' (union by id), except those accepted, rejected or withdrawn on either side; they find
-          // their place again in whichever text won (Core.sgView)
-          if ((e1.sugs || []).length || (e2.sugs || []).length || (e2.sugGone || []).length) {
-            const ms = C.mergeSugs(e1, e2), had = new Set((e1.sugs || []).map((x) => x.id));
-            sgAdded += ms.sugs.filter((x) => !had.has(x.id)).length;
-            if (ms.sugs.length) e1.sugs = ms.sugs; else delete e1.sugs;
-            if (ms.gone.length) e1.sugGone = ms.gone;
-          }
           const plAt = (e) => Math.max(e.pageLock ? e.pageLock.at || 0 : 0, ...(e.pageLockLog || []).map((l) => l.at || 0), 0);
           if (plAt(e2) > plAt(e1)) setLock(e1, { pageLock: e2.pageLock || null });
           const plog = (e1.pageLockLog || []).slice();
@@ -2854,7 +2453,7 @@
         if ((proj.auditLog || []).length) ex.auditLog = C.mergeAuditLog(ex.auditLog, proj.auditLog);
         if (proj.secret && !ex.secret) ex.secret = proj.secret;
         Object.assign(ex.chars, Object.assign({}, proj.chars, ex.chars)); Object.assign(ex.locs, Object.assign({}, proj.locs, ex.locs));
-        toast('Проект обновлён: добавлено ' + added + ' комментариев, ответов и версий' + (sgAdded ? ', предложений: ' + sgAdded : '') + (replaced ? '; текст серий (' + replaced + ') заменён более новым из файла, прежний сохранён в драфтах' : ''));
+        toast('Проект обновлён: добавлено ' + added + ' комментариев, ответов и версий' + (replaced ? '; текст серий (' + replaced + ') заменён более новым из файла, прежний сохранён в драфтах' : ''));
         openProject(ex.id);
       } else { S.db.projects.push(proj); S.db.currentEpId = null; openProject(proj.id); toast('Проект «' + proj.name + '» открыт'); }
       persist();
@@ -2889,16 +2488,12 @@
     } catch (err) { toast('Экспорт не удался: ' + err.message); }
   });
   const stripCache = (p) => JSON.parse(JSON.stringify(p, (k, v) => (k === '_st' ? undefined : v)));
-  // the project file: private drafts stay out unless their author ticked «в файл проекта»
-  function projectFileData(p) {
-    const out = stripCache(p);
-    for (const e of out.episodes) if (e.drafts) e.drafts = e.drafts.filter((d) => !d.private || d.inFile);
-    return out;
-  }
+  // the project file: the project without its cached analysis
+  const projectFileData = (p) => stripCache(p);
   // every PDF is a named copy: the recipient is printed diagonally on each page and in the footer next to the trade-secret notice
   function pdfDialog() {
     const sec = P().secret || {};
-    const drafts = visibleDrafts(S.ep);
+    const drafts = S.ep.drafts || [];
     // the newest draft the team named, not an automatic «Авто: перед восстановлением…» copy
     const named = drafts.filter((d) => !/^Авто:/.test(d.name)).sort((a, b) => b.date - a.date);
     const label = S.ep.revLevel ? C.revName(S.ep.revLevel) : named.length ? named[0].name : C.revName(0);
@@ -3199,10 +2794,7 @@
   }
   function applyRole() {
     const ro = !canEdit();
-    // in the suggestion mode a producer may type too: every edit is then a suggestion
-    ed.setAttribute('contenteditable', ro && !sgOn() ? 'false' : 'true');
-    $('#mSuggest').hidden = !TEAM || S.me.role === 'reader';
-    $('#mWho').hidden = !TEAM;
+    ed.setAttribute('contenteditable', ro ? 'false' : 'true');
     $('#elemSelect').disabled = ro;
     const reader = S.me.role === 'reader';
     $('#btnImport').hidden = reader; $('#btnDraft').hidden = reader; $('#btnHistory').hidden = reader;
@@ -3371,10 +2963,6 @@
   $('#mTag').onclick = startTag;
   $('#mBreakdown').onclick = () => showRight('breakdown');
   $('#mBdMarks').onclick = () => toggleBdMarks();
-  $('#mWho').onclick = () => toggleWho();
-  $('#mSuggest').onclick = () => toggleSuggest();
-  $('#mSugList').onclick = () => showRight('suggest');
-  $('#sgInfo').onclick = () => showRight('suggest');
   $('#mAudit').onclick = () => showAudit();
   $('#mDual').onclick = () => toggleDual();
   $('#mPageLock').onclick = () => { if (S.ep.pageLock) unlockPages(); else if (!readOnly('Лок страниц')) lockPages(); };
@@ -3421,8 +3009,6 @@
     $$('[data-paper]').forEach((x) => x.classList.toggle('on', x.dataset.paper === (P() && P().rules.paper)));
     $('#mLock').textContent = S.ep && S.ep.lock ? 'Снять лок номеров сцен…' : 'Залочить номера сцен…';
     $('#mBdMarks').classList.toggle('on', bdOn());
-    $('#mWho').classList.toggle('on', whoOn());
-    $('#mSuggest').classList.toggle('on', sgOn());
     $('#mPageLock').textContent = S.ep && S.ep.pageLock ? 'Снять лок страниц…' : 'Залочить страницы';
   }
   if (ls.get('draft.hideLeft', false)) document.body.classList.add('hide-left');
@@ -3444,7 +3030,7 @@
   }
   document.addEventListener('selectionchange', debounce(renderHint, 80));
   // Help menu
-  const KEYS_HTML = '<div class="tbl-wrap"><table class="t"><tbody>' + [['Enter', 'Следующий элемент (описание → описание, персонаж → реплика, реплика → описание)'], ['Tab', 'Описание → персонаж, реплика → ремарка, пустой персонаж → переход'], ['Shift+Tab', 'Предыдущий тип элемента'], ['Ctrl+1 … Ctrl+7', 'Сцена, описание, персонаж, ремарка, реплика, переход, кадр'], ['Ctrl+D', 'Двойной диалог: реплика под курсором и предыдущая — рядом (повтор возвращает их одну за другой)'], ['Ctrl+Z / Ctrl+Y', 'Отменить / повторить'], ['Ctrl+Alt+M', 'Комментарий к выделенному'], ['Ctrl+Shift+E', 'Режим предложений: правки записываются как предложения (принимает редактор или продюсер)'], ['Ctrl+Alt+T', 'Пометить выделенное для разбивки (цифры 1–9 — категория)'], ['Ctrl+S', 'Сохранить на этом компьютере (сохраняется и само)'], ['Esc', 'Закрыть окно или меню']].map((r) => '<tr><td class="n">' + r[0] + '</td><td>' + r[1] + '</td></tr>').join('') + '</tbody></table></div>';
+  const KEYS_HTML = '<div class="tbl-wrap"><table class="t"><tbody>' + [['Enter', 'Следующий элемент (описание → описание, персонаж → реплика, реплика → описание)'], ['Tab', 'Описание → персонаж, реплика → ремарка, пустой персонаж → переход'], ['Shift+Tab', 'Предыдущий тип элемента'], ['Ctrl+1 … Ctrl+7', 'Сцена, описание, персонаж, ремарка, реплика, переход, кадр'], ['Ctrl+D', 'Двойной диалог: реплика под курсором и предыдущая — рядом (повтор возвращает их одну за другой)'], ['Ctrl+Z / Ctrl+Y', 'Отменить / повторить'], ['Ctrl+Alt+M', 'Комментарий к выделенному'], ['Ctrl+Alt+T', 'Пометить выделенное для разбивки (цифры 1–9 — категория)'], ['Ctrl+S', 'Сохранить на этом компьютере (сохраняется и само)'], ['Esc', 'Закрыть окно или меню']].map((r) => '<tr><td class="n">' + r[0] + '</td><td>' + r[1] + '</td></tr>').join('') + '</tbody></table></div>';
   function showStart() {
     modal('<h2>Начало работы</h2><p>«Драфт» — сценарный редактор в формате Final Draft. Страница на экране совпадает со страницей на бумаге: одна страница ≈ одна минута экрана.</p>' +
       '<ol class="start"><li><b>Пишите, не отвлекаясь на формат.</b> Начните заголовок с ИНТ., НАТ. или ПАВ. — он станет сценой. <b>Enter</b> и <b>Tab</b> переключают элементы, тип всегда виден в левом верхнем углу.</li>' +
@@ -3476,8 +3062,6 @@
       else if (kz && e.shiftKey || ky) { e.preventDefault(); redo(); }
     }
     if (mod && e.shiftKey && (e.key === 'S' || e.key === 'Ы' || e.key === 's' || e.key === 'ы')) { e.preventDefault(); $('#btnDraft').click(); }
-    // Ctrl+Shift+E: the suggestion mode on and off (Word's key for Track Changes)
-    if (TEAM && mod && e.shiftKey && !e.altKey && (e.code === 'KeyE' || /^[eу]$/i.test(e.key))) { e.preventDefault(); toggleSuggest(); }
     // Ctrl+S saves wherever the focus is (the editor's keydown bubbles here too), so the browser's «Save page as» never opens
     if (mod && !e.shiftKey && !e.altKey && S.db && (e.code === 'KeyS' && !/^[a-z]$/i.test(e.key) || /^[sы]$/i.test(e.key))) { e.preventDefault(); recompute(); persist.cancel(); DB.put('db', S.db).then((ok) => toast(saved(ok) ? 'Сохранено на этом компьютере' : TAB.stale ? 'Не сохранено: Драфт изменён в другой вкладке. Обновите страницу.' : 'Не удалось сохранить в браузере. Сохраните файл проекта: «Экспорт → Файл проекта».')); }
     if (mod && (e.key === '=' || e.key === '+')) { e.preventDefault(); $('#mZoomIn').click(); }
@@ -3497,7 +3081,7 @@
       db = { projects: [p], currentProjectId: p.id, currentEpId: p.episodes[0].id };
     }
     // drop analysis caches stored by older versions: they may predate the episode's last edits
-    db.projects.forEach((p) => (p.episodes || []).forEach((e) => delete e._st));
+    db.projects.forEach((p) => { dropTeamFields(p); (p.episodes || []).forEach((e) => delete e._st); });
     S.db = db;
     const rescue = await DB.get('rescue');
     let aside = !!rescue;
@@ -3554,5 +3138,5 @@
   window.addEventListener('resize', debounce(syncViewMenu, 150));
   $('#btnFocus').addEventListener('click', () => setTimeout(fitPage, 50));
   boot();
-  window.__draft = { S, C, toggleSuggest, sgDecide, readSugs, renderEditor, toggleDual, layoutDual, recompute, readBlocks, histAdd, histLoad, showHistory, showTrash, autoSnap, lockNumbers, omitScene, restoreScene, restoreMissing, exportPDF, applyRole, startTag, removeTag, toggleBdMarks, exportBreakdownXLSX, applyPaper, renderScenes, showRevisions, startRevision, lockPages, unlockPages, undo, redo, showSides, issueSides, showAudit, toggleWho, projectFileData, showDrafts, unlockNumbers, renderEpisodes, openEpisode };
+  window.__draft = { S, C, renderEditor, toggleDual, layoutDual, recompute, readBlocks, histAdd, histLoad, showHistory, showTrash, autoSnap, lockNumbers, omitScene, restoreScene, restoreMissing, exportPDF, applyRole, startTag, removeTag, toggleBdMarks, exportBreakdownXLSX, applyPaper, renderScenes, showRevisions, startRevision, lockPages, unlockPages, undo, redo, showSides, issueSides, showAudit, projectFileData, showDrafts, unlockNumbers, renderEpisodes, openEpisode };
 })();

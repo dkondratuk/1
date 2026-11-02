@@ -471,37 +471,4 @@ ol.start { margin: 0; padding-left: 20px; display: flex; flex-direction: column;
 ::highlight(find-cur) { background-color: var(--hl-find-cur); }
 @media (max-width: 760px) { .findbox { left: 16px; right: 16px; width: auto; top: auto; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); } }
 
-/* «Кто правил»: text tinted by its last editor, legend in the corner */
-:root { --who0: #1f5fbf; --who1: #b3261e; --who2: #1f7a46; --who3: #8a3fb8; --who4: #a85a00; --who5: #00808c; --who6: #b0306a; --who7: #5b6b00; }
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) { --who0: #82a8ff; --who1: #ff8a80; --who2: #6fd69b; --who3: #d29cff; --who4: #f5b25c; --who5: #5fd3dc; --who6: #ff8fc0; --who7: #c8d66a; }
-}
-:root[data-theme="dark"] { --who0: #82a8ff; --who1: #ff8a80; --who2: #6fd69b; --who3: #d29cff; --who4: #f5b25c; --who5: #5fd3dc; --who6: #ff8fc0; --who7: #c8d66a; }
-body.who-on .editor .b[data-who] { color: var(--who-c); }
-[data-who="0"] { --who-c: var(--who0); } [data-who="1"] { --who-c: var(--who1); } [data-who="2"] { --who-c: var(--who2); } [data-who="3"] { --who-c: var(--who3); }
-[data-who="4"] { --who-c: var(--who4); } [data-who="5"] { --who-c: var(--who5); } [data-who="6"] { --who-c: var(--who6); } [data-who="7"] { --who-c: var(--who7); }
-.wholegend { position: fixed; right: 16px; bottom: 34px; z-index: 40; max-width: min(320px, calc(100% - 32px)); display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center;
-  background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); box-shadow: var(--shadow); padding: 6px 10px; font-size: 12px; }
-.wholegend b { width: 100%; font-weight: 600; }
-.wholegend .wl { display: inline-flex; align-items: center; gap: 5px; }
-.wholegend .wl i { width: 10px; height: 10px; border-radius: 2px; background: var(--who-c); display: inline-block; }
-.wholegend .wl i.none { background: transparent; border: 1px solid var(--paper-ink); }
 .bad-text { color: var(--bad); }
-.chip.priv { background: var(--night-soft); color: var(--night); border-color: transparent; }
-
-/* Suggestions (Правка → «Режим предложений»): inserted text underlined, struck text crossed out; whole elements too */
-:root { --sg-ins: #0b6e4f; --sg-ins-bg: rgba(11, 110, 79, 0.09); --sg-del: #b3261e; }
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) { --sg-ins: #6fd3a8; --sg-ins-bg: rgba(111, 211, 168, 0.12); --sg-del: #ff8a80; }
-}
-:root[data-theme="dark"] { --sg-ins: #6fd3a8; --sg-ins-bg: rgba(111, 211, 168, 0.12); --sg-del: #ff8a80; }
-ins.sg { color: var(--sg-ins); background: var(--sg-ins-bg); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; }
-del.sg { color: var(--sg-del); text-decoration: line-through; text-decoration-thickness: 1px; }
-.editor .b[data-sga] { color: var(--sg-ins); background: var(--sg-ins-bg); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; }
-.editor .b[data-sgr] { color: var(--sg-del); text-decoration: line-through; text-decoration-thickness: 1px; }
-.sginfo { cursor: pointer; white-space: nowrap; }
-.sginfo.on { color: var(--sg-ins); font-weight: 600; }
-.sgi { border: 1px solid var(--line); border-radius: var(--r); background: var(--paper); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; cursor: pointer; }
-.sgi .who { font-size: 12px; color: var(--muted); }
-.sgi .who b { color: var(--ink); font-weight: 500; }
-.sgi .q { font-family: var(--script); font-size: 12px; overflow-wrap: anywhere; }

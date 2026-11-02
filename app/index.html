@@ -38,9 +38,6 @@
         <hr>
         <button id="mFind">Найти и заменить…<kbd>Ctrl+F</kbd></button>
         <button id="mReplace">Заменить…<kbd>Ctrl+H</kbd></button>
-        <hr>
-        <button id="mSuggest" class="check">Режим предложений<kbd>Ctrl+Shift+E</kbd></button>
-        <button id="mSugList">Предложения: принять или отклонить…</button>
       </div>
     </div>
     <div class="mb" data-menu="view"><button class="mb-btn" role="menuitem" aria-haspopup="true">Вид</button>
@@ -49,7 +46,6 @@
         <button id="mRight" class="check">Производство</button>
         <button id="btnFocus">Режим фокуса<kbd>только страница</kbd></button>
         <button id="mBdMarks" class="check">Разметка разбивки</button>
-        <button id="mWho" class="check">Кто правил<kbd>цвет по автору</kbd></button>
         <hr>
         <button id="mZoomIn">Крупнее<kbd>Ctrl +</kbd></button>
         <button id="mZoomOut">Мельче<kbd>Ctrl −</kbd></button>
@@ -202,7 +198,6 @@
       <button class="tab" data-rtab="bible">Персонажи</button>
       <button class="tab" data-rtab="objects">Объекты</button>
       <button class="tab" data-rtab="breakdown">Разбивка</button>
-      <button class="tab" data-rtab="suggest">Предложения</button>
     </div>
     <section class="rpane" id="pane-stats"></section>
     <section class="rpane" id="pane-rules" hidden></section>
@@ -210,19 +205,16 @@
     <section class="rpane" id="pane-bible" hidden></section>
     <section class="rpane" id="pane-objects" hidden></section>
     <section class="rpane" id="pane-breakdown" hidden></section>
-    <section class="rpane" id="pane-suggest" hidden></section>
   </aside>
 </div>
 
 <div class="statusbar" id="ruler">
   <span id="pageInfo">—</span>
   <span id="hint" class="hint"></span>
-  <span id="sgInfo" class="sginfo" role="button" tabindex="0" title="Список предложений" hidden></span>
   <span id="revInfo" class="revinfo" hidden></span>
   <span id="roleInfo"></span>
 </div>
 
-<div class="wholegend" id="whoLegend" role="note" aria-label="Кто правил" hidden></div>
 <div class="ac" id="ac" hidden></div>
 <div class="findbox" id="findBox" role="dialog" aria-label="Найти и заменить" hidden>
   <div class="fb-head"><b>Найти и заменить</b><button type="button" class="ph-x" id="fbClose" title="Закрыть (Esc)">×</button></div>

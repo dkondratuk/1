@@ -118,18 +118,6 @@ ok(pl.length === 2 && !pl.some((t) => /Актёр/.test(t)), 'pdfLines drops wat
     const r2 = C.restoreRange(cu2, sn, 1, 3);
     ok(r2.blocks.filter((b) => /^НОВОЕ/.test(b.x)).length === 30 && r2.kept === 30 && r2.blocks.map((b) => b.id).slice(0, 2).join() === 'b,c' && r2.blocks[r2.blocks.length - 1].x === 'd0', 'neighbours gone: the page comes back around the new text without deleting it');
   }
-  // stamps: unchanged elements keep their author, changed and new ones get the editor; text comparisons ignore stamps
-  const s1 = C.stampBlocks([], [{ id: 'a', t: 'action', x: 'X' }], 'Анна', 5);
-  const s2 = C.stampBlocks(s1, [{ id: 'a', t: 'action', x: 'X' }, { id: 'b', t: 'action', x: 'Y' }], 'Борис', 9);
-  ok(s2[0].lastBy === 'Анна' && s2[0].lastAt === 5 && s2[1].lastBy === 'Борис', 'stampBlocks keeps and sets authors');
-  const s3 = C.stampBlocks(s2, [{ id: 'a', t: 'action', x: 'X2' }, s2[1]], 'Борис', 10);
-  ok(s3[0].lastBy === 'Борис' && s3[0].lastAt === 10, 'an edit moves the stamp');
-  ok(C.blocksSig(s3) === C.blocksSig([{ id: 'a', t: 'action', x: 'X2' }, { id: 'b', t: 'action', x: 'Y' }]), 'blocksSig ignores stamps');
-  assert.deepStrictEqual(C.blockAuthors(s3), [{ name: 'Борис', n: 2 }]); n++;
-  const pe = C.demoProject(), e0 = pe.episodes[0]; e0.blocks = e0.blocks.map((b) => Object.assign({}, b, { lastBy: 'Анна', lastAt: 1 }));
-  const fdx = C.exportFDX(e0, pe, C.analyzeEpisode(e0, pe), {});
-  ok(!/lastBy|Анна/.test(fdx.replace(/<TitlePage>[\s\S]*<\/TitlePage>/, '')), 'stamps stay out of the .fdx');
-  ok(C.revMarks(e0.blocks, [C.newRevision(0, pe.episodes[0].blocks.map((b) => ({ id: b.id, t: b.t, x: b.x })), 'Р')]).every((x) => x === 0), 'stamps are not revisions');
   // audit log: union by id, unlock records of the episodes shown once
   const A = [{ id: '1', at: 1, type: 'delete' }], B = [{ id: '1', at: 1, type: 'delete' }, { id: '2', at: 2, type: 'sides' }];
   assert.deepStrictEqual(C.mergeAuditLog(A, B).map((x) => x.id), ['1', '2']); n++;
