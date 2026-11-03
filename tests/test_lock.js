@@ -23,8 +23,18 @@ const st = C.analyzeEpisode(ep, p);
 const rules = C.evalRules(ep, p, st);
 const short = rules.find((r) => r.id === 'short');
 ok(!short.details.some((d) => /УДАЛЕНА/.test(d.text)), 'short rule skips omitted');
-const bal = rules.find((r) => r.id === 'balance');
-ok(/из 5$/.test(bal.value), 'balance denominator without omitted: ' + bal.value);
+const ids = rules.map((r) => r.id);
+ok(['pages', 'scenes', 'main', 'objects', 'newobj', 'night', 'ext', 'bigcast', 'chars', 'special'].every((k) => ids.includes(k)), 'studio rules are all there: ' + ids.join());
+ok(!['balance', 'ensemble', 'clip', 'music', 'makeup', 'crowd', 'guests'].some((k) => ids.includes(k)), 'soft rules are gone: ' + ids.join());
+ok(!('ensembleMinSec' in C.DEFAULT_RULES) && Object.keys(C.TAGS).join() === 'kids,flashback', 'only «Дети» and «Флешбэк» marks remain');
+// old scene cards and character cards keep their extra marks without effect
+{
+  const old = C.demoProject(); const e0 = old.episodes[0]; const sid = e0.blocks.find((b) => b.t === 'scene').id;
+  e0.sceneMeta[sid] = { tags: ['clip', 'music', 'animals', 'kids'], line: 'Группа Б' }; old.chars[Object.keys(old.chars)[0]].guest = true;
+  const so = C.analyzeEpisode(e0, old); const sc0 = so.scenes[0];
+  ok(sc0.tags.join() === 'kids' && sc0.special && sc0.line === 'Группа Б' && !('guests' in sc0), 'old marks are ignored, the kids mark and the manual line stay: ' + JSON.stringify({ tags: sc0.tags, line: sc0.line }));
+  ok(!C.pageRanges && !C.restoreRange && !C.autoLine, 'single-page restore and the lines wizard are gone from Core');
+}
 ok(st.unassigned.scenes === 5 || st.lines.reduce((a, l) => a + l.scenes, 0) + st.unassigned.scenes === 5, 'line shares skip omitted');
 // a heading typed by hand as УДАЛЕНА is an omitted scene even without meta
 const ep2 = { blocks: [{ id: 'a', t: 'scene', x: 'УДАЛЕНА' }, { id: 'b', t: 'scene', x: 'ИНТ. ОФИС - ДЕНЬ' }], sceneMeta: {} };
@@ -91,33 +101,6 @@ ok(pl.length === 2 && !pl.some((t) => /Актёр/.test(t)), 'pdfLines drops wat
   C.histPush(old, mk(3));
   ok(old[0].sig.length < 64 && C.histIsDelta(old[2]) && !C.histIsDelta(old[0]), 'old snapshots: sig shortened, the last becomes a delta');
   ok([0, 1, 2].every((i) => JSON.stringify(C.histState(old, i).blocks) === oldWant[i]), 'old-format snapshots still restore');
-  // a page of a snapshot goes back into the current text, the rest stays
-  const snap = base.blocks, lay = C.paginate(snap, { lines: 54 });
-  const pr = C.pageRanges(lay);
-  ok(pr.length >= 1 && pr[0].from === 0 && pr.every((r, k) => k === 0 || r.from === pr[k - 1].to + 1), 'page ranges cover the text in order');
-  const cur = snap.map((b) => Object.assign({}, b, { x: b.x + ' НОВОЕ' }));
-  const r0 = C.restoreRange(cur, snap, pr[0].from, pr[0].to);
-  ok(r0.blocks.slice(0, pr[0].to + 1).every((b, i) => b.x === snap[i].x) && r0.blocks.slice(pr[0].to + 1).every((b) => / НОВОЕ$/.test(b.x)), 'restoreRange replaces only that page');
-  const cur2 = cur.slice(); cur2.splice(2, 0, { id: 'ins', t: 'action', x: 'Вставлено позже' });
-  ok(!C.restoreRange(cur2, snap, 0, 4).blocks.some((b) => b.id === 'ins'), 'text written inside the page since the snapshot goes with it');
-  const cur3 = cur.filter((b, i) => i > 4);
-  const r3 = C.restoreRange(cur3, snap, 0, 4);
-  ok(r3.blocks.length === cur3.length + 5 && r3.blocks[0].x === snap[0].x, 'a page deleted since comes back in its place');
-  // the span between the neighbours grew far beyond the page: only the page's own elements go back, new text stays
-  {
-    const mk = (id, x) => ({ id, t: 'action', x });
-    const sn = [mk('a', 'p1'), mk('b', 'b0'), mk('c', 'c0'), mk('d', 'd0'), mk('e', 'p3')];
-    const cu = [mk('a', 'p1'), mk('b', 'b1'), mk('c', 'c1')];
-    for (let i = 0; i < 40; i++) cu.push(mk('n' + i, 'НОВОЕ ' + i));
-    cu.push(mk('e', 'p3'));
-    const rr = C.restoreRange(cu, sn, 1, 3);
-    ok(rr.blocks.filter((b) => /^НОВОЕ/.test(b.x)).length === 40, 'page restore keeps the blocks written inside the page since the snapshot');
-    ok(rr.blocks.find((b) => b.id === 'b').x === 'b0' && rr.blocks.find((b) => b.id === 'c').x === 'c0' && rr.blocks.findIndex((b) => b.id === 'd') === rr.blocks.findIndex((b) => b.id === 'c') + 1, 'its own elements are replaced in place, a deleted one comes back after its neighbour');
-    ok(rr.removed === 2 && rr.count === 3 && rr.kept === 0 && rr.ids.join() === 'b,c,d' && rr.blocks.length === 45, 'restoreRange reports what it restored');
-    const cu2 = [mk('b', 'b1')]; for (let i = 0; i < 30; i++) cu2.push(mk('m' + i, 'НОВОЕ ' + i)); cu2.push(mk('d', 'd1'));
-    const r2 = C.restoreRange(cu2, sn, 1, 3);
-    ok(r2.blocks.filter((b) => /^НОВОЕ/.test(b.x)).length === 30 && r2.kept === 30 && r2.blocks.map((b) => b.id).slice(0, 2).join() === 'b,c' && r2.blocks[r2.blocks.length - 1].x === 'd0', 'neighbours gone: the page comes back around the new text without deleting it');
-  }
   // audit log: union by id, unlock records of the episodes shown once
   const A = [{ id: '1', at: 1, type: 'delete' }], B = [{ id: '1', at: 1, type: 'delete' }, { id: '2', at: 2, type: 'sides' }];
   assert.deepStrictEqual(C.mergeAuditLog(A, B).map((x) => x.id), ['1', '2']); n++;

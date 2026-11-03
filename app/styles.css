@@ -80,8 +80,6 @@ kbd { font: inherit; }
   position: absolute; left: 0; top: 100%; z-index: 70; background: var(--paper); border: 1px solid var(--line);
   border-radius: 0 0 var(--r) var(--r); box-shadow: var(--shadow); padding: 4px 0; display: flex; flex-direction: column; min-width: 250px;
 }
-.menu-wrap { position: relative; }
-.menu-wrap .menu { left: auto; right: 0; top: calc(100% + 2px); border-radius: var(--r); }
 .menu button { display: flex; justify-content: space-between; gap: 24px; align-items: center; text-align: left; background: none; border: 0; padding: 4px 14px 4px 26px; cursor: default; position: relative; white-space: nowrap; }
 .menu button:hover:not(:disabled) { background: var(--sel); color: var(--sel-ink); }
 .menu button:disabled { opacity: .45; }
@@ -91,7 +89,16 @@ kbd { font: inherit; }
 .menu button.check.on { font-weight: 500; }
 .menu button[hidden] { display: none; }
 .menu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 0; width: 100%; }
+.menu hr[hidden] { display: none; }
 .menu .mh { font-size: 11px; color: var(--muted); padding: 4px 14px 2px 26px; text-transform: uppercase; letter-spacing: .06em; }
+/* a submenu (Файл → Экспорт ▸) opens to the right of its item; on a narrow screen it unfolds inside the menu */
+.menu .sub { position: relative; display: flex; flex-direction: column; }
+.menu .sub[hidden] { display: none; }
+.menu .sub > .sub-btn { width: 100%; }
+.menu .sub.open > .sub-btn { background: var(--sel); color: var(--sel-ink); }
+.menu .sub.open > .sub-btn kbd { color: var(--sel-ink); opacity: .85; }
+.menu .sm { left: 100%; top: -5px; border-radius: var(--r); }
+.menu .sm.inline { position: static; border: 0; box-shadow: none; padding: 0 0 0 14px; border-radius: 0; }
 
 /* toolbar */
 .toolbar { display: flex; align-items: center; gap: 4px; height: 34px; padding: 0 8px; border-top: 1px solid rgba(255,255,255,.4); background: var(--chrome); }
@@ -135,8 +142,9 @@ body.focus .left, body.focus .right { display: none; }
 .ph { display: flex; justify-content: space-between; align-items: center; padding: 0 4px 0 10px; height: 26px; font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); background: var(--chrome); border-bottom: 1px solid var(--line); flex: none; }
 .ph-x { background: none; border: 0; font-size: 16px; line-height: 1; padding: 0 6px; color: var(--muted); cursor: default; border-radius: 3px; }
 .ph-x:hover { background: var(--paper); color: var(--ink); }
-.tabs { display: flex; flex-wrap: wrap; border-bottom: 1px solid var(--line); flex: none; background: var(--panel); }
-.tab { flex: 1 1 auto; background: none; border: 0; border-bottom: 2px solid transparent; padding: 7px 2px; font-size: 12.5px; cursor: default; color: var(--muted); }
+.tabs { display: flex; flex-wrap: nowrap; border-bottom: 1px solid var(--line); flex: none; background: var(--panel); }
+/* six tabs (Время … Разбивка) fit the 344px panel on one row */
+.tab { flex: 1 1 auto; min-width: 0; background: none; border: 0; border-bottom: 2px solid transparent; padding: 7px 1px; font-size: 12px; letter-spacing: -0.01em; white-space: nowrap; cursor: default; color: var(--muted); }
 .tab:hover { color: var(--ink); }
 .tab.active { color: var(--ink); border-bottom-color: var(--accent); font-weight: 500; }
 .lpane > *, .rpane > * { flex-shrink: 0; }
@@ -164,10 +172,6 @@ body.focus .left, body.focus .right { display: none; }
   position: relative; width: var(--pg-w, 8.5in); box-sizing: border-box; transform-origin: 0 0; background: var(--paper); color: var(--paper-ink);
   box-shadow: var(--shadow); padding: var(--pg-top, 1in) var(--pg-right, 1in) var(--pg-bottom, 1in) var(--pg-left, 1.5in); min-height: var(--pg-h, 11in);
 }
-.page[data-wm]::after {
-  content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 2;
-  background: var(--wm-img) repeat 0 0 / 460px 300px;
-}
 .editor { outline: none; font-family: var(--script); font-size: 12pt; line-height: 12pt; width: var(--tx-w, 60ch); caret-color: var(--accent); }
 .editor .b { white-space: pre-wrap; word-wrap: break-word; position: relative; min-height: 12pt; }
 .editor .t-scene { margin-top: 24pt; text-transform: uppercase; width: var(--tx-w, 60ch); }
@@ -189,6 +193,24 @@ body.focus .left, body.focus .right { display: none; }
   content: attr(data-n); position: absolute; left: -0.75in; top: 0; color: var(--muted); font-size: 12pt;
 }
 .editor .t-scene.omit { color: var(--muted); text-decoration: line-through; }
+/* text styles (Ctrl+B / I / U): the markup in block.x is drawn as <b>, <i>, <u>; the italic is synthesized when the face has none */
+.editor b { font-weight: 700; }
+.editor i { font-style: italic; }
+.editor u { text-decoration: underline; text-underline-offset: 2px; }
+/* Final Draft «Automatic Character Continueds»: (ПРОД.) after the name, drawn from data-auto, never part of the text */
+.editor .b.t-character[data-auto]::after { content: " (ПРОД.)"; }
+/* a forced page break (data-brk): the 'стр. N' label it makes is solid, not dashed */
+.editor .b[data-brk][data-pb]::before { border-top-style: solid; content: "разрыв страницы · стр. " attr(data-pb); }
+/* the scene colour: a stripe on the heading (the text keeps its place) and on the scene in the navigator */
+.editor .t-scene[data-color] { border-left: 4px solid var(--sc-color, transparent); padding-left: 4px; margin-left: -8px; }
+.sc.colored { border-left: 4px solid var(--sc-color, transparent); }
+.scsw { display: inline-block; width: 12px; height: 12px; border-radius: 2px; border: 1px solid var(--line); vertical-align: middle; margin-left: 6px; }
+.dict-tools { margin: 4px 0 8px; }
+.chr .link, .obj .link { border: 0; background: none; padding: 0; cursor: pointer; color: var(--accent); font: inherit; font-family: var(--ui); text-transform: none; }
+.chr .link:hover, .obj .link:hover { text-decoration: underline; }
+/* the page's context menu (right click): the same look as a dropdown */
+.menu.ctx { position: fixed; z-index: 60; min-width: 220px; }
+.menu.ctx .sub > .sub-btn[disabled] { opacity: .45; }
 .sc.omitted .hd { color: var(--muted); text-decoration: line-through; }
 .editor .b[data-pb]::before {
   content: "стр. " attr(data-pb); display: block; margin: 6pt calc(0px - var(--pg-right, 1in)) 12pt calc(0px - var(--pg-left, 1.5in)); padding: 2px var(--pg-right, 1in) 0 0; text-align: right;
@@ -274,8 +296,6 @@ table.t td.n, table.t th.n { text-align: right; font-family: var(--mono); white-
 .ep.active { background: var(--paper); border-color: var(--accent); }
 .ep .t { font-weight: 500; }
 .ep .m { font-size: 11.5px; color: var(--muted); font-family: var(--mono); }
-.draftrow { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; padding: 4px 0; border-bottom: 1px solid var(--line); cursor: pointer; }
-.draftrow:hover { color: var(--accent); }
 
 /* scenes navigator */
 .sc { display: grid; grid-template-columns: 28px 1fr; gap: 2px 6px; padding: 7px 6px; border-radius: var(--r); cursor: pointer; border: 1px solid transparent; }

@@ -25,23 +25,23 @@ const path = require('path');
   console.log('type via menu:', await p.evaluate(() => document.querySelector('#editor .b.cur').dataset.t), 'select:', await p.locator('#elemSelect').inputValue());
   await p.keyboard.press('Control+2'); await p.waitForTimeout(100);
   console.log('hint:', await p.locator('#hint').innerText());
-  // paper template from the menu
-  await p.click('.mb[data-menu=format] .mb-btn'); await p.click('.mm [data-paper=a4ru]'); await p.waitForTimeout(300);
-  console.log('paper:', await p.evaluate(() => window.__draft.S.project.rules.paper), 'ruler width:', await p.evaluate(() => document.querySelector('#pageRuler').style.width), 'checked:', await p.locator('[data-paper=a4ru].on').count());
-  await p.click('.mb[data-menu=format] .mb-btn'); await p.click('.mm [data-paper=letter]'); await p.waitForTimeout(200);
+  // paper template from Файл → Параметры страницы… (the Формат menu has no paper items)
+  await p.click('.mb[data-menu=file] .mb-btn'); await p.click('.mm #fPageSetup'); await p.selectOption('#psPaper', 'a4ru'); await p.click('#psOk'); await p.waitForTimeout(300);
+  console.log('paper:', await p.evaluate(() => window.__draft.S.project.rules.paper), 'ruler width:', await p.evaluate(() => document.querySelector('#pageRuler').style.width), 'no paper in Формат:', await p.locator('[data-paper]').count() === 0);
+  await p.locator('#fPageSetup').dispatchEvent('click'); await p.selectOption('#psPaper', 'letter'); await p.click('#psOk'); await p.waitForTimeout(200);
   // panels toggle from the toolbar and come back from the Document menu
   await p.click('#tbNav'); await p.waitForTimeout(200);
   console.log('left hidden:', await p.locator('#leftPanel').isHidden(), 'menu check off:', await p.locator('#mLeft.on').count());
-  await p.click('.mb[data-menu=doc] .mb-btn'); await p.click('#mScenes'); await p.waitForTimeout(200);
-  console.log('left back on scenes:', await p.locator('#leftPanel').isVisible(), await p.locator('[data-ltab=scenes].active').count());
+  await p.click('.mb[data-menu=view] .mb-btn'); await p.click('#mLeft'); await p.waitForTimeout(200);
+  console.log('left back:', await p.locator('#leftPanel').isVisible(), 'menu check on:', await p.locator('#mLeft.on').count());
   await p.click('#closeRight'); await p.waitForTimeout(200);
   console.log('right hidden:', await p.locator('#rightPanel').isHidden());
-  await p.click('.mb[data-menu=prod] .mb-btn'); await p.click('#mRules'); await p.waitForTimeout(200);
-  console.log('right back on rules:', await p.locator('#rightPanel').isVisible(), await p.locator('[data-rtab=rules].active').count());
-  // toolbar export menu and the File menu share the export actions
-  await p.click('#btnExport'); await p.waitForTimeout(100);
-  console.log('export menu:', await p.locator('#exportMenu').isVisible());
-  await p.keyboard.press('Escape');
+  await p.click('.mb[data-menu=view] .mb-btn'); await p.click('#mRight'); await p.waitForTimeout(200);
+  console.log('right back:', await p.locator('#rightPanel').isVisible(), 'menu check on:', await p.locator('#mRight.on').count());
+  // the toolbar's PDF button opens the PDF dialog (Ctrl+P does the same); exports live in the Файл menu
+  await p.click('#tbPdf'); await p.waitForTimeout(200);
+  console.log('pdf dialog:', await p.locator('#pdfOk').count() === 1, 'no toolbar export menu:', await p.locator('#btnExport, #exportMenu, #tbImport').count() === 0);
+  await p.click('#pdfC');
   // zoom
   await p.click('.mb[data-menu=view] .mb-btn'); await p.click('#mZoomIn'); await p.waitForTimeout(200);
   console.log('zoom:', await p.evaluate(() => window.__draft.S.zoom.toFixed(2)), await p.evaluate(() => document.querySelector('#page').style.transform));

@@ -46,9 +46,8 @@ const ok = (c, m, extra) => { console.log((c ? 'ok   ' : 'FAIL ') + m + (c || ex
     const src = await blocks(), srcScenes = await scenes();
     // the name the app gives the file (headless Chromium reports every blob download as «download»)
     await p.evaluate(() => { const c = HTMLAnchorElement.prototype.click; HTMLAnchorElement.prototype.click = function () { window.__dlName = this.download; return c.call(this); }; });
-    await p.click('#btnExport');
     const dl = p.waitForEvent('download');
-    await p.locator('#exportMenu [data-exp=fountain]').dispatchEvent('click');
+    await p.locator('[data-exp=fountain]').dispatchEvent('click');
     const fdl = await dl;
     const fname = await p.evaluate(() => window.__dlName);
     ok(/ С1Е01 .*\.fountain$/.test(fname), 'Fountain export is saved as .fountain', fname);
@@ -91,9 +90,8 @@ const ok = (c, m, extra) => { console.log((c ? 'ok   ' : 'FAIL ') + m + (c || ex
     await importFile(fdxIn);
     const epInfo = await p.evaluate(() => { const S = window.__draft.S; return [S.ep.number, S.ep.title, S.project.contact, !!S.ep.titlePage, S.project.episodes.filter((e) => e.season === S.ep.season && e.number === S.ep.number).length]; });
     ok(JSON.stringify(epInfo) === JSON.stringify([7, 'Дача', 'Студия «Юг», +7 900 000-00-00', true, 1]), 'FDX title page names the new episode and fills the project contact', epInfo);
-    await p.click('#btnExport');
     const dl3 = p.waitForEvent('download');
-    await p.locator('#exportMenu [data-exp=fdx]').dispatchEvent('click');
+    await p.locator('[data-exp=fdx]').dispatchEvent('click');
     await p.waitForSelector('#fxOk'); await p.locator('#fxOk').dispatchEvent('click');
     const fdxOut = path.join(tmp, 'out.fdx'); await (await dl3).saveAs(fdxOut);
     const xo = fs.readFileSync(fdxOut, 'utf8'), tpo = xo.slice(xo.indexOf('<TitlePage>'), xo.indexOf('</TitlePage>') + 12).replace(/\s+/g, '').replace(/<Paragraph([^>]*)><\/Paragraph>/g, '<Paragraph$1/>');

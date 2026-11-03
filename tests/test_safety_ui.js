@@ -101,9 +101,9 @@ async function fresh(b) { const ctx = await b.newContext(); await setup(ctx); co
       ok(await d.evaluate(() => window.__draft.S.ep.drafts.some((x) => JSON.stringify(x.blocks).includes('ПОЗДНО_С'))), 'text of the refused write is a draft after reload');
       await ctx.close(); }
 
-    // 6. comments: only the author or a producer deletes; deletion can be undone; a reader neither replies nor adds
+    // 6. comments: only the author or a producer deletes; deletion can be undone
     { const { ctx, p } = await fresh(b);
-      await p.evaluate(() => { const d = window.__draft; d.S.ep.comments.push({ id: 'cP', author: 'Продюсер', role: 'producer', text: 'прод', quote: '', date: Date.now(), replies: [], blockId: d.S.ep.blocks[0].id }, { id: 'cW', author: d.S.me.name, role: 'writer', text: 'моё', quote: '', date: Date.now(), replies: [], blockId: d.S.ep.blocks[0].id }); d.S.rtab = 'comments'; d.recompute(); });
+      await p.evaluate(() => { const d = window.__draft; d.S.ep.comments.push({ id: 'cP', author: 'Продюсер', role: 'producer', text: 'прод', quote: '', date: Date.now(), replies: [], blockId: d.S.ep.blocks[0].id }, { id: 'cW', author: d.S.me.name || 'Без имени', role: 'writer', text: 'моё', quote: '', date: Date.now(), replies: [], blockId: d.S.ep.blocks[0].id }); d.S.rtab = 'comments'; d.recompute(); });
       await p.evaluate(() => { document.querySelector('[data-rtab="comments"]') && document.querySelector('[data-rtab="comments"]').click(); });
       await p.waitForTimeout(200);
       const pane = '#pane-comments';
@@ -115,12 +115,6 @@ async function fresh(b) { const ctx = await b.newContext(); await setup(ctx); co
       await p.locator(pane + ' #cmDeleted').dispatchEvent('click');
       await p.locator(pane + ' [data-undel="cW"]').dispatchEvent('click');
       ok(await p.evaluate(() => window.__draft.S.ep.comments.some((c) => c.id === 'cW')), 'deleted comment can be put back');
-      await p.evaluate(() => { const d = window.__draft; d.S.me = Object.assign({}, d.S.me, { role: 'reader' }); d.applyRole(); d.recompute(); });
-      await p.fill(pane + ' [data-reply="cP"]', 'ответ читателя'); await p.press(pane + ' [data-reply="cP"]', 'Enter');
-      ok(await p.evaluate(() => !window.__draft.S.ep.comments.find((c) => c.id === 'cP').replies.length), 'reader cannot reply');
-      await p.evaluate(() => { const el = document.querySelector('#editor .b'); const r = document.createRange(); r.selectNodeContents(el); const s = getSelection(); s.removeAllRanges(); s.addRange(r); });
-      await p.locator(pane + ' #cmNew').dispatchEvent('click');
-      ok(await p.evaluate(() => !document.getElementById('cmText')), 'reader cannot add a comment');
       await p.evaluate(() => { const d = window.__draft; d.S.me = Object.assign({}, d.S.me, { role: 'producer' }); d.applyRole(); d.recompute(); });
       await p.locator(pane + ' [data-del="cP"]').dispatchEvent('click');
       ok(await p.evaluate(() => !window.__draft.S.ep.comments.some((c) => c.id === 'cP')), 'producer deletes a producer comment');
@@ -128,7 +122,7 @@ async function fresh(b) { const ctx = await b.newContext(); await setup(ctx); co
 
     // 7. comment resolution: «Решено»/«Открыть» record who and when; on a project-file merge the later toggle wins
     { const { ctx, p } = await fresh(b);
-      await p.evaluate(() => { const d = window.__draft; d.S.ep.comments.push({ id: 'cR', author: 'Продюсер', role: 'producer', text: 'проверить', quote: '', date: Date.now() - 5000, resolved: false, replies: [], blockId: d.S.ep.blocks[0].id }); d.S.me = { name: 'Редактор Р', role: 'editor' }; d.applyRole(); d.recompute(); });
+      await p.evaluate(() => { const d = window.__draft; d.S.ep.comments.push({ id: 'cR', author: 'Продюсер', role: 'producer', text: 'проверить', quote: '', date: Date.now() - 5000, resolved: false, replies: [], blockId: d.S.ep.blocks[0].id }); d.S.me = { name: 'Редактор Р', role: 'producer' }; d.applyRole(); d.recompute(); });
       await p.evaluate(() => { document.querySelector('[data-rtab="comments"]').click(); }); await p.waitForTimeout(200);
       const cR = () => p.evaluate(() => { const c = window.__draft.S.ep.comments.find((x) => x.id === 'cR'); return { resolved: !!c.resolved, by: c.resolvedBy, at: c.resolvedAt || 0 }; });
       await p.locator('#pane-comments [data-res="cR"]').dispatchEvent('click'); await p.waitForTimeout(100);

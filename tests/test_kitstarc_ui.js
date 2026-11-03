@@ -1,5 +1,5 @@
 // КИТ Сценарист (.kitsp) and Story Architect (.starc) import through the app: sql.js loads lazily from cdnjs (routed to
-// node_modules here), Файл → Загрузить сценарий and Файл → Открыть файл проекта both take the files, a STARC project
+// node_modules here), Файл → Открыть… takes both as a script (the same dialog opens project files), a STARC project
 // with two screenplays asks which one, the reader cannot load
 const { chromium } = require('playwright');
 const path = require('path'), fs = require('fs'), os = require('os');
@@ -39,7 +39,7 @@ const ok = (c, m, extra) => { console.log((c ? 'ok   ' : 'FAIL ') + m + (c || ex
     ok(!(await ev(() => !!window.initSqlJs)), 'sql.js is not loaded until a КИТ / STARC file is opened');
     const eps0 = (await state()).eps;
 
-    // 1. Файл → Загрузить сценарий… → .kitsp
+    // 1. Файл → Открыть… → .kitsp
     await p.locator('#btnImport').dispatchEvent('click');
     ok(/\.kitsp/.test(await p.textContent('#drop')) && /\.starc/.test(await p.textContent('#drop')), 'the import dialog names both formats');
     const [fc] = await Promise.all([p.waitForEvent('filechooser'), p.click('#drop')]); await fc.setFiles(kitF);
@@ -53,8 +53,9 @@ const ok = (c, m, extra) => { console.log((c ? 'ok   ' : 'FAIL ') + m + (c || ex
     ok(['МАША', 'ПЕТЯ', 'СОСЕД'].every((n) => s.chars.includes(n)), 'characters are in the project dictionary', s.chars);
     ok(asked.some((u) => u === 'sql.js/1.10.3/sql-wasm.js') && asked.some((u) => u === 'sql.js/1.10.3/sql-wasm.wasm'), 'sql.js 1.10.3 and its wasm come from cdnjs', asked);
 
-    // 2. Файл → Открыть файл проекта… → .starc with two screenplays: a picker, the second one is loaded
-    const [fc2] = await Promise.all([p.waitForEvent('filechooser'), p.locator('.mm [data-exp="openproject"]').first().dispatchEvent('click')]); await fc2.setFiles(starcF);
+    // 2. Файл → Открыть… (the same dialog takes project files and scripts) → .starc with two screenplays: a picker, the second one is loaded
+    await p.locator('#btnImport').dispatchEvent('click');
+    const [fc2] = await Promise.all([p.waitForEvent('filechooser'), p.click('#drop')]); await fc2.setFiles(starcF);
     await p.waitForSelector('#sqlPick', { timeout: 15000 });
     const names = await p.$$eval('#sqlPick label', (ls) => ls.map((l) => l.textContent.trim()));
     ok(names.length === 2 && /^Пилот/.test(names[0]) && /^Серия 2 & финал/.test(names[1]), 'the picker lists the screenplays, not drafts or the recycle bin', names);
@@ -70,11 +71,6 @@ const ok = (c, m, extra) => { console.log((c ? 'ok   ' : 'FAIL ') + m + (c || ex
     // undo history and the episode list: the new episode is an ordinary one (Ctrl+Z inside it has nothing from the import)
     ok(await ev(() => window.__draft.S.project.episodes.some((e) => e.title === 'Квартирный вопрос')), 'the КИТ episode is still there');
 
-    // 3. a reader cannot load either format
-    await ev(() => { const d = window.__draft; d.S.me = { name: 'Читатель', role: 'reader' }; d.applyRole(); d.recompute(); });
-    await ev(() => { document.getElementById('fileInput').dataset.mode = 'project'; });
-    await p.setInputFiles('#fileInput', starcF); await p.waitForTimeout(800);
-    ok((await state()).eps === eps0 + 2 && !(await p.$('#sqlPick')), 'a reader opening a .starc gets nothing loaded');
   } catch (e) { console.log('FAIL exception', e); fails++; }
   finally { await b.close(); }
   console.log(fails ? 'test_kitstarc_ui: ' + fails + ' FAILED' : 'test_kitstarc_ui: all passed');

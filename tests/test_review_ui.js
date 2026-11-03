@@ -52,8 +52,8 @@ let fails = 0, n = 0; const ok = (c, m, x) => { n++; if (!c) { fails++; console.
     // a new scene at the top gets a letter number under the lock
     const nums0 = await p.evaluate(() => { const d = window.__draft; d.S.ep.sceneMeta[d.S.st.scenes[1].id].num = '2Б'; d.recompute(); return d.S.st.scenes.map((s) => s.num); });
     await role(p, r, r === 'writer' ? 'Сценарист' : 'Продюсер');
-    await p.evaluate(() => window.__draft.showDrafts()); await p.waitForTimeout(200);
-    await p.evaluate(() => { const d = window.__draft.S.ep.drafts.find((x) => x.name === 'ДО_ЛОКА'); document.querySelector('[data-rest="' + d.id + '"]').click(); });
+    await p.evaluate(() => { const d = window.__draft.S.ep.drafts.find((x) => x.name === 'ДО_ЛОКА'); return window.__draft.showHistory(d.id); }); await p.waitForTimeout(300);
+    await p.evaluate(() => document.querySelector('#hsAll').click());
     await p.waitForTimeout(400);
     const st = await p.evaluate(() => { const d = window.__draft; d.recompute(); return { lock: !!d.S.ep.lock, log: (d.S.ep.lockLog || []).length, audit: (d.S.project.auditLog || []).map((x) => x.type + ':' + x.text), nums: d.S.st.scenes.map((s) => s.num), toast: document.getElementById('toast').textContent }; });
     if (r === 'producer') ok(!st.lock && st.log === 1 && st.audit.some((x) => /^lockdrop:Лок номеров снят восстановлением/.test(x)), 'producer: the restore drops the numbering lock and logs it (lockLog + audit)', st);

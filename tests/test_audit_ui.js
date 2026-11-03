@@ -29,7 +29,8 @@ let fails = 0, n = 0; const ok = (c, m, x) => { n++; if (!c) { fails++; console.
   // enough text for several pages
   await ev(() => {
     const d = window.__draft, bl = d.readBlocks();
-    for (let j = 0; j < 90; j++) bl.push({ id: 'L' + j, t: 'action', x: 'Строка для объёма номер ' + j + '.' });
+    // a scene heading in the middle, so that L5 and L80 sit in different scenes (one scene goes back from History below)
+    for (let j = 0; j < 90; j++) { if (j === 40) bl.push({ id: 'LS', t: 'scene', x: 'ИНТ. ВТОРАЯ ПОЛОВИНА - ДЕНЬ' }); bl.push({ id: 'L' + j, t: 'action', x: 'Строка для объёма номер ' + j + '.' }); }
     d.S.ep.blocks = bl; document.querySelector('#editor').innerHTML = bl.map((x) => '<div class="b t-' + x.t + '" data-t="' + x.t + '" data-id="' + x.id + '"></div>').join('');
     [...document.querySelectorAll('#editor > .b')].forEach((e, i) => { e.textContent = bl[i].x; });
     d.recompute();
@@ -48,7 +49,7 @@ let fails = 0, n = 0; const ok = (c, m, x) => { n++; if (!c) { fails++; console.
   await ev(() => window.__draft.redo()); await p.waitForTimeout(150);
   ok((await blockBy('L2')).x.includes('БОРИСА'), 'Ctrl+Y gives it again');
 
-  // 2. history: every snapshot kept as a delta, the newest whole; one page goes back
+  // 2. history: every snapshot kept as a delta, the newest whole; one scene goes back
   await ev(() => window.__draft.histAdd(window.__draft.S.ep, 'база', true));
   const orig = await ev(() => ({ l5: window.__draft.S.ep.blocks.find((x) => x.id === 'L5').x, l80: window.__draft.S.ep.blocks.find((x) => x.id === 'L80').x }));
   await ev(() => { for (const id of ['L5', 'L80']) document.querySelector('#editor .b[data-id="' + id + '"]').textContent += ' ИЗМЕНЕНО'; window.__draft.recompute(); });
@@ -59,21 +60,17 @@ let fails = 0, n = 0; const ok = (c, m, x) => { n++; if (!c) { fails++; console.
   await ev(() => window.__draft.showHistory()); await p.waitForTimeout(300);
   ok(/Хранятся все снимки/.test(await p.textContent('#modal .note')), 'History says every snapshot is kept');
   await p.locator('.hist-row', { hasText: 'база' }).first().click(); await p.waitForTimeout(200);
-  const pages = await ev(() => [...document.querySelectorAll('#hsPage option')].map((o) => o.textContent));
-  ok(pages.length >= 3 && /^стр\. 1 — /.test(pages[0]), 'a page list from the snapshot layout', pages.slice(0, 3));
-  const pgIdx = await ev(() => { const d = window.__draft, C = d.C; const sel = document.querySelector('#hsPage'); const opts = [...sel.options];
-    // the page of the snapshot that holds L80 (snapshot = the current text with L80 as it was)
-    const paper = C.paperOf(d.S.project.rules), bl = d.S.ep.blocks.map((b) => b); const lay = C.paginate(bl, { lines: paper.lines, fmt: paper.fmt }); const pr = C.pageRanges(lay); const i = bl.findIndex((b) => b.id === 'L80');
-    return pr.findIndex((r) => r.from <= i && i <= r.to) < opts.length ? pr.findIndex((r) => r.from <= i && i <= r.to) : -1; });
-  ok(pgIdx > 0, 'L80 is on a later page', pgIdx);
-  await p.selectOption('#hsPage', String(pgIdx)); await p.click('#hsPg'); await p.waitForTimeout(500);
+  ok(await ev(() => !document.querySelector('#hsPage') && !!document.querySelector('#hsOne') && !!document.querySelector('#hsAll')), 'History offers the whole episode and one scene, no single page');
+  const scn = await ev(() => { const bl = window.__draft.S.ep.blocks; const sceneOf = (id) => { let sc = null; for (const b of bl) { if (b.t === 'scene') sc = b.id; if (b.id === id) return sc; } return null; }; return { l5: sceneOf('L5'), l80: sceneOf('L80') }; });
+  ok(scn.l80 && scn.l5 !== scn.l80, 'L5 and L80 are in different scenes', scn);
+  await p.selectOption('#hsScene', scn.l80); await p.click('#hsOne'); await p.waitForTimeout(500);
   const after = await ev(() => ({ l5: window.__draft.S.ep.blocks.find((x) => x.id === 'L5').x, l80: window.__draft.S.ep.blocks.find((x) => x.id === 'L80').x, modal: !document.getElementById('modalBack').hidden }));
-  ok(after.l80 === orig.l80 && after.l5 === orig.l5 + ' ИЗМЕНЕНО' && !after.modal, 'only that page went back: L80 restored, L5 on another page keeps the edit', after);
-  ok(/Страница .* заменена версией/.test(await p.textContent('#toast')), 'toast names the page');
-  ok(await ev(async () => { const d = window.__draft, l = await d.histLoad(d.S.ep); return /перед откатом страницы/.test(l[l.length - 1].reason) && l[l.length - 1].keep; }), 'the text before the page rollback is kept in History');
-  ok(await ev(() => (window.__draft.S.project.auditLog || []).some((x) => x.type === 'rollback' && /Страница/.test(x.text))), 'the page rollback is in the audit log');
+  ok(after.l80 === orig.l80 && after.l5 === orig.l5 + ' ИЗМЕНЕНО' && !after.modal, 'only that scene went back: L80 restored, L5 in another scene keeps the edit', after);
+  ok(/Сцена заменена версией/.test(await p.textContent('#toast')), 'toast names the scene');
+  ok(await ev(async () => { const d = window.__draft, l = await d.histLoad(d.S.ep); return /перед откатом сцены/.test(l[l.length - 1].reason) && l[l.length - 1].keep; }), 'the text before the scene rollback is kept in History');
+  ok(await ev(() => (window.__draft.S.project.auditLog || []).some((x) => x.type === 'rollback' && /Сцена/.test(x.text))), 'the scene rollback is in the audit log');
   await ev(() => window.__draft.undo()); await p.waitForTimeout(150);
-  ok(await ev(() => window.__draft.S.ep.blocks.find((x) => x.id === 'L80').x.endsWith('ИЗМЕНЕНО')), 'Ctrl+Z undoes the page rollback');
+  ok(await ev(() => window.__draft.S.ep.blocks.find((x) => x.id === 'L80').x.endsWith('ИЗМЕНЕНО')), 'Ctrl+Z undoes the scene rollback');
 
   // 3. an old snapshot written whole (long sig, no tags/titlePage keys) still restores
   await ev(async () => {
@@ -103,19 +100,23 @@ let fails = 0, n = 0; const ok = (c, m, x) => { n++; if (!c) { fails++; console.
   ok(await p.locator('#hsThin').isVisible() && /удалено старых автоснимков/.test(await p.textContent('#hsThin')), 'History shows the warning');
   await p.click('#hsClose');
 
-  // 5. audit log: unlock needs a reason; locks, drafts, deletions, restores and sides are written; producer and editor see it
+  // 5. audit log: an unlock is logged with or without a reason; locks, drafts, deletions, restores and sides are written; the producer sees it
   await role('producer', 'Продюсер Петров');
   await ev(() => window.__draft.lockNumbers()); await p.waitForTimeout(200);
   await ev(() => window.__draft.unlockNumbers()); await p.waitForTimeout(200);
   await p.click('#ulOk'); await p.waitForTimeout(150);
-  ok(await p.locator('#ulErr').isVisible() && await ev(() => !!window.__draft.S.ep.lock), 'unlocking without a reason is refused');
+  ok(await ev(() => !window.__draft.S.ep.lock && window.__draft.S.project.auditLog.some((x) => x.type === 'unlock' && !x.reason)), 'unlocking without a reason goes through and is logged');
+  await ev(() => window.__draft.lockNumbers()); await p.waitForTimeout(200);
+  await ev(() => window.__draft.unlockNumbers()); await p.waitForTimeout(200);
   await p.fill('#ulReason', 'новый график'); await p.click('#ulOk'); await p.waitForTimeout(250);
   ok(await ev(() => !window.__draft.S.ep.lock && window.__draft.S.project.auditLog.some((x) => x.type === 'unlock' && x.reason === 'новый график' && x.by === 'Продюсер Петров')), 'the unlock is logged with its reason');
   await ev(() => window.__draft.startRevision()); await p.waitForTimeout(200);
   await ev(() => window.__draft.lockPages()); await p.waitForTimeout(200);
   await ev(() => window.__draft.unlockPages()); await p.waitForTimeout(200);
   await p.click('#upOk'); await p.waitForTimeout(150);
-  ok(await p.locator('#upErr').isVisible() && await ev(() => !!window.__draft.S.ep.pageLock), 'unlocking pages without a reason is refused');
+  ok(await ev(() => !window.__draft.S.ep.pageLock && window.__draft.S.project.auditLog.some((x) => x.type === 'pageunlock' && !x.reason)), 'unlocking pages without a reason goes through and is logged');
+  await ev(() => window.__draft.lockPages()); await p.waitForTimeout(200);
+  await ev(() => window.__draft.unlockPages()); await p.waitForTimeout(200);
   await p.fill('#upReason', 'полная перепечатка'); await p.click('#upOk'); await p.waitForTimeout(250);
   const today = await ev(() => window.__draft.C.isoDay(Date.now()));
   ok(await ev((t) => window.__draft.issueSides({ ids: [window.__draft.S.st.scenes[0].id], to: ['Актёр Иванов'], expires: t }), today), 'sides issued');
@@ -127,7 +128,7 @@ let fails = 0, n = 0; const ok = (c, m, x) => { n++; if (!c) { fails++; console.
   await ev(() => window.__draft.showTrash()); await p.waitForTimeout(300);
   await p.locator('[data-restore]').first().dispatchEvent('click'); await p.waitForTimeout(700);
   // an unlock recorded only in an episode (from before the project log)
-  await ev(() => { const e = window.__draft.S.project.episodes[1]; e.lockLog = (e.lockLog || []).concat([{ at: 1700000000000, by: 'Редактор Старый', role: 'editor', reason: 'старая причина' }]); });
+  await ev(() => { const e = window.__draft.S.project.episodes[1]; e.lockLog = (e.lockLog || []).concat([{ at: 1700000000000, by: 'Редактор Старый', role: 'producer', reason: 'старая причина' }]); });
   const types = await ev(() => window.__draft.S.project.auditLog.map((x) => x.type));
   ok(['unlock', 'draft', 'pageunlock', 'sides', 'delete', 'restore', 'rollback'].every((t) => types.includes(t)), 'every kind of action is in P().auditLog', types);
   await menu('#mAudit');
@@ -136,7 +137,8 @@ let fails = 0, n = 0; const ok = (c, m, x) => { n++; if (!c) { fails++; console.
   ok(all.some((r) => /новый график/.test(r)) && all.some((r) => /полная перепечатка/.test(r)) && all.some((r) => /старая причина/.test(r)) && all.some((r) => /Актёр Иванов/.test(r)) && all.some((r) => /возвращена из корзины/.test(r)), 'the log lists reasons, sides, the trash and old episode unlock records', all.length);
   await p.selectOption('#auType', 'unlock'); await p.waitForTimeout(100);
   const un = await ev(() => [...document.querySelectorAll('.au-row')].map((r) => r.dataset.type));
-  ok(un.length === 2 && un.every((t) => t === 'unlock'), 'filter by type', un);
+  // two unlocks of this session (without and with a reason) and the old episode record
+  ok(un.length === 3 && un.every((t) => t === 'unlock'), 'filter by type', un);
   await p.selectOption('#auType', ''); await p.selectOption('#auEp', ep2); await p.waitForTimeout(100);
   const e2 = await ev(() => [...document.querySelectorAll('.au-row')].map((r) => r.textContent));
   ok(e2.length >= 3 && e2.every((r) => !/новый график/.test(r)), 'filter by episode', e2.length);
@@ -144,10 +146,10 @@ let fails = 0, n = 0; const ok = (c, m, x) => { n++; if (!c) { fails++; console.
   await role('writer', 'Анна');
   ok(await ev(() => document.getElementById('mAudit').hidden), 'a writer has no «Журнал действий» in the menu');
   await ev(() => window.__draft.showAudit()); await p.waitForTimeout(150);
-  ok(/Нужна роль продюсера/.test(await p.textContent('#modal h2')), 'and cannot open it');
+  ok(/Нужен режим «Продюсер»/.test(await p.textContent('#modal h2')), 'and cannot open it');
   await ev(() => document.getElementById('npC').click());
-  await role('editor', 'Редактор Р');
-  ok(await ev(() => !document.getElementById('mAudit').hidden), 'an editor sees it');
+  await role('producer', 'Продюсер Р');
+  ok(await ev(() => !document.getElementById('mAudit').hidden), 'a producer sees it');
 
   // 6. the log merges on opening a project file: entries from both copies, each once
   const fileP = path.join(tmp, 'p.json');

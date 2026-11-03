@@ -79,11 +79,12 @@
   const PREFIXES = ['ИНТ.', 'НАТ.', 'ПАВ.', 'ИНТ./НАТ.'];
   const TRANSITIONS = ['СМЕНА КАДРА:', 'ЗАТЕМНЕНИЕ.', 'ИЗ ЗАТЕМНЕНИЯ:', 'НАПЛЫВ:', 'ВСТАВКА:', 'КОНЕЦ ВОСПОМИНАНИЯ.', 'ТИТР:'];
   const EXTENSIONS = ['(ЗК)', '(ПРОД.)', '(ПО ТЕЛЕФОНУ)', '(ТИТР)', '(В КАДРЕ)'];
-  const TAGS = {
-    kids: 'Дети', animals: 'Животные', stunts: 'Трюки', complex: 'Сложная постановка',
-    clip: 'Клип', music: 'Музыка / трек', crowd: 'Массовка', makeup: 'Сложный грим', far: 'Выезд / удалённо', flashback: 'Флешбэк',
-  };
-  const SPECIAL_TAGS = ['kids', 'animals', 'stunts', 'complex'];
+  // scene marks set by hand in the scene card; stunts and animals come from the breakdown (BD_SPECIAL), not from marks
+  const TAGS = { kids: 'Дети', flashback: 'Флешбэк' };
+  // tags that make a scene special for the studio rules: kids by the mark, stunts and animals by the breakdown
+  const SPECIAL_TAGS = ['kids', 'animals', 'stunts'];
+  // old scene cards may carry marks that no longer exist (клип, массовка…): they are ignored
+  const TAG_LABELS = Object.assign({ animals: 'Животные', stunts: 'Трюки' }, TAGS);
 
   const DEFAULT_RULES = {
     preset: 'Ситком 24 мин (рекомендации студии)',
@@ -102,14 +103,34 @@
     maxCharsPerEpisode: 20,
     bigCast: 5,
     bigCastMaxScenes: 3,
-    ensembleMinSec: 30,
     specialMaxPct: 15,
     ratePav: 9,
     rateInt: 7.5,
     rateExt: 7,
     specialFactor: 2.5,
     lineTolerance: 5,
+    // Final Draft «Automatic Character Continueds»: (ПРОД.) after the name of a character who speaks again in the scene
+    autoContd: true,
   };
+  // scene colours, as Final Draft's eight (sceneMeta.color); written to .fdx SceneProperties Color as 48-bit RGB
+  const SCENE_COLORS = [
+    { id: 'red', name: 'Красный', hex: '#e53935' }, { id: 'orange', name: 'Оранжевый', hex: '#fb8c00' }, { id: 'yellow', name: 'Жёлтый', hex: '#fdd835' },
+    { id: 'green', name: 'Зелёный', hex: '#43a047' }, { id: 'cyan', name: 'Голубой', hex: '#00acc1' }, { id: 'blue', name: 'Синий', hex: '#1e88e5' },
+    { id: 'purple', name: 'Фиолетовый', hex: '#8e24aa' }, { id: 'grey', name: 'Серый', hex: '#757575' },
+  ];
+  const sceneColor = (id) => SCENE_COLORS.find((c) => c.id === id) || null;
+  const hexRGB = (hex) => [1, 3, 5].map((k) => parseInt(hex.slice(k, k + 2), 16));
+  // «#RRRRGGGGBBBB» (Final Draft) or «#RRGGBB» → the nearest of our colours; white, black and empty mean none
+  function colorFromFDX(s) {
+    const m = String(s || '').trim().match(/^#([0-9a-f]{12}|[0-9a-f]{6})$/i);
+    if (!m) return '';
+    const h = m[1], rgb = h.length === 12 ? [0, 4, 8].map((k) => parseInt(h.slice(k, k + 2), 16)) : [0, 2, 4].map((k) => parseInt(h.slice(k, k + 2), 16));
+    if (rgb.every((v) => v > 235) || rgb.every((v) => v < 20)) return '';
+    let best = null, bd = Infinity;
+    for (const c of SCENE_COLORS) { const d = hexRGB(c.hex).reduce((a, v, k) => a + (v - rgb[k]) ** 2, 0); if (d < bd) { bd = d; best = c.id; } }
+    return best;
+  }
+  const colorToFDX = (id) => { const c = sceneColor(id); return c ? '#' + hexRGB(c.hex).map((v) => (v.toString(16).padStart(2, '0') + '00').toUpperCase()).join('') : ''; };
   const MANUAL_CHECKS = [
     'Учтена удалённость локаций от города (особенно разовые выезды)',
     'Внутри сцен нет избыточной многокадровой разработки и сложного «балета»',
@@ -185,6 +206,187 @@
     return clean(up(text).replace(/\(.*?\)/g, ' ').replace(/(^|[^А-ЯЁA-Z0-9])(ПРОД|CONT'?D)\.?(?![А-ЯЁA-Z0-9])/g, '$1')).replace(/[.:]+$/, '');
   }
 
+  // ---------- inline text styles (Final Draft bold / italic / underline) ----------
+  // block.x is the plain text, always. The styles stand beside it in block.st: runs [from, to, bits] in offsets of that
+  // text (bits: 1 bold, 2 italic, 4 underline), present only on a styled block. So a '*' or '_' is a character like any
+  // other, wherever it came from: the keyboard, an import, a file saved before styles existed. Fountain markup
+  // (**bold**, *italic*, ***both***, _underline_ outermost, Fountain's backslash escape \* \_ \\ for the characters
+  // themselves) exists only in .fountain files: fromMarkup / toMarkup are that border. Every edit works on a styled text
+  // { text, st } (st: bits per character, or null); styledOf / withSt move between it and a block
+  const ST_B = 1, ST_I = 2, ST_U = 4;
+  const stFill = (n, s) => { const a = new Array(n); for (let k = 0; k < n; k++) a[k] = s; return a; };
+  // per-character bits of a block (null when nothing is styled); a run outside the text is ignored
+  function stOf(b) {
+    const runs = b && b.st, n = ((b && b.x) || '').length;
+    if (!Array.isArray(runs) || !runs.length || !n) return null;
+    const st = stFill(n, 0); let any = false;
+    for (const r of runs) {
+      if (!Array.isArray(r)) continue;
+      const s = Math.max(0, r[0] | 0), e = Math.min(n, r[1] | 0), bits = (r[2] | 0) & 7;
+      if (!bits) continue;
+      for (let k = s; k < e; k++) { st[k] |= bits; any = true; }
+    }
+    return any ? st : null;
+  }
+  // block.st from per-character bits (undefined when nothing is styled)
+  function stCompact(st) {
+    if (!st) return undefined;
+    const out = []; let k = 0;
+    while (k < st.length) { const s = st[k] || 0; let e = k + 1; while (e < st.length && (st[e] || 0) === s) e++; if (s) out.push([k, e, s]); k = e; }
+    return out.length ? out : undefined;
+  }
+  const styledOf = (b) => ({ text: (b && b.x) || '', st: stOf(b) });
+  // the block takes the bits (dropped when plain or when they do not fit its text)
+  function withSt(b, st) { const c = stCompact(st && st.length === (b.x || '').length ? st : null); if (c) b.st = c; else delete b.st; return b; }
+  const norm = (d) => (d.st && d.st.some(Boolean) ? d : { text: d.text, st: null });
+  const stArr = (d) => d.st || stFill(d.text.length, 0);
+  const stAt = (d, k) => (d.st ? d.st[k] || 0 : 0);
+  // replace [s, e) with ins: a string takes the style of what it replaces or follows, a styled { text, st } keeps its own
+  function stSplice(d, s, e, ins) {
+    const n = d.text.length, st = stArr(d);
+    s = Math.max(0, Math.min(s, n)); e = Math.max(s, Math.min(e == null ? s : e, n));
+    const it = ins == null || typeof ins === 'string' ? { text: ins || '', st: null } : ins;
+    const sty = e > s ? st[s] : s > 0 ? st[s - 1] : 0;
+    return norm({ text: d.text.slice(0, s) + it.text + d.text.slice(e), st: st.slice(0, s).concat(it.st || stFill(it.text.length, sty), st.slice(e)) });
+  }
+  function stSlice(d, s, e) { const st = stArr(d); return norm({ text: d.text.slice(s, e), st: st.slice(s, e) }); }
+  function stSplit(d, off) { off = Math.max(0, Math.min(off, d.text.length)); return [stSlice(d, 0, off), stSlice(d, off, d.text.length)]; }
+  function stJoin(a, b) { return norm({ text: a.text + b.text, st: stArr(a).concat(stArr(b)) }); }
+  // Ctrl+B / I / U over [s, e): the style goes on unless every character there has it already (then it comes off)
+  function stToggle(d, s, e, bit) {
+    const n = d.text.length, st = stArr(d).slice();
+    s = Math.max(0, Math.min(s, n)); e = Math.max(s, Math.min(e, n));
+    if (e <= s) return d;
+    let all = true;
+    for (let k = s; k < e; k++) if (!/\s/.test(d.text[k]) && !(st[k] & bit)) all = false;
+    for (let k = s; k < e; k++) st[k] = all ? st[k] & ~bit : st[k] | bit;
+    return norm({ text: d.text, st });
+  }
+  const stStyleAt = (d, off) => (off > 0 ? stAt(d, off - 1) : stAt(d, 0));
+  // the word at a caret (for Ctrl+B without a selection): [start, end) in plain offsets, or null between words
+  function wordAt(text, off) {
+    const W = /[\p{L}\p{N}_'’-]/u;
+    let s = off, e = off;
+    while (s > 0 && W.test(text[s - 1])) s--;
+    while (e < text.length && W.test(text[e])) e++;
+    return e > s ? [s, e] : null;
+  }
+  // runs of one style: [{ x, b, i, u }] (for .fdx, Word, PDF, the page), from a text and its bits
+  function inlineRuns(text, st) {
+    const out = [];
+    if (!st) return text ? [{ x: text, b: false, i: false, u: false }] : [];
+    let k = 0;
+    while (k < text.length) { const s = st[k] || 0; let e = k + 1; while (e < text.length && (st[e] || 0) === s) e++; out.push({ x: text.slice(k, e), b: !!(s & ST_B), i: !!(s & ST_I), u: !!(s & ST_U) }); k = e; }
+    return out;
+  }
+  // a styled text from imported runs ({ x, b, i, u }), whitespace folded as clean() folds it
+  function inlineFromRuns(runs) {
+    let text = '', st = [];
+    for (const r of runs || []) { const s = (r.b ? ST_B : 0) | (r.i ? ST_I : 0) | (r.u ? ST_U : 0); for (const c of String(r.x || '')) { text += c; st.push(s); } }
+    return norm(cleanStyled(text, st));
+  }
+  // clean() with the style bits kept in step: a run of whitespace keeps the first character's style
+  function cleanStyled(text, st) {
+    let t = '', s = [];
+    for (let k = 0; k < text.length; k++) {
+      let c = text[k];
+      if (c === '\t') c = ' ';
+      if (/\s/.test(c)) {
+        let e = k + 1; while (e < text.length && /\s/.test(text[e])) e++;
+        if (t) { t += e - k > 1 ? ' ' : c; s.push(st ? st[k] || 0 : 0); }
+        k = e - 1; continue;
+      }
+      t += c; s.push(st ? st[k] || 0 : 0);
+    }
+    if (t && /\s/.test(t[t.length - 1])) { t = t.slice(0, -1); s.pop(); }
+    return { text: t, st: st ? s : null };
+  }
+  // the styles of each printed line (lines as wrap() gave them from the text, in order from the start of the text)
+  function lineRuns(text, st, lines) {
+    const c = cleanStyled(text, st);
+    let pos = 0;
+    return lines.map((ln) => {
+      const at = c.text.indexOf(ln, pos);
+      if (at < 0 || !c.st) return ln ? [{ x: ln, b: false, i: false, u: false }] : [];
+      pos = at + ln.length;
+      return inlineRuns(ln, c.st.slice(at, at + ln.length));
+    });
+  }
+  // ---- Fountain markup (the .fountain border only) ----
+  const MARK_BITS = { '***': ST_B | ST_I, '**': ST_B, '*': ST_I, '_': ST_U };
+  const MARK_RE = /[*_\\]/;
+  // an underscore inside a word (ТЕКСТ_ВКЛАДКИ_Б, snake_case) is a letter of the word, not a marker
+  const WORD_CH = /[\p{L}\p{N}]/u;
+  // a character behind an odd number of backslashes is escaped: it is itself, never a marker
+  const escAt = (s, k) => { let n = 0; while (k - 1 - n >= 0 && s[k - 1 - n] === '\\') n++; return n % 2 === 1; };
+  const markAt = (s, i) => {
+    const ch = s[i];
+    if (ch !== '*' && ch !== '_') return null;
+    if (ch === '_' && i > 0 && WORD_CH.test(s[i - 1])) return null;
+    let r = 1; while (ch === '*' && s[i + r] === '*') r++;
+    if (r > 3) return null;
+    const nx = s[i + r];
+    return nx && !/\s/.test(nx) && nx !== ch ? s.slice(i, i + r) : null;
+  };
+  // the closing marker: the same run, not escaped, not after a space nor after its own (unescaped) character; what follows
+  // it is either not the marker's character or the opening of the next run (two styled runs touch: **a*****b***)
+  const closeAt = (s, from, m) => {
+    const ch = m[0];
+    for (let j = s.indexOf(m, from + 1); j >= 0; j = s.indexOf(m, j + 1)) {
+      if (escAt(s, j)) continue;
+      const pv = s[j - 1], nx = s[j + m.length];
+      if (ch === '_' && nx && WORD_CH.test(nx)) continue;
+      if (pv && !/\s/.test(pv) && (pv !== ch || escAt(s, j - 1)) && (nx !== ch || markAt(s, j + m.length))) return j;
+    }
+    return -1;
+  };
+  function inlineInto(s, base, out) {
+    let i = 0;
+    while (i < s.length) {
+      if (s[i] === '\\' && /[*_\\]/.test(s[i + 1] || '')) { out.text += s[i + 1]; out.st.push(base); i += 2; continue; }
+      const m = markAt(s, i);
+      if (m) {
+        const j = closeAt(s, i + m.length, m);
+        if (j > 0) { inlineInto(s.slice(i + m.length, j), base | MARK_BITS[m], out); i = j + m.length; continue; }
+      }
+      out.text += s[i]; out.st.push(base); i++;
+    }
+    return out;
+  }
+  // Fountain markup -> styled text
+  function fromMarkup(x) {
+    x = String(x == null ? '' : x);
+    if (!MARK_RE.test(x)) return { text: x, st: null };
+    return norm(inlineInto(x, 0, { text: '', st: [] }));
+  }
+  // styled text -> Fountain markup; a literal *, _ (and a backslash before one of them) is escaped, spaces at the ends of a
+  // styled run go outside its markers (a marker next to a space is text in Fountain)
+  const fountainEsc = (s) => s.replace(/\\(?=[*_\\])/g, '\\\\').replace(/[*_]/g, '\\$&');
+  function toMarkup(text, st) {
+    text = String(text == null ? '' : text);
+    if (!st || !st.some(Boolean)) return fountainEsc(text);
+    let out = '', k = 0;
+    while (k < text.length) {
+      const s = st[k] || 0;
+      let e = k + 1; while (e < text.length && (st[e] || 0) === s) e++;
+      let seg = text.slice(k, e);
+      if (!s || !seg.trim()) { out += fountainEsc(seg); k = e; continue; }
+      const lead = seg.match(/^\s*/)[0], trail = seg.match(/\s*$/)[0];
+      seg = seg.slice(lead.length, seg.length - trail.length);
+      const stars = (s & ST_B) && (s & ST_I) ? '***' : (s & ST_B) ? '**' : (s & ST_I) ? '*' : '';
+      // Fountain underlines whole words only: an underline that starts or ends inside a word has no markup
+      const a = k + lead.length - 1, z = e - trail.length;
+      const inWord = (a >= 0 && WORD_CH.test(text[a]) && !((st[a] || 0) & ST_U)) || (z < text.length && WORD_CH.test(text[z]) && !((st[z] || 0) & ST_U));
+      const u = (s & ST_U) && !inWord ? '_' : '';
+      out += lead + u + stars + fountainEsc(seg) + stars + u + trail;
+      k = e;
+    }
+    return out;
+  }
+  // a block from markup / the markup of a block (tests and the Fountain import use them)
+  const blockFromMarkup = (t, m, more) => { const d = fromMarkup(m); return withSt(Object.assign({ id: uid() }, more || {}, { t, x: d.text }), d.st); };
+  const blockMarkup = (b) => { const d = styledOf(b); return toMarkup(d.text, d.st); };
+
   // ---------- pagination (Final Draft rules) ----------
   function wrap(text, width) {
     const lines = [];
@@ -206,9 +408,16 @@
     lines.push(cur);
     return lines;
   }
+  const CAPS_T = { scene: 1, character: 1, transition: 1, shot: 1 };
+  // the printed text of a block: in capitals for a heading, a cue, a transition, a shot
   function displayText(b) {
     const t = b.x || '';
-    return (b.t === 'scene' || b.t === 'character' || b.t === 'transition' || b.t === 'shot') ? up(t) : t;
+    return CAPS_T[b.t] ? up(t) : t;
+  }
+  // the same with its style bits (null when nothing is styled; a heading, a cue, a transition, a shot are never styled)
+  function displayStyled(b) {
+    if (CAPS_T[b.t]) return { text: up(b.x || ''), st: null };
+    return styledOf(b);
   }
   // a right-aligned element ends at its own edge (Final Draft transition: 7.10 in) or at the right margin
   const rightEdge = (f, paper) => f.edge || paper.w - paper.right;
@@ -231,15 +440,34 @@
     return k >= 2 ? { head: lines.slice(0, k), rest: lines.slice(k).join(' '), done: lines.slice(0, k).join(' ') } : null;
   }
 
+  // Final Draft «Automatic Character Continueds»: a character who speaks again in the same scene after something else
+  // (action, another speech) gets (ПРОД.) after the name. It is computed, never text: the set of cue indices that take it.
+  // A cue that already carries (ПРОД.) in its text and the second cue of a dual pair are left alone
+  const CONTD_RE = /\(\s*(ПРОД|CONT'?D)\.?\s*\)/i;
+  function autoContd(blocks) {
+    const out = new Set();
+    let last = '';
+    (blocks || []).forEach((b, i) => {
+      if (b.t === 'scene') { last = ''; return; }
+      if (b.t !== 'character') return;
+      const name = charName(b.x);
+      if (name && name === last && !b.dual && !CONTD_RE.test(b.x || '')) out.add(i);
+      last = name;
+    });
+    return out;
+  }
+  const cueText = (b, i, contd) => displayText(b) + (contd && contd.has(i) ? ' (ПРОД.)' : '');
   // lines an item takes on its page: a dual pair counts once, on its first item, as tall as its longer column
   const itH = (it) => (it.dual ? (it.dualH != null ? it.sb + it.dualH : 0) : it.sb + it.lines.length);
+  // opts: lines per page, fmt, pageLock, autoContd (default on); block.pageBreak starts a new page before the block
   function paginate(blocks, opts) {
     const lpp = (opts && opts.lines) || 54;
     const F = (opts && opts.fmt) || FMT;
     const pages = [{ items: [] }];
-    const info = blocks.map((b) => {
+    const autoC = opts && opts.autoContd === false ? new Set() : autoContd(blocks);
+    const info = blocks.map((b, i) => {
       const f = F[b.t] || F.action;
-      const lines = wrap(displayText(b), f.width);
+      const lines = wrap(b.t === 'character' ? cueText(b, i, autoC) : displayText(b), f.width);
       return { lines, L: lines.length, sb: f.sb };
     });
     // dual dialogue: both speeches of a pair wrap in their own column and go on one page together, as tall as the longer
@@ -248,7 +476,7 @@
     for (const p of dualPairs(blocks)) {
       const col = (from, to, c) => {
         let h = 0; const its = [];
-        for (let q = from; q <= to; q++) { const lines = wrap(displayText(blocks[q]), DF[c][blocks[q].t].width); its.push({ q, lines, row: h, col: c }); h += lines.length; }
+        for (let q = from; q <= to; q++) { const lines = wrap(blocks[q].t === 'character' ? cueText(blocks[q], q, autoC) : displayText(blocks[q]), DF[c][blocks[q].t].width); its.push({ q, lines, row: h, col: c }); h += lines.length; }
         return { its, h };
       };
       const L = col(p.a, p.b - 1, 0), R = col(p.b, p.e, 1), h = Math.max(L.h, R.h);
@@ -296,7 +524,7 @@
     };
     for (let i = 0; i < blocks.length; i++) {
       const b = blocks[i], inf = info[i];
-      if (b.t === 'character') { lastChar = charName(b.x); lastCue = clean(up(b.x).replace(/\(\s*(ПРОД|CONT'?D)\.?\s*\)/g, ' ')) || lastChar; }
+      if (b.t === 'character') { lastChar = charName(b.x); lastCue = clean(displayText(b).replace(/\(\s*(ПРОД|CONT'?D)\.?\s*\)/g, ' ')) || lastChar; }
       else if (b.t !== 'dialogue' && b.t !== 'paren') lastChar = lastCue = '';
       if (PL) {
         // a locked page starts where it started at the lock, however much text the page before it lost or gained:
@@ -317,6 +545,12 @@
         if (PL.mids.length) { const q = PL.mids[0]; PL.mids = []; if (!(a && a.start != null)) force(q); }
         if (a && a.start != null && a.start > PL.cur) force(a.start);
         if (a) PL.mids = a.mids.filter((q) => q > PL.cur);
+      }
+      // a forced page break (Final Draft Insert Page Break): the block starts a new page unless it starts one anyway
+      if (b.pageBreak && i > 0 && used > 0) {
+        // a cue or a heading left alone at the bottom goes along; a speech broken here gets (ДАЛЬШЕ) and its cue (ПРОД.)
+        const carry = carryOver(b, i);
+        if (carry) { newPage(); if (carry.length) { carry[0].sb = 0; carry.forEach(put); breaks[carry[0].i] = { page: pages.length }; } else breaks[i] = { page: pages.length }; }
       }
       const pr = pairAt[i];
       if (pr) {
@@ -371,7 +605,7 @@
     const last = pages[pages.length - 1];
     const lastUsed = last.items.reduce((a, it) => a + itH(it), 0);
     const total = blocks.length ? (pages.length - 1) + lastUsed / lpp : 0;
-    return { pages, total, info, breaks, inner, lpp, labels: labels || pages.map((pg, k) => String(k + 1)), locked: !!PL, duals };
+    return { pages, total, info, breaks, inner, lpp, labels: labels || pages.map((pg, k) => String(k + 1)), locked: !!PL, duals, contd: autoC };
   }
 
   // ---------- locked pages (Final Draft «Lock Pages») ----------
@@ -476,7 +710,7 @@
       if (!lv) continue;
       const was = new Map(base.map((b) => [b.id, b])), at = new Map(base.map((b, k) => [b.id, k]));
       // dual dialogue switched on or off is a change of the page too (a base taken before the flag existed has none)
-      const chg = blocks.map((b) => { const o = was.get(b.id); return !o || o.t !== b.t || (o.x || '') !== (b.x || '') || !!o.dual !== !!(b.dual && b.t === 'character'); });
+      const chg = blocks.map((b) => { const o = was.get(b.id); return !o || o.t !== b.t || (o.x || '') !== (b.x || '') || !!o.dual !== !!(b.dual && b.t === 'character') || JSON.stringify(o.st || null) !== JSON.stringify(b.st || null); });
       const idx = [], val = [];
       blocks.forEach((b, i) => { if (at.has(b.id)) { idx.push(i); val.push(at.get(b.id)); } });
       const inOrder = lnds(val);
@@ -498,7 +732,7 @@
   // a fresh draft: the next level, its number name (colour only for FDX), and the text it is measured against
   function newRevision(prevLevel, blocks, by, date) {
     const level = (prevLevel || 0) + 1;
-    return { level, name: revName(level), color: revColor(level), date: date || Date.now(), by: by || '', base: blocks.map((b) => (b.dual && b.t === 'character' ? { id: b.id, t: b.t, x: b.x || '', dual: true } : { id: b.id, t: b.t, x: b.x || '' })) };
+    return { level, name: revName(level), color: revColor(level), date: date || Date.now(), by: by || '', base: blocks.map((b) => { const o = { id: b.id, t: b.t, x: b.x || '' }; if (b.dual && b.t === 'character') o.dual = true; if (b.st) o.st = JSON.parse(JSON.stringify(b.st)); return o; }) };
   }
   // FDX import: marks read from RevisionID become revisions whose base is the text without the marks of that level and
   // above, so revMarks gives every block back exactly the level it had in Final Draft
@@ -533,9 +767,10 @@
     const rules = Object.assign({}, DEFAULT_RULES, project.rules || {});
     const paper = paperOf(rules);
     const blocks = ep.blocks || [];
-    const lay = paginate(blocks, { lines: paper.lines, fmt: paper.fmt, pageLock: ep.pageLock });
+    const autoC = rules.autoContd !== false;
+    const lay = paginate(blocks, { lines: paper.lines, fmt: paper.fmt, pageLock: ep.pageLock, autoContd: autoC });
     // locked pages keep their numbers (short pages, A-pages), but the timing counts the text itself
-    const pages = lay.locked ? paginate(blocks, { lines: paper.lines, fmt: paper.fmt }).total : lay.total;
+    const pages = lay.locked ? paginate(blocks, { lines: paper.lines, fmt: paper.fmt, autoContd: autoC }).total : lay.total;
     const pageAt = [];
     lay.pages.forEach((pg, k) => pg.items.forEach((it) => { if (pageAt[it.i] == null) pageAt[it.i] = lay.labels[k]; }));
     const minutes = pages * rules.minPerPage;
@@ -579,33 +814,25 @@
       const share = lines / totalNominal;
       const min = share * minutes;
       const minors = [...cast].filter((n) => chars[n] && chars[n].minor);
-      const guests = [...cast].filter((n) => chars[n] && chars[n].guest);
-      const tags = omitted ? [] : (meta.tags || []);
-      // breakdown items in Трюки / Животные make the scene special as the scene tags do; a scene with both counts once
+      const tags = omitted ? [] : (meta.tags || []).filter((t) => TAGS[t]);
+      // breakdown items in Трюки / Животные make the scene special
       const bd = omitted ? {} : (bdBy[s.id] || {});
-      const bdTags = Object.keys(BD_SPECIAL).filter((c) => bd[c] && bd[c].length && !tags.includes(BD_SPECIAL[c])).map((c) => BD_SPECIAL[c]);
+      const bdTags = Object.keys(BD_SPECIAL).filter((c) => bd[c] && bd[c].length).map((c) => BD_SPECIAL[c]);
       const special = tags.concat(bdTags).some((t) => SPECIAL_TAGS.includes(t)) || minors.length > 0;
       const rate = pav ? rules.ratePav : (h.type === 'ext' || h.type === 'intext') ? rules.rateExt : rules.rateInt;
       const shifts = omitted ? 0 : min / (special ? rate / rules.specialFactor : rate);
       return {
         id: s.id, n: k + 1, from: s.from, to: s.to, heading: s.heading, h, pav, night: isNight(h),
         lines, share, pages: share * pages, min, sec: Math.round(min * 60), cast: [...cast], speaking: [...speaking],
-        silent: [...cast].filter((n) => !speaking.has(n)), minors, guests, tags, bd, bdTags, special, shifts, replicas, dialogueWords,
+        silent: [...cast].filter((n) => !speaking.has(n)), minors, tags, bd, bdTags, special, shifts, replicas, dialogueWords,
         synopsis: meta.synopsis || '', day: meta.day || h.day || '', num: meta.num || String(k + 1), fileNum: !!meta.num,
-        line: meta.line || '', omitted, page: pageAt[s.from] || '1',
+        line: meta.line || '', color: sceneColor(meta.color) ? meta.color : '', omitted, page: pageAt[s.from] || '1',
       };
     });
-    for (const s of scenes) {
-      if (s.line || s.omitted) continue;
-      const auto = autoLine(s, project);
-      if (auto) { s.line = auto.line; s.lineAuto = auto.how; }
-    }
-    // story lines / shooting units: share of material per line, against the project's targets
+    // story lines / shooting units (set by hand in the scene card): share of material per line, against the project's targets
     const lineDefs = project.lines || [];
     const lineMap = {};
     lineDefs.forEach((l) => { lineMap[l.name] = { name: l.name, target: l.target, color: l.color, scenes: 0, min: 0, pages: 0, lines: 0 }; });
-    const sp = (project.lineRules || {}).special;
-    if (sp && sp.name) lineMap[sp.name] = { name: sp.name, target: null, color: '#6b7280', special: true, scenes: 0, min: 0, pages: 0, lines: 0 };
     let unassigned = { name: '', scenes: 0, min: 0, pages: 0, lines: 0 };
     const live = scenes.filter((s) => !s.omitted);
     for (const s of live) {
@@ -832,8 +1059,8 @@
     const scenes = [['№', 'Заголовок', 'Объект', 'Режим', 'ИНТ/НАТ/ПАВ', 'Сценарный день', 'Страницы', 'Хронометраж', 'Персонажи', 'Массовка', ...cats.map((c) => c.name)]];
     for (const s of st.scenes) {
       const bd = s.bd || {};
-      // the crowd column takes the breakdown's «Массовка» items, or the scene's own «Массовка» mark
-      const crowd = join(bd.extras) || (s.tags.includes('crowd') ? 'да' : '');
+      // the crowd column takes the breakdown's «Массовка» items
+      const crowd = join(bd.extras);
       scenes.push([s.num, s.heading || '', s.omitted ? '' : s.h.object, s.omitted ? '' : s.h.time, s.omitted ? '' : (s.h.prefix || '') + (s.pav && s.h.type !== 'pav' ? ' (пав.)' : ''),
         s.day || '', s.omitted ? '' : fmtScenePages(s), s.omitted ? '' : fmtTime(s.min), s.cast.join(', '), crowd, ...cats.map((c) => join(bd[c.id]))]);
     }
@@ -944,9 +1171,6 @@
     const big = live.filter((s) => s.cast.length > r.bigCast);
     add('bigcast', 'Сцены больше ' + r.bigCast + ' артистов', big.length <= r.bigCastMaxScenes ? (big.length ? 'warn' : 'ok') : 'fail',
       big.length + ' / ' + r.bigCastMaxScenes, big.map((s) => sref(s, s.heading + ' · ' + s.cast.length + ' арт.')));
-    const ens = big.filter((s) => s.sec < r.ensembleMinSec);
-    add('ensemble', 'Сбор ансамбля короче ' + r.ensembleMinSec + ' с', ens.length ? 'fail' : 'ok', ens.length + ' сц.',
-      ens.map((s) => sref(s, s.heading + ' · ' + s.sec + ' с')), 'Раз собрали всех, сцена должна быть плотной.');
     // characters in the episode (speaking and listed in scene cards); 0 switches the rule off
     if (+r.maxCharsPerEpisode > 0) {
       const chars = st.characters || [], nc = chars.length, speak = chars.filter((c) => c.speaking).length, mx = r.maxCharsPerEpisode;
@@ -954,22 +1178,11 @@
         nc + ' / ' + mx + (speak !== nc ? ' · с репликами ' + speak : ''), chars.map((c) => ({ text: c.name + ' · ' + c.scenes + ' сц.' + (c.speaking ? '' : ' · без реплик') })),
         'Каждый новый артист — отдельный кастинг, договор и смены.');
     }
-    const small23 = live.filter((s) => s.cast.length >= 2 && s.cast.length <= 3).length;
-    add('balance', 'Баланс: сцены на 2–3 артистов', 'info', small23 + ' из ' + live.length);
     const spPct = st.specialMin / (st.minutes || 1) * 100;
     const sp = live.filter((s) => s.special);
-    add('special', 'Дети, животные, трюки, сложная постановка', spPct <= r.specialMaxPct ? (sp.length ? 'warn' : 'ok') : 'fail',
-      spPct.toFixed(0) + '% хронометража', sp.map((s) => sref(s, s.heading + ' · ' + [...s.tags.filter((t) => SPECIAL_TAGS.includes(t)).map((t) => TAGS[t]), ...(s.bdTags || []).map((t) => TAGS[t] + ' (по разбивке)'), ...(s.minors.length ? ['несовершеннолетние: ' + s.minors.join(', ')] : [])].join(', '))),
+    add('special', 'Дети, животные, трюки', spPct <= r.specialMaxPct ? (sp.length ? 'warn' : 'ok') : 'fail',
+      spPct.toFixed(0) + '% хронометража', sp.map((s) => sref(s, s.heading + ' · ' + [...s.tags.filter((t) => SPECIAL_TAGS.includes(t)).map((t) => TAGS[t]), ...(s.bdTags || []).map((t) => TAG_LABELS[t] + ' (по разбивке)'), ...(s.minors.length ? ['несовершеннолетние: ' + s.minors.join(', ')] : [])].join(', '))),
       'Выработка в таких сценах падает в 2–3 раза.');
-    const tagged = (t) => live.filter((s) => s.tags.includes(t));
-    const clips = tagged('clip');
-    add('clip', 'Клипы', clips.length ? 'warn' : 'ok', clips.length + ' сц.', clips.map((s) => sref(s)), 'Только при драматургической необходимости.');
-    const music = tagged('music');
-    if (music.length) add('music', 'Музыка и права', 'info', music.length + ' сц.', music.map((s) => sref(s)), 'Согласовать с производством и юристами.');
-    const crowd = tagged('crowd');
-    if (crowd.length) add('crowd', 'Массовка', 'info', crowd.length + ' сц.', crowd.map((s) => sref(s)), 'Обсудить с производством заранее.');
-    const makeup = tagged('makeup');
-    if (makeup.length) add('makeup', 'Сложный грим', 'info', makeup.length + ' сц.', makeup.map((s) => sref(s)), 'Синяки и шрамы не тянуть дальше одной серии.');
     if (st.lines && st.lines.length) {
       const tol = r.lineTolerance == null ? 5 : r.lineTolerance;
       const off = st.lines.filter((l) => l.target != null && Math.abs(l.share * 100 - l.target) > tol);
@@ -979,11 +1192,6 @@
       add('lines', 'Баланс линий', !hasTargets ? 'info' : off.length ? (off.some((l) => Math.abs(l.share * 100 - l.target) > tol * 2) ? 'fail' : 'warn') : 'ok',
         st.lines.map((l) => (l.share * 100).toFixed(0) + '%').join(' / '), details, hasTargets ? 'Допуск ±' + tol + ' п.п. от цели.' : 'Цели по линиям задаются в настройках проекта: «Группа А: 50».');
     }
-    const guestSilent = live.filter((s) => s.guests.some((g) => !s.speaking.includes(g)));
-    const guestScenes = live.filter((s) => s.guests.length);
-    if (guestScenes.length) add('guests', 'Дорогие артисты', guestSilent.length ? 'warn' : 'info', guestScenes.length + ' сц.',
-      guestScenes.map((s) => sref(s, s.heading + ' · ' + s.guests.join(', ') + (guestSilent.includes(s) ? ' (без реплик)' : ''))),
-      'Не вызывать «для массовки».');
     return out;
   }
   // scene numbers taken from a file: duplicates, gaps, wrong order; a proposal keeps the file's "51-" prefix
@@ -1147,6 +1355,7 @@
   // lines: [{text, indent?(inches from the sheet edge), style?, gapBefore?}] -> blocks
   // plain text «ИМЯ. Реплика» / «ИМЯ (тихо): реплика»
   const INLINE_CUE = /^([А-ЯЁA-Z][А-ЯЁA-Z\- ]{1,30}?)\s*(\([^)]*\))?\s*[.:]\s+(.+)$/;
+  // lines may carry st (style bits per character of text, from Word runs): the block keeps them in block.st
   function classifyLines(lines) {
     const blocks = [];
     const ind = lines.map((l) => l.indent).filter((x) => x != null);
@@ -1156,10 +1365,14 @@
     let prev = null;
     let L = null;
     // a cue line marked dual (Fountain «МАША ^») makes its cue the second speech of a dual dialogue pair
-    const push = (t, x) => { const b = { id: uid(), t, x: clean(x) }; if (t === 'character' && L && L.dual) b.dual = true; blocks.push(b); prev = b; return b; };
+    const push = (t, x, st) => { const c = st ? cleanStyled(x, st) : null; const b = { id: uid(), t, x: c ? c.text : clean(x) }; if (c && !CAPS_T[t]) withSt(b, c.st); if (t === 'character' && L && L.dual) b.dual = true; if (L && L.pageBreak) b.pageBreak = true; blocks.push(b); prev = b; return b; };
+    // a continuation line joins the block before it, its styles too
+    const join = (b, text, st) => { const a = stOf(b); if (!a && !st) { b.x = clean(b.x + ' ' + text); return; } const r = cleanStyled(b.x + ' ' + text, (a || stFill(b.x.length, 0)).concat([0], st || stFill(text.length, 0))); b.x = r.text; withSt(b, r.st); };
     for (let k = 0; k < lines.length; k++) {
       L = lines[k];
-      let text = clean(L.text);
+      const cs = L.st ? cleanStyled(L.text, L.st) : null;
+      let text = cs ? cs.text : clean(L.text);
+      const st = cs ? cs.st : null;
       if (!text) { prev = prev && prev.t === 'gap' ? prev : { t: 'gap' }; continue; }
       const style = (L.style || '').toLowerCase();
       const rel = L.indent != null && margin != null ? L.indent - margin : null;
@@ -1174,19 +1387,19 @@
       const cueAbove = text.indexOf(',') < 0 && !!(nx && clean(nx.text) && !nx.gapBefore);
       if (styleType === 'cast' || (styleType == null && last && last.t === 'scene' && (rel == null || rel < 0.6) && !cueAbove && looksLikeCast(text))) { push('cast', text); continue; }
       if (styleType === 'character' && (NOT_NAMES.test(up(text)) || /^(ЗАСТАВКА|ГРАФИКА|МУЗЫКА|ИИ:)/i.test(text))) { push('action', text); continue; }
-      if (styleType && styleType !== 'scene') { pushTyped(styleType, text); continue; }
-      if (styled && style) { push('action', text); continue; }
+      if (styleType && styleType !== 'scene') { pushTyped(styleType, text, st); continue; }
+      if (styled && style) { push('action', text, st); continue; }
       if (/^(СМЕНА КАДРА|ЗАТЕМНЕНИЕ|НАПЛЫВ|ИЗ ЗАТЕМНЕНИЯ|CUT TO|FADE)/i.test(text) && isCaps(text)) { push('transition', text); continue; }
       if (rel != null) {
         if (rel >= 3.4 && isCaps(text)) { push('transition', text); continue; }
         if (rel >= 1.6 && rel < 3.4 && !/^\(/.test(text) && isCaps(text) && text.length <= 40) { pushTyped('character', text); continue; }
-        if (rel >= 1.2 && /^\(/.test(text)) { pushTyped('paren', text); continue; }
+        if (rel >= 1.2 && /^\(/.test(text)) { pushTyped('paren', text, st); continue; }
         if (rel >= 0.6 && rel < 1.6) {
-          if (last && (last.t === 'dialogue') && !gap && L.joinable !== false) { last.x = clean(last.x + ' ' + text); continue; }
-          pushTyped('dialogue', text); continue;
+          if (last && (last.t === 'dialogue') && !gap && L.joinable !== false) { join(last, text, st); continue; }
+          pushTyped('dialogue', text, st); continue;
         }
-        if (last && last.t === 'action' && !gap && L.joinable) { last.x = clean(last.x + ' ' + text); continue; }
-        push('action', text); continue;
+        if (last && last.t === 'action' && !gap && L.joinable) { join(last, text, st); continue; }
+        push('action', text, st); continue;
       }
       // plain text: inline "ИМЯ. Реплика" or "ИМЯ (тихо): реплика"
       const inl = text.match(INLINE_CUE);
@@ -1200,14 +1413,14 @@
       if (!/^\(/.test(text) && isCaps(text) && text.length <= 40 && !SENT_END.test(text.replace(/\(.*?\)$/, '').trim()) && nextText && !NOT_NAMES.test(text)) {
         push('character', text.replace(/:$/, '')); continue;
       }
-      if (/^\(.*\)?$/.test(text) && prev && (prev.t === 'character' || prev.t === 'dialogue')) { pushTyped('paren', text); continue; }
-      if (prev && (prev.t === 'character' || prev.t === 'paren')) { push('dialogue', text); continue; }
-      if (prev && prev.t === 'dialogue' && !gap) { prev.x = clean(prev.x + ' ' + text); continue; }
-      if (prev && prev.t === 'action' && !gap && !SENT_END.test(prev.x)) { prev.x = clean(prev.x + ' ' + text); continue; }
-      push('action', text);
+      if (/^\(.*\)?$/.test(text) && prev && (prev.t === 'character' || prev.t === 'dialogue')) { pushTyped('paren', text, st); continue; }
+      if (prev && (prev.t === 'character' || prev.t === 'paren')) { push('dialogue', text, st); continue; }
+      if (prev && prev.t === 'dialogue' && !gap) { join(prev, text, st); continue; }
+      if (prev && prev.t === 'action' && !gap && !SENT_END.test(prev.x)) { join(prev, text, st); continue; }
+      push('action', text, st);
     }
-    function pushTyped(t, text) {
-      if (t === 'paren' && !/^\(/.test(text)) text = '(' + text.replace(/\)$/, '') + ')';
+    function pushTyped(t, text, st) {
+      if (t === 'paren' && !/^\(/.test(text)) { const d = stSplice({ text: text.replace(/\)$/, ''), st: st ? st.slice(0, text.replace(/\)$/, '').length) : null }, 0, 0, '('); const d2 = stSplice(d, d.text.length, d.text.length, ')'); text = d2.text; st = d2.st; }
       if (t === 'character') {
         // "ГРИША (орет зк)": the extension stays in the cue, the stage direction becomes a parenthetical
         const sp = splitCue(text);
@@ -1215,7 +1428,7 @@
         if (sp.paren) push('paren', sp.paren);
         return;
       }
-      push(t, text);
+      push(t, text, st);
     }
     return blocks.filter((b) => b.x);
   }
@@ -1392,14 +1605,17 @@
     // a synopsis line («= …») becomes the synopsis of the scene above it
     const DROP = '\u0001';
     if (fountain) txt = txt.replace(/\/\*[\s\S]*?\*\//g, DROP).replace(/\[\[[\s\S]*?\]\]/g, DROP);
-    const raw = [], synAt = {};
-    let lastHead = -1;
+    const raw = [], synAt = {}, brkAt = {};
+    let lastHead = -1, brk = false;
     for (let s of txt.split('\n')) {
       if (fountain) {
         if (s.includes(DROP)) { s = s.split(DROP).join(''); if (!s.trim()) continue; }
-        if (/^\s*#/.test(s) || /^\s*={3,}\s*$/.test(s)) continue;
+        if (/^\s*={3,}\s*$/.test(s)) { brk = true; continue; }
+        if (/^\s*#/.test(s)) continue;
         const sy = s.match(/^\s*=(?!=)\s*(.*)$/);
         if (sy) { if (lastHead >= 0 && clean(sy[1])) synAt[lastHead] = clean((synAt[lastHead] ? synAt[lastHead] + ' ' : '') + sy[1]); continue; }
+        // a page break («===») attaches to the next line that becomes an element, past synopses and sections
+        if (brk && s.trim()) { brkAt[raw.length] = true; brk = false; }
         const t = s.trim();
         if (FORCED_RE.test(t) || HEADING_START.test(t)) lastHead = raw.length;
       }
@@ -1421,7 +1637,7 @@
       let dual = false;
       if (/\S\s*\^\s*$/.test(s) && isCaps(s.replace(/\^\s*$/, '').replace(/^\s*@/, ''))) { s = s.replace(/\s*\^\s*$/, ''); dual = true; }
       let text = unforce(s);
-      if (dual) return { text, joinable: true, style: 'Character', dual: true };
+      if (dual) return { text, joinable: true, style: 'Character', dual: true, pageBreak: brkAt[k] || undefined };
       const forced = FORCED_RE.test(s.replace(/^\s+/, ''));
       const action = fountain && /^\s*!(?=\S)/.test(s);
       // Fountain scene number "#12А#" at the end of a heading
@@ -1432,9 +1648,12 @@
       // Fountain has no shot element: a capitals line standing alone (our export forces capitals action with «!») is a shot
       const t0 = s.trim();
       const shot = fountain && !head && !forced && !action && blank(k - 1) && blank(k + 1) && fountainShotLike(t0);
-      return { text, joinable: true, style: forced ? 'Scene Heading' : action ? 'Action' : shot ? 'Shot' : undefined, forced: action || undefined };
+      return { text, joinable: true, style: forced ? 'Scene Heading' : action ? 'Action' : shot ? 'Shot' : undefined, forced: action || undefined, pageBreak: brkAt[k] || undefined };
     });
     const blocks = classifyLines(lines);
+    // Fountain's own markup becomes the styles of the element (never on a heading, a cue, a transition, a shot); in any
+    // other text a '*' or '_' is a character
+    if (fountain) for (const b of blocks) { const d = fromMarkup(b.x); b.x = d.text; if (CAPS_T[b.t]) delete b.st; else withSt(b, d.st); }
     let k = 0;
     for (const b of blocks) if (b.t === 'scene') { const n = nums[k], sy = syns[k]; k++; if (n) b.num = n; if (sy) b.synopsis = sy; }
     if (ft) blocks.titlePage = ft.tp;
@@ -1453,12 +1672,21 @@
     const ps = content.getElementsByTagName('Paragraph');
     const kids = (el, name) => { const out = []; for (let c = el.firstChild; c; c = c.nextSibling) if (c.nodeName === name) out.push(c); return out; };
     // a paragraph's own text: its Text runs, not those of nested paragraphs
-    const ownText = (p) => { let text = '', rev = 0; const ts = p.getElementsByTagName('Text');
-      for (let j = 0; j < ts.length; j++) { let q = ts[j].parentNode; while (q && q.nodeName !== 'Paragraph') q = q.parentNode; if (q === p) { text += ts[j].textContent; if (ts[j].textContent.trim()) rev = Math.max(rev, +ts[j].getAttribute('RevisionID') || 0); } }
-      return { text: clean(text), rev }; };
+    // Bold, Italic and Underline in the Style attribute of a run become the element's styles (not on headings, cues, transitions, shots)
+    const ownText = (p) => { let runs = [], rev = 0; const ts = p.getElementsByTagName('Text');
+      for (let j = 0; j < ts.length; j++) { let q = ts[j].parentNode; while (q && q.nodeName !== 'Paragraph') q = q.parentNode; if (q === p) { const sty = ts[j].getAttribute('Style') || ''; runs.push({ x: ts[j].textContent, b: /Bold/i.test(sty), i: /Italic/i.test(sty), u: /Underline/i.test(sty) }); if (ts[j].textContent.trim()) rev = Math.max(rev, +ts[j].getAttribute('RevisionID') || 0); } }
+      return { text: clean(runs.map((r) => r.x).join('')), styled: inlineFromRuns(runs), rev }; };
     // unknown element types (Cast List, Shot, New Act…) are matched by name like Word styles, otherwise they become action
     const typeOf = (p) => { const ty = p.getAttribute('Type') || ''; return map[ty] || (/summary|synops|outline|title|act\b/i.test(ty) ? 'action' : styleToType(ty)) || 'action'; };
-    const shape = (t, text) => { if (t === 'scene') return normalizeHeadingText(text); if (t === 'character') return normalizeCharacter(text); if (t === 'paren' && !/^\(/.test(text)) return '(' + text + ')'; return text; };
+    // the block's x and st for a paragraph: a heading and a cue are normalised (and never styled), a parenthetical gets its brackets
+    const shape = (t, text, styled) => {
+      if (t === 'scene') return { x: normalizeHeadingText(text) };
+      if (t === 'character') return { x: normalizeCharacter(text) };
+      let d = styled && styled.st && !CAPS_T[t] ? styled : { text, st: null };
+      if (t === 'paren' && !/^\(/.test(text)) { d = stSplice(d, 0, 0, '('); d = stSplice(d, d.text.length, d.text.length, ')'); }
+      return { x: d.text, st: stCompact(d.st) };
+    };
+    const shaped = (b, t, text, styled) => { const r = shape(t, text, styled); b.x = r.x; if (r.st) b.st = r.st; else delete b.st; return b; };
     // paragraphs that are not script text: the dead body of an omitted scene (<OmittedScene>), and what Final Draft 10+
     // keeps in a heading's scene properties (the Summary, character arc beats) as paragraphs of their own
     const DEAD = { OmittedScene: 1, SceneProperties: 1, Summary: 1, SceneArcBeats: 1, CharacterArcBeat: 1 };
@@ -1467,7 +1695,7 @@
     // the body of an omitted scene, dual pairs included (the second cue of a wrapper is the dual one)
     const deadBody = (om) => {
       const out = [];
-      const one = (q, dual) => { const o = ownText(q), tq = typeOf(q); if (!o.text) return; const b = { id: uid(), t: tq, x: shape(tq, o.text) }; if (dual && tq === 'character') b.dual = true; out.push(b); };
+      const one = (q, dual) => { const o = ownText(q), tq = typeOf(q); if (!o.text) return; const b = shaped({ id: uid(), t: tq }, tq, o.text, o.styled); if (dual && tq === 'character') b.dual = true; if (q.getAttribute('StartsNewPage') === 'Yes') b.pageBreak = true; out.push(b); };
       for (const q of kids(om, 'Paragraph')) {
         if (!isWrap(q)) { one(q, false); continue; }
         for (const d of kids(q, 'DualDialogue')) { let n = 0; for (const q2 of kids(d, 'Paragraph')) { if (typeOf(q2) === 'character' && ownText(q2).text) n++; one(q2, n === 2); } }
@@ -1486,20 +1714,25 @@
       if (dd === content) dd = null;
       const hasOmitted = kids(p, 'OmittedScene').length > 0;
       if (!hasOmitted && isWrap(p)) continue;
-      let { text, rev } = ownText(p);
+      let { text, styled, rev } = ownText(p);
       let t = typeOf(p);
       if (hasOmitted && !text) { text = 'OMITTED'; t = 'scene'; }
       if (!text) continue;
       const fdxNum = (p.getAttribute('Number') || '').trim();
       const fdxDay = t === 'scene' ? parseHeading(text).day : '';
-      text = shape(t, text);
-      const nb = { id: uid(), t, x: text };
+      const nb = shaped({ id: uid(), t }, t, text, styled);
+      text = nb.x;
+      // Final Draft's forced page break before the paragraph
+      if (p.getAttribute('StartsNewPage') === 'Yes') nb.pageBreak = true;
       if (dd && t === 'character') { const n = (ddCues.get(dd) || 0) + 1; ddCues.set(dd, n); if (n === 2) nb.dual = true; }
       // the scene's Summary (Final Draft 10+) becomes its synopsis; without one, the SceneProperties Title (older files)
       const sp = t === 'scene' ? kids(p, 'SceneProperties')[0] : null;
       const sum = sp ? kids(sp, 'Summary').map((q) => kids(q, 'Paragraph').map((x) => ownText(x).text).filter(Boolean).join(' ')).filter(Boolean).join(' ') : '';
       if (sum) nb.synopsis = sum;
       else if (sp && (sp.getAttribute('Title') || '').trim()) nb.synopsis = sp.getAttribute('Title').trim();
+      // the scene colour (Final Draft Color="#RRRRGGGGBBBB") becomes the nearest of ours
+      const col = sp ? colorFromFDX(sp.getAttribute('Color')) : '';
+      if (col) nb.color = col;
       if (t === 'scene' && fdxNum) nb.num = fdxNum;
       if (rev > 0) nb.rev = rev;
       if (fdxDay) nb.day = fdxDay;
@@ -1774,6 +2007,7 @@
         delete b.day;
         if (day || h.flash || num) report.sceneMeta[b.id] = { day, tags: h.flash ? ['flashback'] : [], num };
         if (b.synopsis) { (report.sceneMeta[b.id] = report.sceneMeta[b.id] || { tags: [], num }).synopsis = b.synopsis; delete b.synopsis; }
+        if (b.color) { (report.sceneMeta[b.id] = report.sceneMeta[b.id] || { tags: [], num }).color = b.color; delete b.color; }
         if (b.omitted || OMIT_RE.test(b.x)) {
           const m = (report.sceneMeta[b.id] = report.sceneMeta[b.id] || { num }); m.omitted = true;
           if (b.omittedBlocks) { m.omittedBlocks = b.omittedBlocks; m.omittedHeading = b.omittedHeading || ''; }
@@ -1816,15 +2050,29 @@
       if (extras.length) (sceneMeta[id] = sceneMeta[id] || {}).extras = extras;
     }
     report.castScenes = Object.keys(sp.cast).length;
+    // Final Draft writes its automatic (CONT'D) as text: where ours would print it anyway, the text version comes off
+    if (!(project.rules && project.rules.autoContd === false)) {
+      const stripped = blocks.map((b) => (b.t === 'character' && CONTD_RE.test(b.x) ? Object.assign({}, b, { x: clean(b.x.replace(CONTD_RE, ' ')) }) : b));
+      const auto = autoContd(stripped);
+      stripped.forEach((b, i) => { if (b !== blocks[i] && auto.has(i)) blocks[i].x = b.x; });
+    }
     return { blocks, sceneMeta, report };
   }
 
   // ---------- export ----------
   const xmlEsc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const FDX_TYPE = { scene: 'Scene Heading', action: 'Action', character: 'Character', paren: 'Parenthetical', dialogue: 'Dialogue', transition: 'Transition', shot: 'Shot' };
+  // a block's <Text> runs: one per style (Style="Bold", "Italic", "Underline", "Bold+Italic"…), as Final Draft writes them
+  function fdxRuns(b, attrs, text) {
+    const d = displayStyled(b);
+    if (text != null && text !== d.text) { if (d.st && text.startsWith(d.text)) d.st = d.st.concat(stFill(text.length - d.text.length, 0)); else d.st = null; d.text = text; }
+    const runs = inlineRuns(d.text, d.st);
+    if (!runs.length) return '<Text' + attrs + '></Text>';
+    return runs.map((r) => { const sty = [r.b && 'Bold', r.i && 'Italic', r.u && 'Underline'].filter(Boolean).join('+'); return '<Text' + attrs + (sty ? ' Style="' + sty + '"' : '') + '>' + xmlEsc(r.x) + '</Text>'; }).join('');
+  }
   function exportFDX(ep, project, st, opts) {
     opts = opts || {};
-    const revs = st.revs || [];
+    const revs = st.revs || [], contd = st.lay && st.lay.contd ? st.lay.contd : new Set();
     const sceneByIdx = {}; st.scenes.forEach((s) => { sceneByIdx[s.from] = s; });
     const paper = paperOf(project.rules);
     const F = paper.fmt;
@@ -1832,17 +2080,19 @@
       const s = sceneByIdx[i];
       const num = s ? (opts.episodePrefix && !/-/.test(s.num) ? (ep.number || 1) + '-' + s.num : s.num) : '';
       // the synopsis is Final Draft's scene Summary (and the Title, which older files and versions read)
-      const props = s ? '<SceneProperties Length="' + fmtScenePages(s) + '" Page="' + (s.page || 1) + '" Title="' + xmlEsc(s.synopsis || '') + '"' + (s.synopsis ? '><Summary><Paragraph Alignment="Left"><Text>' + xmlEsc(s.synopsis) + '</Text></Paragraph></Summary></SceneProperties>' : '/>') : '';
-      const text = s && s.omitted ? 'OMITTED' : displayText(b) + headingDay(s, b);
+      const props = s ? '<SceneProperties' + (s.color ? ' Color="' + colorToFDX(s.color) + '"' : '') + ' Length="' + fmtScenePages(s) + '" Page="' + (s.page || 1) + '" Title="' + xmlEsc(s.synopsis || '') + '"' + (s.synopsis ? '><Summary><Paragraph Alignment="Left"><Text>' + xmlEsc(s.synopsis) + '</Text></Paragraph></Summary></SceneProperties>' : '/>') : '';
+      const text = s && s.omitted ? 'OMITTED' : b.t === 'character' ? cueText(b, i, contd) : displayText(b) + headingDay(s, b);
       // an omitted scene carries its dead body inside <OmittedScene>, as Final Draft writes it
       const dead = s && s.omitted ? ((ep.sceneMeta || {})[s.id] || {}).omittedBlocks : null;
       let om = '';
       if (dead && dead.length) {
-        const db = dead.filter((d) => FDX_TYPE[d.t]), dp = db.map((d) => '<Paragraph Type="' + FDX_TYPE[d.t] + '"><Text>' + xmlEsc(displayText(d)) + '</Text></Paragraph>');
+        const db = dead.filter((d) => FDX_TYPE[d.t]), dp = db.map((d) => '<Paragraph Type="' + FDX_TYPE[d.t] + '"' + (d.pageBreak ? ' StartsNewPage="Yes"' : '') + '>' + fdxRuns(d, '') + '</Paragraph>');
         for (const pr of dualPairs(db).reverse()) dp.splice(pr.a, pr.e - pr.a + 1, '<Paragraph><DualDialogue>' + dp.slice(pr.a, pr.e + 1).join('') + '</DualDialogue></Paragraph>');
         om = '<OmittedScene>' + dp.join('') + '</OmittedScene>';
       }
-      return '    <Paragraph' + (s ? ' Number="' + num + '"' : '') + ' Type="' + FDX_TYPE[b.t] + '">' + props + om + '<Text' + (revs[i] ? ' RevisionID="' + revs[i] + '"' : '') + '>' + xmlEsc(text) + '</Text></Paragraph>';
+      const ra = revs[i] ? ' RevisionID="' + revs[i] + '"' : '';
+      const runs = s && s.omitted ? '<Text' + ra + '>' + xmlEsc(text) + '</Text>' : fdxRuns(b, ra, text);
+      return '    <Paragraph' + (s ? ' Number="' + num + '"' : '') + (b.pageBreak && i > 0 ? ' StartsNewPage="Yes"' : '') + ' Type="' + FDX_TYPE[b.t] + '">' + props + om + runs + '</Paragraph>';
     });
     // a dual pair goes into one <Paragraph><DualDialogue>…</DualDialogue></Paragraph>, both speeches inside, as Final Draft writes it
     for (const p of dualPairs(ep.blocks || []).reverse()) {
@@ -1914,9 +2164,12 @@
     const blocks = ep.blocks || [];
     const dualB = new Set(dualPairs(blocks).map((p) => p.b));
     blocks.forEach((b, i) => {
-      const t0 = displayText(b), t = fountainInline(t0);
+      // the styles go out as Fountain markup, a literal * or _ escaped (never on a heading, a cue, a transition, a shot)
+      const d = cleanStyled(b.x || '', stOf(b));
+      const t0 = displayText(b), t = fountainInline(CAPS_T[b.t] ? t0 : toMarkup(d.text, d.st));
       const s = sceneByIdx[i];
       const next = blocks[i + 1];
+      if (b.pageBreak && i > 0) out.push('', '===', '');
       // Fountain scene number "#12А#"; a blank line ends a speech, so it comes only after its last paren or dialogue
       // the scene's synopsis follows its heading as Fountain's «= …»
       if (b.t === 'scene') out.push('', '.' + (s && s.omitted ? omittedHeading(s.num) : t + headingDay(s, b)) + (s && s.num ? ' #' + s.num + '#' : ''), '', ...(s && s.synopsis && !s.omitted ? ['= ' + fountainInline(clean(s.synopsis)), ''] : []));
@@ -1953,7 +2206,8 @@
   function docxDocumentXML(ep, project, st) {
     const tw = (inch) => Math.round(inch * 1440);
     const sceneByIdx = {}; st.scenes.forEach((s) => { sceneByIdx[s.from] = s; });
-    const run = (t) => '<w:r><w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New" w:cs="Courier New"/><w:sz w:val="24"/></w:rPr><w:t xml:space="preserve">' + xmlEsc(t) + '</w:t></w:r>';
+    const run = (t, r) => '<w:r><w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New" w:cs="Courier New"/>' + (r && r.b ? '<w:b/>' : '') + (r && r.i ? '<w:i/>' : '') + (r && r.u ? '<w:u w:val="single"/>' : '') + '<w:sz w:val="24"/></w:rPr><w:t xml:space="preserve">' + xmlEsc(t) + '</w:t></w:r>';
+    const runs = (b) => { const d = displayStyled(b); return inlineRuns(d.text, d.st).map((r) => run(r.x, r)).join(''); };
     const br = '<w:r><w:br/></w:r>';
     // omitted scenes are not shot, so FilmToolz must not see them
     const skip = new Set(); st.scenes.forEach((s) => { if (s.omitted) for (let i = s.from; i <= s.to; i++) skip.add(i); });
@@ -1966,7 +2220,7 @@
         const ft = filmtoolzHeading(s, ep);
         return '<w:p>' + pPr + run(ft.line) + br + run(ft.cast) + '</w:p>';
       }
-      return '<w:p>' + pPr + run(displayText(b)) + '</w:p>';
+      return '<w:p>' + pPr + runs(b) + '</w:p>';
     });
     return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' + paras.join('') +
       '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="2160" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>';
@@ -2019,22 +2273,28 @@
       const sdef = styles[styleId] || {};
       let left = ind ? parseInt(ind.getAttributeNS(W, 'left') || ind.getAttributeNS(W, 'start') || '0', 10) / 1440 : (sdef.indent != null ? sdef.indent : 0);
       const hasIndent = !!ind || sdef.indent != null || marginKnown;
-      let parts = [''];
-      const walk = (n) => {
+      let parts = [[]];
+      const add = (x, sty) => { const last = parts[parts.length - 1], r = last[last.length - 1]; if (r && r.b === sty.b && r.i === sty.i && r.u === sty.u) r.x += x; else last.push(Object.assign({ x }, sty)); };
+      const runStyle = (r) => { const pr = Array.from(r.childNodes).find((c) => c.localName === 'rPr'), on = (nm) => { const e = pr && Array.from(pr.childNodes).find((c) => c.localName === nm); return !!e && !/^(0|false|none)$/i.test(e.getAttributeNS(W, 'val') || ''); }; return { b: on('b'), i: on('i'), u: on('u') }; };
+      const walk = (n, sty) => {
         for (let c = n.firstChild; c; c = c.nextSibling) {
           if (c.nodeType !== 1) continue;
-          if (c.localName === 't') parts[parts.length - 1] += c.textContent;
-          else if (c.localName === 'tab') parts[parts.length - 1] += ' ';
+          if (c.localName === 't') add(c.textContent, sty);
+          else if (c.localName === 'tab') add(' ', sty);
           // Ctrl+Shift+- in Word: "кто-то", "САНКТ-ПЕТЕРБУРГ" (a plain hyphen, so names match those typed in the app)
-          else if (c.localName === 'noBreakHyphen') parts[parts.length - 1] += '-';
-          else if (c.localName === 'br' || c.localName === 'cr') parts.push('');
-          else if (c.localName !== 'pPr') walk(c);
+          else if (c.localName === 'noBreakHyphen') add('-', sty);
+          else if (c.localName === 'br' || c.localName === 'cr') parts.push([]);
+          else if (c.localName === 'r') walk(c, runStyle(c));
+          else if (c.localName !== 'pPr' && c.localName !== 'rPr') walk(c, sty);
         }
       };
-      walk(p);
+      walk(p, { b: false, i: false, u: false });
+      // bold, italic and underline runs become our markup only where a paragraph mixes them: a paragraph styled
+      // throughout (a bold heading, an underlined cue) is formatting, not emphasis, and comes in plain
+      parts = parts.map((rs) => { const txt = rs.map((r) => r.x).join(''), on = (r) => r.b || r.i || r.u; const mixed = rs.some((r) => on(r) && r.x.trim()) && rs.some((r) => !on(r) && r.x.trim()); return mixed ? inlineFromRuns(rs) : { text: txt, st: null }; });
       const style = sdef.name || styleId;
       const right = jc && /right|end/.test(jc.getAttributeNS(W, 'val'));
-      parts.forEach((t, k) => out.push({ text: t, indent: hasIndent || right ? 1.5 + left + (right ? 4 : 0) : null, style: k === 0 ? style : '', fromBreak: k > 0 }));
+      parts.forEach((d, k) => out.push({ text: d.text, st: d.st || undefined, indent: hasIndent || right ? 1.5 + left + (right ? 4 : 0) : null, style: k === 0 ? style : '', fromBreak: k > 0 }));
     }
     // FilmToolz-style heading with a line break: the second line lists characters and time, which the app computes itself
     return out.filter((l, k) => !(l.fromBreak && out[k - 1] && HEADING_START.test(out[k - 1].text)));
@@ -2151,7 +2411,7 @@
     const sceneIds = blocks.filter((b) => b.t === 'scene').map((b) => b.id);
     const ep1 = {
       id: uid(), season: 1, number: 1, title: 'Стратегическая пробка', blocks, updated: Date.now(),
-      sceneMeta: { [sceneIds[3]]: { tags: ['animals'], day: '1', synopsis: 'Игорь боится идти домой' }, [sceneIds[4]]: { tags: [], day: '2' }, [sceneIds[0]]: { tags: [], day: '1', synopsis: 'Утро Вороновых' } },
+      sceneMeta: { [sceneIds[3]]: { tags: [], day: '1', synopsis: 'Игорь боится идти домой' }, [sceneIds[4]]: { tags: [], day: '2' }, [sceneIds[0]]: { tags: [], day: '1', synopsis: 'Утро Вороновых' } },
       comments: [], drafts: [], checks: {},
     };
     ep1.comments.push({ id: uid(), blockId: blocks[12].id, quote: 'обосновал это свободой слова', text: 'Отличная шутка, оставляем. Но проверьте, чтобы Миша не выглядел совсем хамом — канал просил мягче.', author: 'Продюсер', role: 'producer', date: Date.now() - 3600e3, resolved: false, replies: [] });
@@ -2183,30 +2443,6 @@
   }
 
   const LINE_COLORS = ['#2346c8', '#b26a00', '#1f7a46', '#8e24aa', '#b3261e', '#00838f'];
-  const listOf = (v) => (Array.isArray(v) ? v : String(v || '').split(/[,;\n]/)).map((x) => up(clean(x))).filter(Boolean);
-  // Automatic line by the project's rules, in this order:
-  // 0. a special category by heading keywords (ЗАЯВОЧНЫЙ ПЛАН, ФЛЭШФОРВАРД) wins over everything;
-  // 1. unambiguous objects: a heading substring of a line (prefixes without endings, typos included);
-  // 2. disputed objects: the owner named in the heading, matched by whole words;
-  // 3. the scene's cast: any character of the priority line, else of another line.
-  function autoLine(s, project) {
-    const lines = project.lines || [];
-    if (!lines.length) return null;
-    const head = up(s.heading || '');
-    const words = head.split(/[^А-ЯЁA-Z0-9]+/).filter(Boolean);
-    const lr = project.lineRules || {};
-    const special = lr.special || {};
-    const skw = listOf(special.keywords);
-    if (special.name && skw.some((k) => head.includes(k))) return { line: special.name, how: 'спецсцена' };
-    for (const l of lines) if (listOf(l.objects).some((k) => head.includes(k))) return { line: l.name, how: 'объект' };
-    for (const l of lines) if (listOf(l.owners).some((k) => words.includes(k))) return { line: l.name, how: 'владелец' };
-    const cast = (s.cast || []).map((c) => up(c));
-    const first = (n) => n.split(/[\s-]/)[0];
-    const has = (l) => listOf(l.chars).some((k) => cast.includes(k) || cast.some((c) => first(c) === k));
-    const order = lines.slice().sort((a, b) => (a.name === lr.priority ? -1 : 0) - (b.name === lr.priority ? -1 : 0));
-    for (const l of order) if (has(l)) return { line: l.name, how: 'персонажи' };
-    return null;
-  }
   // "Группа А: 50" per line -> [{name, target}]
   function parseLines(text) {
     return (text || '').split('\n').map((l) => l.trim()).filter(Boolean).map((l, i) => {
@@ -2339,77 +2575,28 @@
     out.splice(pos, 0, ...piece);
     return { blocks: out, how: 'inserted' };
   }
-  // the pages of a layout as block ranges: page k holds the blocks that start on it (a block carried over from the page
-  // before stays with that page); a page that only continues an earlier block has no range of its own
-  function pageRanges(lay) {
-    const first = [];
-    lay.pages.forEach((pg, k) => pg.items.forEach((it) => { if (it.i != null && first[it.i] == null) first[it.i] = k; }));
-    const out = [];
-    first.forEach((k, i) => {
-      const r = out[out.length - 1];
-      if (r && r.k === k) r.to = i; else out.push({ k, label: (lay.labels || [])[k] || String(k + 1), from: i, to: i });
-    });
-    return out;
-  }
-  // put blocks from..to of a snapshot (one page) back into the current text, the way restoreScene does for a scene:
-  // what stands between the page's neighbours now is replaced; without them, the span of the page's own elements; if
-  // none of it is left, the page goes in after the nearest earlier element the text still has
-  // Returns { blocks, at, count, removed, ids, kept }: ids = the restored elements, at = where the first of them stands,
-  // kept = elements left in place between them (text written inside the page since, when the span had grown too large).
-  function restoreRange(cur, snap, from, to) {
-    const piece0 = snap.slice(from, to + 1);
-    if (!piece0.length) return null;
-    const pos = new Map(cur.map((b, i) => [b.id, i]));
-    const prev = from > 0 ? pos.get(snap[from - 1].id) : -1, next = to + 1 < snap.length ? pos.get(snap[to + 1].id) : cur.length;
-    // between the neighbours, unless that span has grown far beyond the page (text written in between since)
-    if (prev != null && next != null && prev < next && next - prev - 1 <= piece0.length * 3 + 10) {
-      const a = prev + 1, z = next - 1;
-      const have = new Set(cur.map((b) => b.id));
-      for (let i = a; i <= z; i++) have.delete(cur[i].id);
-      const piece = piece0.map((b) => Object.assign({}, b, { id: have.has(b.id) ? uid() : b.id }));
-      const out = cur.slice();
-      out.splice(a, z - a + 1, ...piece);
-      return { blocks: out, at: a, count: piece.length, removed: z - a + 1, ids: piece.map((b) => b.id), kept: 0 };
-    }
-    // otherwise only the page's own elements: each one still there is replaced in place, one deleted since comes back
-    // next to its nearest surviving neighbour of the page; anything else in between (written since) stays
-    const live = piece0.filter((b) => pos.has(b.id));
-    if (!live.length) {
-      let a = 0;
-      for (let q = from - 1; q >= 0; q--) if (pos.has(snap[q].id)) { a = pos.get(snap[q].id) + 1; break; }
-      const piece = piece0.map((b) => Object.assign({}, b));
-      const out = cur.slice();
-      out.splice(a, 0, ...piece);
-      return { blocks: out, at: a, count: piece.length, removed: 0, ids: piece.map((b) => b.id), kept: 0 };
-    }
-    // missing elements: those before the first survivor go in front of it, the others right after the survivor before them
-    const before = new Map(), after = new Map();
-    let anchor = null; const lead = [];
-    for (const b of piece0) {
-      if (pos.has(b.id)) { anchor = b.id; continue; }
-      const c = Object.assign({}, b);
-      if (!anchor) lead.push(c); else { if (!after.has(anchor)) after.set(anchor, []); after.get(anchor).push(c); }
-    }
-    before.set(live[0].id, lead);
-    const snapOf = new Map(piece0.map((b) => [b.id, b]));
-    const out = [], ids = [];
-    let at = -1, lo = Infinity, hi = -1;
-    for (const b of cur) {
-      const s0 = snapOf.get(b.id);
-      if (!s0) { out.push(b); continue; }
-      const group = (before.get(b.id) || []).concat([Object.assign({}, s0)], after.get(b.id) || []);
-      if (at < 0) at = out.length;
-      lo = Math.min(lo, out.length);
-      out.push(...group); ids.push(...group.map((x) => x.id));
-      hi = out.length - 1;
-    }
-    const idSet = new Set(ids);
-    let kept = 0; for (let i = lo; i <= hi; i++) if (!idSet.has(out[i].id)) kept++;
-    return { blocks: out, at, count: ids.length, removed: live.length, ids, kept };
-  }
-
-  // a fingerprint of the text for comparisons between copies (tabs, project files, safety drafts)
   const blocksSig = (blocks) => JSON.stringify(blocks);
+
+  // ---------- SmartType dictionaries (names the text still uses) ----------
+  // characters: every cue and every «без реплик» name of a scene card; objects: every heading, in every episode of the project
+  function dictUsage(project) {
+    const chars = new Set(), locs = new Set();
+    for (const ep of (project && project.episodes) || []) {
+      for (const b of ep.blocks || []) {
+        if (b.t === 'character') { const n = charName(b.x); if (n) chars.add(n); }
+        if (b.t === 'scene') { const h = parseHeading(b.x); if (h.object) locs.add(h.object); }
+      }
+      for (const m of Object.values(ep.sceneMeta || {})) ((m && m.extras) || []).forEach((n) => { const c = charName(n); if (c) chars.add(c); });
+    }
+    return { chars, locs };
+  }
+  // drops the dictionary entries no episode uses; returns what went
+  function rebuildDicts(project) {
+    const u = dictUsage(project), gone = { chars: [], locs: [] };
+    for (const n of Object.keys(project.chars || {})) if (!u.chars.has(n)) { gone.chars.push(n); delete project.chars[n]; }
+    for (const n of Object.keys(project.locs || {})) if (!u.locs.has(n)) { gone.locs.push(n); delete project.locs[n]; }
+    return gone;
+  }
 
   // ---------- audit log (project-wide, append-only) ----------
   const AUDIT_TYPES = { unlock: 'Снят лок номеров', pageunlock: 'Снят лок страниц', lockdrop: 'Лок снят восстановлением или загрузкой', delete: 'Удаление', restore: 'Возврат из корзины', rollback: 'Откат по истории', sides: 'Сайды', draft: 'Новый драфт', ai: 'ИИ' };
@@ -2477,10 +2664,69 @@
     return out.sort((x, y) => (x.at || 0) - (y.at || 0));
   }
 
+  // ---------- old projects ----------
+  // A project saved by an earlier version is brought to this one once, when it is opened:
+  // - the scene marks «Животные» / «Трюки» (meta.tags) became breakdown items: each mark turns into an item of that
+  //   category on the scene heading, so the scene stays special for the studio rules, and the mark comes off;
+  // - the automatic line by rules (project.lineRules, lines[].objects / owners / chars) is gone: the line each scene got
+  //   from those rules is written into its card (meta.line), with the rules as they were, and the rules are dropped.
+  // Returns the notes of what was done (empty for a current project)
+  const legacyList = (v) => (Array.isArray(v) ? v : String(v || '').split(/[,;\n]/)).map((x) => up(clean(x))).filter(Boolean);
+  function legacyAutoLine(s, project) {
+    const lines = project.lines || [];
+    if (!lines.length) return null;
+    const head = up(s.heading || '');
+    const words = head.split(/[^А-ЯЁA-Z0-9]+/).filter(Boolean);
+    const lr = project.lineRules || {}, special = lr.special || {};
+    if (special.name && legacyList(special.keywords).some((k) => head.includes(k))) return special.name;
+    for (const l of lines) if (legacyList(l.objects).some((k) => head.includes(k))) return l.name;
+    for (const l of lines) if (legacyList(l.owners).some((k) => words.includes(k))) return l.name;
+    const cast = (s.cast || []).map((c) => up(c));
+    const first = (n) => n.split(/[\s-]/)[0];
+    const has = (l) => legacyList(l.chars).some((k) => cast.includes(k) || cast.some((c) => first(c) === k));
+    const order = lines.slice().sort((a, b) => (a.name === lr.priority ? -1 : 0) - (b.name === lr.priority ? -1 : 0));
+    for (const l of order) if (has(l)) return l.name;
+    return null;
+  }
+  const LEGACY_MARK = { animals: 'animals', stunts: 'stunts' };
+  function migrateProject(project) {
+    const notes = [];
+    if (!project || !Array.isArray(project.episodes)) return notes;
+    const hadRules = !!project.lineRules || (project.lines || []).some((l) => l && (l.objects || l.owners || l.chars));
+    const pr = hadRules ? Object.assign({}, project, { rules: Object.assign({}, DEFAULT_RULES, project.rules || {}) }) : null;
+    let marks = 0, lined = 0;
+    for (const ep of project.episodes) {
+      const blocks = ep.blocks || [], meta = ep.sceneMeta || {};
+      for (const s of sceneSplit(blocks)) {
+        const m = meta[s.id], b = blocks[s.from];
+        if (!m || !Array.isArray(m.tags) || !b) continue;
+        for (const cat of Object.keys(LEGACY_MARK)) {
+          if (!m.tags.includes(cat)) continue;
+          if (b.x && !(ep.tags || []).some((t) => t.cat === cat && t.blockId === b.id)) { (ep.tags = ep.tags || []).push({ id: uid(), blockId: b.id, quote: b.x, cat, note: 'метка сцены из старого проекта', at: 0, by: '', date: Date.now() }); marks++; }
+          m.tags = m.tags.filter((t) => t !== cat);
+        }
+      }
+      if (hadRules) {
+        const st = analyzeEpisode(ep, pr);
+        for (const sc of st.scenes) {
+          if (sc.omitted) continue;
+          const m = meta[sc.id] || {};
+          if (m.line) continue;
+          const line = legacyAutoLine(sc, project);
+          if (line) { (ep.sceneMeta = ep.sceneMeta || {})[sc.id] = Object.assign(m, { line }); lined++; }
+        }
+      }
+    }
+    if (hadRules) { delete project.lineRules; for (const l of project.lines || []) if (l) { delete l.objects; delete l.owners; delete l.chars; } }
+    if (marks) notes.push('метки «Животные» и «Трюки» (' + marks + ') стали пометками разбивки на заголовках сцен');
+    if (hadRules) notes.push('правила автоматических линий убраны' + (lined ? ', линия по ним записана в карточки ' + lined + ' сц.' : ''));
+    return notes;
+  }
+
   // ---------- find and replace (Final Draft Edit → Find / Replace) ----------
   // o: { matchCase, word (whole word), types: ['character', …] or empty for all }. The text searched is what the page
-  // shows, so a heading or a cue typed in lower case is found as it is printed (capitals); an «УДАЛЕНА» placeholder is not text
-  const CAPS_T = { scene: 1, character: 1, transition: 1, shot: 1 };
+  // shows (the style markup taken out), so a heading or a cue typed in lower case is found as it is printed (capitals);
+  // an «УДАЛЕНА» placeholder is not text. Offsets are in that plain text
   function findRegex(q, o) {
     if (!q) return null;
     const esc = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), W = '[\\p{L}\\p{N}_]';
@@ -2509,23 +2755,26 @@
     const out = (blocks || []).map((b, i) => {
       const list = byI[i];
       if (!list) return b;
-      let x = b.x || '';
-      for (const m of list.slice().reverse()) x = x.slice(0, m.start) + repl + x.slice(m.end);
-      return Object.assign({}, b, { x });
+      let d = styledOf(b);
+      for (const m of list.slice().reverse()) d = stSplice(d, m.start, m.end, repl);
+      return withSt(Object.assign({}, b, { x: d.text }), d.st);
     });
     return { blocks: out, count: ms.length };
   }
 
   root.Core = {
-    findMatches, replaceMatches, titleInfo, adoptTitlePage, parseEpisodeLine, fountainForce,
+    stOf, stCompact, styledOf, withSt, stSplice, stSlice, stSplit, stJoin, stToggle, stStyleAt, inlineRuns, inlineFromRuns, cleanStyled, lineRuns, wordAt, displayStyled,
+    fromMarkup, toMarkup, blockFromMarkup, blockMarkup,
+    ST_B, ST_I, ST_U, autoContd, cueText, SCENE_COLORS, sceneColor, colorFromFDX, colorToFDX, dictUsage, rebuildDicts,
+    findMatches, replaceMatches, migrateProject, titleInfo, adoptTitlePage, parseEpisodeLine, fountainForce,
     sidesBlocks, sidesPick, sidesRecipients, sidesExpiry, sidesExpired, mergeSidesLog, isoDay, ruDate, secretNotice, mergeCommentState,
     BREAKDOWN, BD, BD_SPECIAL, findAnchor, quoteAt, anchorTags, bdKey, bdName, breakdownItems, breakdownByObject, mergeTags, breakdownXLSX,
     REV_SETS, revName, revColorName, revColor, revMarkX, revMarks, newRevision, revisionsFromMarks, fdxActiveSet, pageLockFrom,
-    dualFmt, dualPairs, parseLines, LINE_COLORS, autoLine, listOf, paperOf, FMT_RU, lockAssign, lockMissing, lockInsertIndex, omittedHeading, OMIT_RE, numParts,
-    TYPES, TYPE_LABEL, FMT, PAPER, TIMES, PREFIXES, TRANSITIONS, EXTENSIONS, TAGS, SPECIAL_TAGS, DEFAULT_RULES, MANUAL_CHECKS,
+    dualFmt, dualPairs, parseLines, LINE_COLORS, paperOf, FMT_RU, lockAssign, lockMissing, lockInsertIndex, omittedHeading, OMIT_RE, numParts,
+    TYPES, TYPE_LABEL, FMT, PAPER, TIMES, PREFIXES, TRANSITIONS, EXTENSIONS, TAGS, TAG_LABELS, SPECIAL_TAGS, DEFAULT_RULES, MANUAL_CHECKS,
     uid, up, clean, parseHeading, formatHeading, charName, wrap, paginate, rightEdge, displayText, analyzeEpisode, evalRules, fmtPages, fmtTime, sceneEighths, fmtEighths, fmtScenePages,
     namingIssues, fixHomoglyphs, classifyLines, importText, importFDX, importKIT, importSTARC, importSqliteProject, absorb, exportFDX, exportFountain, docxDocumentXML, DOCX_STATIC,
     docxParagraphs, docxStyles, splitCast, splitCue, finalizeImport, numberingCheck, pdfLines, demoProject, sceneSplit, thinHistory, restoreScene, HIST,
-    histPush, histState, histStates, histSize, histSig, histIsDelta, histEncode, histDecode, hashStr, pageRanges, restoreRange, blocksSig, AUDIT_TYPES, mergeAuditLog, auditEntries, normalizeHeadingText, normalizeCharacter, filmtoolzHeading, HEADING_START,
+    histPush, histState, histStates, histSize, histSig, histIsDelta, histEncode, histDecode, hashStr, blocksSig, AUDIT_TYPES, mergeAuditLog, auditEntries, normalizeHeadingText, normalizeCharacter, filmtoolzHeading, HEADING_START,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -42,7 +42,8 @@ ok(!base.scenes[1].special && st.scenes[1].special, 'breakdown stunts make scene
 eq(st.scenes[1].bdTags, ['stunts', 'animals'], 'derived special tags');
 ok(st.scenes[1].shifts > base.scenes[1].shifts * 2, 'special shift rate applies');
 const both = C.analyzeEpisode({ ...ep, sceneMeta: { s2: { tags: ['stunts'] } } }, proj);
-eq(both.scenes[1].bdTags, ['animals'], 'a scene tag already set is not repeated');
+eq(both.scenes[1].bdTags, ['stunts', 'animals'], 'an old «Трюки» scene mark is ignored: stunts come from the breakdown only');
+eq(both.scenes[1].tags, [], 'the old mark is not a scene tag any more');
 eq(both.scenes[1].shifts, st.scenes[1].shifts, 'no double count: same shifts');
 eq(both.specialMin, st.specialMin, 'no double count: same special minutes');
 const rule = C.evalRules(ep, proj, st, null).find((r) => r.id === 'special' || /Дети, животные/.test(r.title));

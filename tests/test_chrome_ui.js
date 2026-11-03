@@ -67,16 +67,12 @@ const nm = path.resolve(__dirname, '../node_modules') + '/';
     ok(r.x >= 0 && r.right <= 390, `menu ${m} on screen: ${r.x}..${r.right}`);
     await p.mouse.click(200, 700); await p.waitForTimeout(100);
   }
-  await click(p, '#btnExport');
-  let r = await p.evaluate(() => { const q = document.querySelector('#exportMenu').getBoundingClientRect(); return { x: q.x, right: q.right }; });
-  ok(r.x >= 0 && r.right <= 390, `export menu on screen: ${r.x}..${r.right}`);
-  await p.keyboard.press('Escape');
   await click(p, '#tbNav'); g = await geo(p);
   ok(g.left.vis && g.left.x >= 0 && g.left.w <= 390 && g.on.tbNav, 'phone Navigator opens as a drawer ' + JSON.stringify(g.left));
   ok(g.center.w === 390, 'page keeps its width under the drawer');
   await click(p, '#closeLeft'); g = await geo(p); ok(!g.left.vis, 'drawer closes with ×');
-  await click(p, '#mScenes'); g = await geo(p);
-  ok(g.left.vis && await p.evaluate(() => !document.querySelector('#pane-scenes').hidden), 'Документ → Список сцен opens the scene list on a phone');
+  await click(p, '#mLeft'); await click(p, '[data-ltab=scenes]'); g = await geo(p);
+  ok(g.left.vis && await p.evaluate(() => !document.querySelector('#pane-scenes').hidden), 'Вид → Навигатор and the Сцены tab open the scene list on a phone');
   const sc = await p.$('#pane-scenes .sc');
   if (sc) { await sc.click(); await p.waitForTimeout(200); g = await geo(p); ok(!g.left.vis, 'picking a scene closes the phone drawer'); }
   await click(p, '#tbNav'); await click(p, '[data-ltab=episodes]'); await p.locator('#pane-episodes .ep').first().click(); await p.waitForTimeout(200);
@@ -96,11 +92,13 @@ const nm = path.resolve(__dirname, '../node_modules') + '/';
 
   // 5. only one dropdown at a time, 6. menubar keyboard
   p = await open(1280, 800);
-  const vis = () => p.evaluate(() => ({ mm: [...document.querySelectorAll('.mb .mm')].filter((x) => !x.hidden).length, exp: !document.querySelector('#exportMenu').hidden }));
-  await p.click('#btnExport'); await p.click('.mb[data-menu=file] .mb-btn'); let v = await vis();
-  ok(v.mm === 1 && !v.exp, 'menubar menu closes Экспорт ' + JSON.stringify(v));
-  await p.click('#btnExport'); v = await vis(); ok(v.mm === 0 && v.exp, 'Экспорт closes the menubar menu ' + JSON.stringify(v));
-  await p.keyboard.press('Escape');
+  const vis = () => p.evaluate(() => ({ mm: [...document.querySelectorAll('.mb .mm')].filter((x) => !x.hidden).length }));
+  // clicks without mouse movement: with a real pointer the hover alone switches to Правка, and the click then folds it (as in desktop menus)
+  await click(p, '.mb[data-menu=file] .mb-btn'); await click(p, '.mb[data-menu=edit] .mb-btn'); let v = await vis();
+  ok(v.mm === 1 && await p.evaluate(() => document.querySelector('.mb[data-menu=edit]').classList.contains('open')), 'one menubar menu at a time ' + JSON.stringify(v));
+  await p.hover('.mb[data-menu=view] .mb-btn'); await p.waitForTimeout(100); v = await vis();
+  ok(v.mm === 1 && await p.evaluate(() => document.querySelector('.mb[data-menu=view]').classList.contains('open')), 'hovering another title switches the open menu');
+  await p.keyboard.press('Escape'); v = await vis(); ok(v.mm === 0, 'Escape closes it');
   await p.click('#editor .b >> nth=2'); await p.keyboard.press('End');
   const caret = () => p.evaluate(() => { const s = getSelection(); return document.activeElement.id + ':' + (s.anchorNode && s.anchorNode.textContent.slice(0, 20)) + ':' + s.anchorOffset; });
   const before = await caret();

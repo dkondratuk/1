@@ -129,17 +129,6 @@ const click = async (p, sel) => { await p.locator(sel).dispatchEvent('click'); a
     await p.locator('#fbRepl').press('Escape');
     await ctx.close();
 
-    // 8. a reader finds but cannot replace; the Replace menu item is hidden
-    const r = await open(b, { name: 'Читатель', role: 'reader' });
-    await setDoc(r.p, DOC);
-    ok(await r.p.locator('#mReplace').isHidden(), 'reader: no «Заменить…» in the menu');
-    await click(r.p, '#mFind'); await fill(r.p, '#fbFind', 'иван');
-    eq([await status(r.p), await r.p.locator('#fbAll').isDisabled(), await r.p.locator('#fbRepl').isDisabled()], ['Найдено: 6', true, true], 'reader: search works, replace is disabled');
-    ok(/Только поиск/.test(await r.p.locator('#fbNote').innerText()), 'reader: the panel says why');
-    await r.p.evaluate(() => { document.getElementById('fbRepl').disabled = false; document.getElementById('fbAll').disabled = false; document.getElementById('fbRepl').value = 'X'; document.getElementById('fbAll').click(); });
-    await r.p.waitForTimeout(150);
-    eq(await blocks(r.p), DOC.map((d) => d[1]), 'reader: Replace all changes nothing even when forced');
-    await r.ctx.close();
 
     // 9. (ДАЛЬШЕ) and «ИМЯ (ПРОД.)» on screen where a page breaks a speech, as the PDF prints them, outside the text
     const w = await open(b);

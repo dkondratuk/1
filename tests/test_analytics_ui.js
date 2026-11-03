@@ -60,6 +60,7 @@ const check = (ok, msg) => { console.log((ok ? 'ok   ' : 'FAIL ') + msg); if (!o
   await p.locator('#pane-episodes .ep[data-id="qep2"]').click(); await p.waitForTimeout(400);
   const r = await p.evaluate(() => { const { S } = __draft; const d = S.rulesRes.find((x) => x.id === 'newobj'); return { fails: S.rulesRes.filter((x) => x.status === 'fail').length, newobj: d && d.status, idx: S.project.episodes.filter((e) => e.season === S.ep.season).indexOf(S.ep) }; });
   check(r.newobj !== 'fail', 'rules tab: new object short in the episode but long over the season is not a failure (' + r.newobj + ')');
+  await p.evaluate(() => { const d = __draft; d.S.me = { name: 'Редактор', role: 'producer' }; d.applyRole(); });
   await p.locator('#btnSeason').dispatchEvent('click'); await p.waitForTimeout(300);
   const cell = await p.evaluate((i) => { const rows = document.querySelectorAll('.modal table.t tbody tr, dialog table.t tbody tr'); const row = rows[i]; return row ? row.lastElementChild.textContent.trim() : null; }, r.idx);
   check(cell === String(r.fails), 'season summary «Нарушений» matches the Rules tab (' + cell + ' vs ' + r.fails + ')');
@@ -98,9 +99,6 @@ const check = (ok, msg) => { console.log((ok ? 'ok   ' : 'FAIL ') + msg); if (!o
   check((await relNow()).length === JSON.parse(rel0).length + 1 && (await relNow()).filter((r) => r.label === 'бывшие').length === 1, 'bible: the same pair is relabelled, not duplicated');
   await card(last).locator('[data-reldel]').click(); await p.waitForTimeout(200);
   check(JSON.stringify(await relNow()) === rel0, 'bible: × removes the relation');
-  await p.evaluate(() => { const d = __draft; d.S.me = { name: 'Читатель', role: 'reader' }; d.applyRole(); d.recompute(); });
-  await p.locator('[data-rtab="bible"]').dispatchEvent('click'); await p.waitForTimeout(250);
-  check(await p.locator('#pane-bible [data-relwith]').count() === 0 && await p.locator('#pane-bible [data-chjump]').count() > 0, 'bible: reader sees scene chips but no relationship editor');
 
   await b.close();
   if (failed) { console.log(failed + ' failed'); process.exit(1); }

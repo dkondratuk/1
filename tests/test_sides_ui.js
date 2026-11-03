@@ -35,23 +35,24 @@ let fails = 0, n = 0; const ok = (c, m) => { n++; if (!c) { fails++; console.log
   };
   const sc = await ev(() => window.__draft.S.st.scenes.map((s) => ({ id: s.id, num: s.num, heading: s.heading, cast: s.cast, day: s.day })));
 
-  // 1. a project without a log; writer and reader see the dialog and the log but cannot issue
+  // 1. a project without a log; the sides window (issue and journal) is the producer's: a writer has no menu item, and
+  // the hidden item / showSides() only show «Нужен режим «Продюсер»»
   ok(await ev(() => window.__draft.S.project.sidesLog === undefined), 'demo project has no sidesLog (backward compatible)');
+  ok(await p.locator('#mSides').evaluate((x) => x.hidden) && await p.locator('.mb[data-menu=prod]').evaluate((x) => x.hidden), 'writer: «Сайды…» and the whole Производство menu are hidden');
   await menu('#mSides');
-  ok(/Сайды/.test(await p.locator('#modal h2').innerText()), 'Production → Сайды… opens the dialog');
-  ok(await p.locator('#sdOk').count() === 0 && /редактор или продюсер/.test(await p.locator('#modal').innerText()), 'writer: no issue button, explains who may');
-  ok(/ещё не выдавались/.test(await p.locator('#modal').innerText()), 'empty log shown');
-  await p.click('#sdClose');
+  ok(/Нужен режим «Продюсер»/.test(await p.locator('#modal h2').innerText()) && await p.locator('#sdOk, #sdClose').count() === 0, 'writer: the item shows «Нужен режим «Продюсер»», not the sides window');
+  await p.click('#npC');
+  await ev(() => window.__draft.showSides());
+  ok(/Нужен режим «Продюсер»/.test(await p.locator('#modal h2').innerText()), 'writer: showSides() shows the same window');
+  await p.click('#npC');
   ok(await ev(() => window.__draft.issueSides({ ids: [window.__draft.S.st.scenes[0].id], to: ['X'], expires: '2030-01-01' })) === false, 'writer: issueSides refused');
   await p.click('#npC').catch(() => {});
-  await role('reader', 'Читатель');
-  ok(await ev(() => window.__draft.issueSides({ ids: [window.__draft.S.st.scenes[0].id], to: ['X'], expires: '2030-01-01' })) === false, 'reader: issueSides refused');
   ok(!(await ev(() => (window.__draft.S.project.sidesLog || []).length)) && !(await ev(() => window.__files.length)), 'nothing logged, nothing saved');
 
-  // 2. editor: quick picks
-  await role('editor', 'Редактор Иванова');
+  // 2. producer: quick picks
+  await role('producer', 'Редактор Иванова');
   await menu('#mSides');
-  ok(await p.locator('#sdOk').count() === 1, 'editor: issue button');
+  ok(await p.locator('#sdOk').count() === 1, 'producer: issue button');
   const exp = await p.inputValue('#sdExp');
   ok(exp === await ev(() => window.__draft.C.sidesExpiry(Date.now(), 3)), 'expiry defaults to +3 days: ' + exp);
   const checked = () => ev(() => [...document.querySelectorAll('[data-sd]')].filter((b) => b.checked).map((b) => b.dataset.sd));
@@ -91,7 +92,7 @@ let fails = 0, n = 0; const ok = (c, m) => { n++; if (!c) { fails++; console.log
   // the log
   let log = await ev(() => window.__draft.S.project.sidesLog);
   ok(log.length === 2 && log[0].to === 'Анна Петрова (Лена)' && log[1].to === 'Иван Сидоров', 'log: one entry per copy');
-  ok(log.every((e) => e.id && e.at && e.by === 'Редактор Иванова' && e.role === 'editor' && e.note === 'Съёмочный день 12' && e.expires === exp && JSON.stringify(e.scenes) === JSON.stringify([sc[1].num, sc[3].num])), 'log fields: ' + JSON.stringify(log[0]));
+  ok(log.every((e) => e.id && e.at && e.by === 'Редактор Иванова' && e.role === 'producer' && e.note === 'Съёмочный день 12' && e.expires === exp && JSON.stringify(e.scenes) === JSON.stringify([sc[1].num, sc[3].num])), 'log fields: ' + JSON.stringify(log[0]));
 
   // 3. producer, one file with all copies
   await role('producer', 'Продюсер Орлов');
@@ -168,18 +169,19 @@ let fails = 0, n = 0; const ok = (c, m) => { n++; if (!c) { fails++; console.log
   await p.waitForTimeout(1500);
   files = await pdfs();
   ok(files.length === 1 && files[0].pages.every((pg, k) => files[0].text(k).includes('КОММЕРЧЕСКАЯ ТАЙНА') && files[0].flat(k).includes('безсогласияобладателязапрещены')), 'sides without an owner: generic trade-secret line on every page');
-  await role('reader', 'Читатель Иванов');
+  // 7. a reader's copy: the PDF dialog's watermark checkbox (on while «Для кого» is filled) tiles the recipient's name
   await p.locator('[data-exp="pdf"]').first().dispatchEvent('click'); await p.waitForTimeout(300);
-  ok(await p.locator('#pdfTo').isDisabled() && await p.inputValue('#pdfTo') === 'Читатель Иванов', 'reader: recipient field locked to the reader');
-  await p.evaluate(() => { const i = document.getElementById('pdfTo'); i.disabled = false; i.value = 'Чужое Имя'; });
+  ok(!(await p.locator('#pdfTo').isDisabled()) && await p.inputValue('#pdfTo') === 'Продюсер Орлов' && await p.locator('#pdfWm').isChecked(), 'PDF dialog: recipient prefilled, watermark on');
+  await p.fill('#pdfTo', ''); ok(!(await p.locator('#pdfWm').isChecked()), 'an empty «Для кого» turns the watermark off');
+  await p.fill('#pdfTo', 'Читатель Иванов'); ok(await p.locator('#pdfWm').isChecked(), 'a name turns it on');
   await p.click('#pdfOk'); await p.waitForTimeout(2500);
   files = await pdfs();
   const rtext = files.length ? files[0].pages.map((pg, k) => files[0].flat(k)).join('') : '';
-  ok(files.length === 1 && rtext.includes('Экземпляр:ЧитательИванов') && !rtext.includes('Чужое') && rtext.includes('КОММЕРЧЕСКАЯТАЙНА'), 'reader PDF: own name and trade-secret line even if the field is forced');
-  await ev(() => window.__draft.exportPDF({ to: 'Чужое Имя', wm: false })); await p.waitForTimeout(500);
+  ok(files.length === 1 && rtext.includes('Экземпляр:ЧитательИванов') && rtext.includes('КОММЕРЧЕСКАЯТАЙНА') && rtext.split('ЧитательИванов').length - 1 > files[0].pages.length, 'reader copy: the name in the footer, the trade-secret line and the tiled watermark');
+  await ev(() => window.__draft.exportPDF({ to: 'Читатель Иванов', wm: false })); await p.waitForTimeout(500);
   files = await pdfs();
   const rt2 = files.length ? files[0].pages.map((pg, k) => files[0].flat(k)).join('') : '';
-  ok(files.length === 1 && !rt2.includes('Чужое') && rt2.split('ЧитательИванов').length - 1 > files[0].pages.length, 'reader exportPDF: recipient and watermark forced');
+  ok(files.length === 1 && rt2.includes('Экземпляр:ЧитательИванов') && rt2.split('ЧитательИванов').length - 1 === files[0].pages.length, 'without the checkbox: the name in the footer only');
   // 8. scene lengths: a tiny live scene shows 1/8 in the scene list and in the sides list, never 0
   await role('producer', 'Продюсер Орлов');
   await ev(() => { const ed = document.getElementById('editor'); ed.insertAdjacentHTML('beforeend', '<div class="b t-scene" data-t="scene" data-id="tiny1">ИНТ. КОРИДОР - ДЕНЬ</div>'); window.__draft.recompute(); });

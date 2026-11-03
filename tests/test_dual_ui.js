@@ -139,13 +139,6 @@ const flags = (p) => p.evaluate(() => window.__draft.S.ep.blocks.map((b) => (b.d
     ok(await q.evaluate(() => /Ctrl\+7/.test(document.querySelector('[data-type=shot]').textContent)), 'menu shows Ctrl+7');
     await o.ctx.close();
 
-    // 5. a reader cannot switch dual dialogue
-    const rd = await open(b, { name: 'Читатель', role: 'reader' }), r = rd.p;
-    await r.evaluate((bl) => window.__load(bl), SPEECH);
-    await r.evaluate(() => window.__draft.toggleDual()); await r.waitForTimeout(100);
-    ok(await r.evaluate(() => window.__draft.S.ep.blocks.every((x) => !x.dual)) && /только чтение/i.test(await r.evaluate(() => document.querySelector('#toast').textContent)), 'reader: read-only');
-    ok(await r.evaluate(() => document.querySelector('#mDual').disabled), 'menu item disabled for a reader');
-    await rd.ctx.close();
   } catch (e) { console.log('FAIL', e); fails++; }
   await b.close();
   console.log('test_dual_ui: ' + (n - fails) + '/' + n + ' checks passed');

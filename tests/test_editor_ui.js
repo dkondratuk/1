@@ -124,14 +124,6 @@ const paste = (p, text) => p.evaluate((text) => { const dt = new DataTransfer();
     ok(n === 1, 'Ctrl+S in the editor saves once (' + n + ')');
     await ctx.close();
 
-    // 9. a reader cannot change the paper or the project
-    { const { ctx, p } = await open(b, { name: 'Читатель', role: 'reader' });
-      const before = await p.evaluate(() => [window.__draft.S.project.rules.paper, window.__draft.S.project.name]);
-      ok(await p.evaluate(() => [...document.querySelectorAll('[data-paper]')].every((x) => x.disabled)), 'paper items are disabled for a reader');
-      await p.locator('[data-paper=a4ru]').dispatchEvent('click'); await p.locator('#mProject').dispatchEvent('click'); await p.waitForTimeout(200);
-      ok(await p.evaluate(() => document.getElementById('modalBack').hidden), 'project form does not open for a reader');
-      eq(await p.evaluate(() => [window.__draft.S.project.rules.paper, window.__draft.S.project.name]), before, 'reader leaves paper and name unchanged');
-      await ctx.close(); }
   } catch (e) { console.log('ERR', e); fails++; }
   await b.close();
   console.log(fails ? fails + ' FAILED' : 'all ok'); process.exit(fails ? 1 : 0);

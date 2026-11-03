@@ -13,9 +13,9 @@ const nm=require('path').resolve(__dirname,'../node_modules')+'/';
   await p.goto('file://'+require('path').resolve(__dirname,'../app/_test.html')); await p.waitForTimeout(600);
   await p.screenshot({path:'out/z1280.png'});
   let K=0; const EXT={fdx:'fdx',docx:'docx',pdf:'pdf',fountain:'txt',project:'json'};
-  async function exp(kind, extra){ await p.click('#btnExport'); const dl=p.waitForEvent('download'); await p.click(`#exportMenu [data-exp=${kind}]`); if(extra) await extra(); const d=await dl; const f='out/e'+(K++)+'.'+EXT[kind]; console.log('suggested',d.suggestedFilename()); await d.saveAs(f); console.log('saved',f); return f; }
+  async function exp(kind, extra){ const dl=p.waitForEvent('download'); await p.locator(`[data-exp=${kind}]`).dispatchEvent('click'); if(extra) await extra(); const d=await dl; const f='out/e'+(K++)+'.'+EXT[kind]; console.log('suggested',d.suggestedFilename()); await d.saveAs(f); console.log('saved',f); return f; }
   const fdx=await exp('fdx', async()=>{await p.click('#fxOk');});
-  const docx=await exp('docx'); const pdf=await exp('pdf', async()=>{await p.click('#pdfOk');}); const txt=await exp('fountain');
+  const docx=await exp('docx', async()=>{await p.click('#ftOk');}); const pdf=await exp('pdf', async()=>{await p.click('#pdfOk');}); const txt=await exp('fountain');
   await exp('project');
   for (const f of [fdx,docx,pdf,txt]) {
     await p.locator('#btnImport').dispatchEvent('click'); await p.waitForTimeout(200);

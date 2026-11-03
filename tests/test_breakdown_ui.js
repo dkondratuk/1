@@ -30,6 +30,8 @@ let fails = 0, n = 0; const ok = (c, m) => { n++; if (!c) { fails++; console.log
   ok(await ev(() => !(window.__draft.S.ep.tags || []).length), 'demo episode starts without tags');
   ok(await ev(() => localStorage.getItem('draft.bdMarks') == null) && !(await p.locator('#mBdMarks').evaluate((x) => x.classList.contains('on'))), 'marks are off by default');
 
+  // the breakdown is the producer's tool: the tests below tag as a producer, step 10 checks that a writer cannot
+  await role('producer', 'Продюсер Орлова');
   // 1. Production → «Пометить для разбивки…»: popup, key 1 = Реквизит
   const sk = await select('сковородка');
   await menu('#mTag');
@@ -51,13 +53,13 @@ let fails = 0, n = 0; const ok = (c, m) => { n++; if (!c) { fails++; console.log
   ok(t.length === 2 && t[1].cat === 'stunts', 'key 6 tags as Трюки');
   let sc = await ev(() => { const s = window.__draft.S.st.scenes[0]; return { special: s.special, bdTags: s.bdTags, tags: s.tags }; });
   ok(sc.special && sc.bdTags.join() === 'stunts', 'scene 1 special by the breakdown: ' + JSON.stringify(sc));
-  await menu('#mRules');
+  await menu('[data-rtab=rules]');
   ok(/Трюки \(по разбивке\)/.test(await p.locator('#pane-rules').innerText()), 'studio rule names the breakdown');
-  // the same scene tagged «Трюки» by hand counts once
+  // an old «Трюки» scene mark (no such flag any more) changes nothing: the breakdown alone makes the scene special
   const sh1 = await ev(() => window.__draft.S.st.specialMin);
   await ev(() => { const d = window.__draft, s = d.S.st.scenes[0]; (d.S.ep.sceneMeta[s.id] = d.S.ep.sceneMeta[s.id] || {}).tags = ['stunts']; d.recompute(); });
-  sc = await ev(() => { const d = window.__draft, s = d.S.st.scenes[0]; return { bdTags: s.bdTags, sp: d.S.st.specialMin }; });
-  ok(sc.bdTags.length === 0 && Math.abs(sc.sp - sh1) < 1e-9, 'no double count with the scene tag: ' + JSON.stringify(sc));
+  sc = await ev(() => { const d = window.__draft, s = d.S.st.scenes[0]; return { bdTags: s.bdTags, tags: s.tags, sp: d.S.st.specialMin }; });
+  ok(sc.bdTags.join() === 'stunts' && !sc.tags.length && Math.abs(sc.sp - sh1) < 1e-9, 'old scene mark ignored, no double count: ' + JSON.stringify(sc));
   await ev(() => { const d = window.__draft, s = d.S.st.scenes[0]; d.S.ep.sceneMeta[s.id].tags = []; d.recompute(); });
 
   // 3. toolbar button, note, category by click
@@ -79,13 +81,13 @@ let fails = 0, n = 0; const ok = (c, m) => { n++; if (!c) { fails++; console.log
   ok((await tags()).length === 3, 'Ctrl+Y brings it back');
 
   // 5. scene inspector and the «Разбивка» tab
-  await menu('#mScenes');
+  await menu('[data-ltab=scenes]');
   await p.locator('#pane-scenes .sc').first().click(); await p.waitForTimeout(200);
   let insp = await p.locator('#pane-scenes .bdscene').innerText();
   ok(/Реквизит/.test(insp) && /Сковородка/.test(insp) && /Сырники/.test(insp) && /Трюки/.test(insp) && /на 3 дубля/.test(insp), 'inspector lists the scene breakdown: ' + insp.replace(/\n/g, ' | '));
   ok(/особая/.test(insp), 'inspector says the scene is special by the breakdown');
   ok(await p.locator('#pane-scenes .sc').first().locator('.chip.bdt').count() === 1, 'scene list shows the breakdown mark apart');
-  await menu('#mBreakdown');
+  await ev(() => window.__draft.showRight('breakdown')); await p.waitForTimeout(200);
   let pane = await p.locator('#pane-breakdown').innerText();
   ok(await p.locator('#pane-breakdown').isVisible() && /Реквизит · 2/i.test(pane) && /Трюки · 1/i.test(pane) && /По объектам/i.test(pane) && /КВАРТИРА ВОРОНОВЫХ/.test(pane), 'tab lists by category and object: ' + pane.slice(0, 160).replace(/\n/g, ' | '));
   // a scene chip jumps: tag something in scene 3 first
@@ -113,8 +115,8 @@ let fails = 0, n = 0; const ok = (c, m) => { n++; if (!c) { fails++; console.log
   t = await tags();
   ok(t.length === 3 && !t.some((x) => x.q === 'сковородка') && await ev(() => window.__draft.S.ep.untagged.length === 1), 'Убрать removes the tag and remembers it for merges');
   ok(await ev(() => window.__draft.S.ep.drafts.some((d) => d.name === 'С разбивкой' && d.tags.length === 4)), 'draft stored the tags');
-  await menu('#mDrafts');
-  await p.locator('[data-rest]').first().click(); await p.waitForTimeout(300);
+  await menu('#btnHistory'); await p.waitForTimeout(300);
+  await p.locator('.hist-row[data-ver]').first().click(); await p.waitForTimeout(200); await p.click('#hsAll'); await p.waitForTimeout(300);
   t = await tags();
   ok(t.length === 4 && t.some((x) => x.q === 'сковородка') && await ev(() => !window.__draft.S.ep.untagged.length), 'restoring the draft brings the tags back');
 
@@ -140,29 +142,31 @@ let fails = 0, n = 0; const ok = (c, m) => { n++; if (!c) { fails++; console.log
   ok(/Реквизит/.test(s4) && /на 3 дубля/.test(s4) && /Звук\/музыка/.test(s4), 'breakdown sheet');
   ok(await p.locator('#pane-breakdown #bdXlsx').count() === 1, 'the tab has the export button');
 
-  // 10. producer tags (cannot type) — reader cannot
+  // 10. a writer cannot tag: Ctrl+Alt+T and the (hidden) menu item do nothing, no popup, no tag, no marks switched on
+  await role('writer', 'Сценарист');
+  ok(await p.locator('#mTag').evaluate((x) => x.hidden) && await p.locator('[data-rtab=breakdown]').evaluate((x) => x.hidden), 'writer: menu item and tab hidden');
+  await ev(() => localStorage.setItem('draft.bdMarks', 'false')); await ev(() => window.__draft.toggleBdMarks(false));
+  await select('Где второй носок'); await p.keyboard.press('Control+Alt+t'); await p.waitForTimeout(150);
+  t = await tags();
+  ok(t.length === 4 && await p.locator('#bdPop').isHidden() && await ev(() => localStorage.getItem('draft.bdMarks')) === 'false', 'writer: Ctrl+Alt+T leaves the tags alone, no popup, marks stay off');
+  await menu('#mTag'); await p.waitForTimeout(100);
+  ok(await p.locator('#bdPop').isHidden() && /Нужен режим «Продюсер»/.test(await p.locator('#modal').innerText()), 'writer: the menu item shows «Нужен режим «Продюсер»»');
+  await p.click('#npC'); await p.waitForTimeout(100);
+  // marks left on by a producer are not painted for a writer (who has no Вид → «Разметка разбивки» to turn them off)
+  await ev(() => window.__draft.toggleBdMarks(true));
+  ok(await hl('props') === 0, 'writer: producer\'s marks are not painted');
   await role('producer', 'Продюсер Орлова');
+  ok(await hl('props') > 0, 'producer: the same marks are painted again');
   await select('Где второй носок'); await p.keyboard.press('Control+Alt+t'); await p.waitForTimeout(150); await p.keyboard.press('2'); await p.waitForTimeout(150);
   t = await tags();
   ok(t.length === 5 && t[4].cat === 'costume', 'producer can tag');
-  await role('reader', 'Читатель');
-  ok(await p.locator('#mTag').isHidden() && await p.locator('#menubar [data-exp=xlsx]').isHidden(), 'reader: no tag entries and no export');
-  await select('Учительница'); await p.keyboard.press('Control+Alt+t'); await p.waitForTimeout(150);
-  ok(await p.locator('#bdPop').isHidden() && (await tags()).length === 5, 'reader: Ctrl+Alt+T does nothing');
-  await menu('#mBreakdown');
-  ok(await p.locator('#pane-breakdown #bdNew').count() === 0, 'reader: no «+ Пометить» in the tab');
-  await ev(() => getSelection().removeAllRanges());
-  const box2 = await ev(() => { const el = [...document.querySelectorAll('#editor > .b')].find((x) => x.textContent.includes('Где второй носок')); const i = el.textContent.indexOf('второй'); const r = document.createRange(); r.setStart(el.firstChild, i + 1); r.setEnd(el.firstChild, i + 2); const q = r.getBoundingClientRect(); return { x: q.left + q.width / 2, y: q.top + q.height / 2 }; });
-  await p.mouse.click(box2.x, box2.y); await p.waitForTimeout(200);
-  ok(await p.locator('#bdPop').isVisible() && await p.locator('#bdDel').count() === 0, 'reader sees the tag without «Убрать»');
-  ok(await ev(() => { window.__draft.removeTag(window.__draft.S.ep.tags[0].id); return window.__draft.S.ep.tags.length; }) === 5, 'reader cannot remove a tag');
 
   // 11. saved in the project
-  await role('writer', 'Сценарист');
   await p.keyboard.press('Control+s');
   // the save is written before the reload, and the reloaded page has booted before it is read
   await p.waitForFunction(() => /Сохранено/.test(document.querySelector('#toast').textContent), null, { timeout: 5000 }).catch(() => {});
   await p.reload(); await p.waitForFunction(() => window.__draft && window.__draft.S.ep, null, { timeout: 5000 }).catch(() => {}); await p.waitForTimeout(500);
+  await role('producer', 'Продюсер Орлова');
   { const tn = (await tags()).length, hc = await hl('costume'); ok(tn === 5 && hc === 1, 'tags survive a reload, marks on: ' + tn + ' tags, ' + hc + ' costume marks'); }
 
   // 12. regressions: cut and paste, a double space, the occurrence of a repeated word, Enter in the note, Ctrl+Z for a producer
@@ -213,7 +217,7 @@ let fails = 0, n = 0; const ok = (c, m) => { n++; if (!c) { fails++; console.log
   await p.click('#bdNote'); await p.keyboard.type('машина Бориса'); await p.keyboard.press('Enter'); await p.waitForTimeout(200);
   t = await tags();
   ok(t.length === 4 && t[3].cat === 'vehicles' && t[3].note === 'машина Бориса', 'Enter in the note keeps the focused category: ' + JSON.stringify(t[3]));
-  // a producer cannot put the caret in the text, but Ctrl+Z / Ctrl+Y undo and redo the tag
+  // Ctrl+Z / Ctrl+Y undo and redo the tag in producer mode too
   await role('producer', 'Продюсер Орлова');
   await select('Финал'); await tagSel('1');
   ok((await tags()).length === 5, 'producer tagged');

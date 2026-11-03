@@ -15,7 +15,7 @@ const pdfjs = require('pdfjs-dist/legacy/build/pdf.js');
   // writer cannot lock; editor can
   await p.click('[data-ltab=scenes]'); await p.waitForTimeout(200);
   console.log('writer sees lock button:', await p.locator('#lockNum').count());
-  await ev(() => { const d = window.__draft; d.S.me = { name: 'Редактор Иванова', role: 'editor' }; d.applyRole(); d.renderScenes(); });
+  await ev(() => { const d = window.__draft; d.S.me = { name: 'Редактор Иванова', role: 'producer' }; d.applyRole(); d.renderScenes(); });
   await p.click('#lockNum'); await p.waitForTimeout(300);
   const l1 = await ev(() => ({ lock: !!window.__draft.S.ep.lock, nums: window.__draft.S.st.scenes.map((s) => s.num).join(',') }));
   console.log('locked', l1);
@@ -52,9 +52,9 @@ const pdfjs = require('pdfjs-dist/legacy/build/pdf.js');
   const geo = await ev(() => { const d = window.__draft; d.S.project.rules.paper = 'a4ru'; d.applyPaper(); d.recompute(); const cs = getComputedStyle(document.documentElement); return { w: cs.getPropertyValue('--pg-w').trim(), char: cs.getPropertyValue('--in-char').trim(), pageW: document.querySelector('#page').getBoundingClientRect().width, pages: d.S.st.pages.toFixed(2) }; });
   console.log('a4ru', geo);
   await ev(() => { const d = window.__draft; d.S.project.rules.paper = 'letter'; d.applyPaper(); d.recompute(); });
-  // reader: read-only, export only PDF, watermark on screen
-  await ev(() => { const d = window.__draft; d.S.me = { name: 'Актёр Сидоров', role: 'reader' }; d.applyRole(); });
-  console.log('reader', await ev(() => ({ ce: document.querySelector('#editor').getAttribute('contenteditable'), imp: document.querySelector('#btnImport').hidden, fdxHidden: document.querySelector('[data-exp=fdx]').hidden, pdfHidden: document.querySelector('[data-exp=pdf]').hidden, wm: document.querySelector('#page').dataset.wm })));
+  // a reader's copy: a PDF with the recipient's name as a watermark (no reader mode, no on-screen watermark)
+  await ev(() => { const d = window.__draft; d.S.me = { name: 'Актёр Сидоров', role: 'writer' }; d.applyRole(); });
+  console.log('modes', await ev(() => ({ ce: document.querySelector('#editor').getAttribute('contenteditable'), wm: document.querySelector('#page').dataset.wm || null, status: document.querySelector('#roleInfo').textContent })));
   // PDF with watermark and trade-secret footer: capture the blob
   await ev(() => { window.__pdf = null; const orig = URL.createObjectURL; URL.createObjectURL = (bl) => { window.__pdf = bl; return orig(bl); }; window.__draft.S.project.secret = { org: 'ООО «Студия Тест»', addr: 'г. Москва' }; });
   await ev(() => window.__draft.exportPDF({ to: 'Актёр Сидоров', label: 'Драфт 3', wm: true }));

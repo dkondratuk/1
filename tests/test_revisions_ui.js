@@ -36,7 +36,7 @@ let fails = 0, n = 0; const ok = (c, m) => { n++; if (!c) { fails++; console.log
   await menu('#btnDraft'); await p.fill('#drName', 'Белый драфт'); await p.click('#drOk'); await p.waitForTimeout(200);
 
   // 2. editor starts the blue revision
-  await role('editor', 'Редактор Иванова');
+  await role('producer', 'Редактор Иванова');
   await menu('#mRevisions');
   ok(/Начать «Драфт 2»/.test(await p.locator('#rvStart').innerText()), 'start button names the next draft: ' + await p.locator('#rvStart').innerText());
   await p.click('#rvStart'); await p.waitForTimeout(300);
@@ -68,7 +68,7 @@ let fails = 0, n = 0; const ok = (c, m) => { n++; if (!c) { fails++; console.log
   ok(await ev(() => !window.__draft.S.ep.revLevel && !window.__draft.S.ep.revisions), 'undo removes the revision start');
   await ev(() => { const d = window.__draft; d.redo(); d.redo(); });
   ok(await ev(() => window.__draft.S.ep.revLevel === 1 && window.__draft.S.ep.blocks.some((x) => x.rev === 1)), 'redo brings revision and mark back');
-  await menu('#mDrafts'); await p.locator('[data-rest]').first().click(); await p.waitForTimeout(300);
+  await menu('#btnHistory'); await p.waitForTimeout(300); await p.locator('.hist-row[data-ver]').first().click(); await p.waitForTimeout(200); await p.click('#hsAll'); await p.waitForTimeout(300);
   ok(await ev(() => !window.__draft.S.ep.revLevel && !document.querySelector('.revmark')), 'white draft restored without revision');
   await ev(() => window.__draft.undo());
   ok(await ev(() => window.__draft.S.ep.revLevel === 1), 'undo of the restore brings the revision back');
@@ -134,7 +134,7 @@ let fails = 0, n = 0; const ok = (c, m) => { n++; if (!c) { fails++; console.log
   ok(a4.slice(1).filter((pg) => pg.stars.length).every((pg) => pg.stars.every((x) => x < pg.w - 0.2 && x > 7.78)), 'A4 marks inside the sheet');
   await ev(() => { const d = window.__draft; d.S.project.rules.paper = 'letter'; d.applyPaper(); d.recompute(); });
   // the PDF dialog offers the option only while a revision is active
-  await menu('#exportMenu [data-exp=pdf]');
+  await menu('[data-exp=pdf]');
   ok(await p.locator('#pdfChanged').count() === 1, 'PDF dialog: «Только изменённые страницы»');
   await p.click('#pdfC');
 
@@ -148,14 +148,14 @@ let fails = 0, n = 0; const ok = (c, m) => { n++; if (!c) { fails++; console.log
   ok(st.drafts.includes('Драфт 1') && st.drafts.includes('Драфт 2'), 'starting a new draft keeps the finished one in the drafts list: ' + JSON.stringify(st.drafts));
   ok(/Драфт 3, версия 1/.test(await (async () => { await menu('#btnDraft'); const v = await p.inputValue('#drName'); await p.click('#drC'); return v; })()), 'manual save is named within the current draft');
 
-  // 10. reader: nothing to start or lock, menu item hidden
-  await role('reader', 'Актёр');
+  // 10. writer mode: nothing to start or lock, menu item hidden
+  await role('writer', 'Актёр');
   await menu('#mRevisions');
-  ok(await p.locator('#rvStart').count() === 0 && await p.locator('#rvUnlock').count() === 0, 'reader: read-only dialog');
+  ok(await p.locator('#rvStart').count() === 0 && await p.locator('#rvUnlock').count() === 0, 'writer: no start or unlock in the dialog');
   await p.click('#rvClose');
-  ok(await ev(() => document.querySelector('#mPageLock').hidden), 'reader: page lock menu item hidden');
+  ok(await ev(() => document.querySelector('#mPageLock').hidden), 'writer: page lock menu item hidden');
   await ev(() => window.__draft.startRevision()); await p.waitForTimeout(100);
-  ok(await ev(() => window.__draft.S.ep.revLevel === 2), 'reader cannot start a revision');
+  ok(await ev(() => window.__draft.S.ep.revLevel === 2), 'a writer cannot start a revision');
 
   // 11. unlock asks for a reason and is logged; the history keeps a snapshot
   await role('producer', 'Продюсер Петров');
@@ -172,7 +172,7 @@ let fails = 0, n = 0; const ok = (c, m) => { n++; if (!c) { fails++; console.log
   // 13. FDX round trip: Final Draft's revision marks come back as this episode's revisions
   const fdx2 = await ev(() => { const d = window.__draft; return d.C.exportFDX(d.S.ep, d.S.project, d.S.st, {}); });
   const tmp = path.join(require('os').tmpdir(), 'draft-rev-' + Date.now() + '.fdx'); require('fs').writeFileSync(tmp, fdx2);
-  await role('editor', 'Редактор Иванова');
+  await role('producer', 'Редактор Иванова');
   await p.locator('#btnImport').dispatchEvent('click'); await p.waitForTimeout(200);
   const [fc] = await Promise.all([p.waitForEvent('filechooser'), p.click('#drop')]); await fc.setFiles(tmp);
   await p.waitForSelector('#impDone', { timeout: 15000 }); await p.click('#impDone'); await p.waitForTimeout(300);
@@ -188,7 +188,7 @@ let fails = 0, n = 0; const ok = (c, m) => { n++; if (!c) { fails++; console.log
   }, bl);
   // a fresh white script, pages (and scene numbers when asked) locked, the blue revision started
   const fresh = async (nums) => {
-    await role('editor', 'Редактор Иванова');
+    await role('producer', 'Редактор Иванова');
     await ev(() => { const e = window.__draft.S.ep; delete e.revisions; delete e.revLevel; delete e.pageLock; delete e.lock; e.sceneMeta = {}; });
     await setBlocks(script4);
     await ev((nums) => { const d = window.__draft; if (nums) d.lockNumbers(); d.lockPages(); d.startRevision(); }, nums);
@@ -219,7 +219,7 @@ let fails = 0, n = 0; const ok = (c, m) => { n++; if (!c) { fails++; console.log
   ok(ch.slice(1).map(label).join() === pgS2 && /УДАЛЕНА/.test(ch[1].text), 'the page that held the scene is sent: ' + ch.slice(1).map(label));
   // a scene moved down with ↓: its text is marked and replacement pages can be made
   await fresh();
-  await menu('#mScenes');
+  await menu('[data-ltab=scenes]');
   await p.locator('#pane-scenes .sc').nth(1).click(); await p.waitForTimeout(200);
   await p.click('#scDown'); await p.waitForTimeout(300);
   st = await ev(() => { const d = window.__draft; return { order: d.S.ep.blocks.filter((x) => x.t === 'scene').map((x) => x.id).join(), marked: d.S.ep.blocks.filter((x) => x.rev).length, marks: document.querySelectorAll('.revmark').length }; });
@@ -228,21 +228,21 @@ let fails = 0, n = 0; const ok = (c, m) => { n++; if (!c) { fails++; console.log
   ch = await pdf({ to: 'Группа', label: 'Драфт', wm: false, changedOnly: true });
   ok(await ev(() => window.__pdfs.length) === nPdf + 1 && ch.length > 1 && ch.slice(1).every((pg) => pg.stars.length || /[A-Z]$/.test(label(pg) || '')), 'changed pages after the move: ' + ch.slice(1).map(label));
   // a writer restoring a draft from before the lock keeps the producer's page lock and revision; an editor's restore logs the unlock
-  await role('editor', 'Редактор Иванова');
+  await role('producer', 'Редактор Иванова');
   await ev(() => { const e = window.__draft.S.ep; delete e.revisions; delete e.revLevel; delete e.pageLock; delete e.lock; e.pageLockLog = []; });
   await setBlocks(script4);
   await role('writer', 'Сценарист');
   await menu('#btnDraft'); await p.fill('#drName', 'До лока'); await p.click('#drOk'); await p.waitForTimeout(200);
-  await role('editor', 'Редактор Иванова');
+  await role('producer', 'Редактор Иванова');
   await ev(() => { const d = window.__draft; d.lockPages(); d.startRevision(); const e = document.querySelector('#editor > .b[data-id="A1_3"]'); e.textContent += ' Правка.'; d.recompute(); });
   await role('writer', 'Сценарист');
   await ev(() => window.__draft.unlockPages()); await p.waitForTimeout(150);
   ok(await p.locator('#upOk').count() === 0, 'writer: unlock refused');
-  await menu('#mDrafts'); await p.locator('[data-rest]').first().click(); await p.waitForTimeout(300);
+  await menu('#btnHistory'); await p.waitForTimeout(300); await p.locator('.hist-row[data-ver]').first().click(); await p.waitForTimeout(200); await p.click('#hsAll'); await p.waitForTimeout(300);
   st = await ev(() => { const e = window.__draft.S.ep; return { pl: !!e.pageLock, lv: e.revLevel, log: (e.pageLockLog || []).length, txt: e.blocks.find((x) => x.id === 'A1_3').x, toast: document.querySelector('#toast').textContent }; });
   ok(st.pl && st.lv === 1 && st.log === 0 && !/Правка/.test(st.txt) && /остались прежними/.test(st.toast), 'writer restore: text back, page lock and revision kept: ' + JSON.stringify(st));
-  await role('editor', 'Редактор Иванова');
-  await menu('#mDrafts'); await p.locator('[data-rest]').nth(1).click(); await p.waitForTimeout(300);
+  await role('producer', 'Редактор Иванова');
+  await menu('#btnHistory'); await p.waitForTimeout(300); await p.locator('.hist-row[data-ver]').first().click(); await p.waitForTimeout(200); await p.click('#hsAll'); await p.waitForTimeout(300);
   st = await ev(() => { const e = window.__draft.S.ep; return { pl: !!e.pageLock, lv: e.revLevel || 0, log: (e.pageLockLog || []).map((l) => l.reason) }; });
   ok(!st.pl && !st.lv && st.log.length === 1 && /восстановлена версия «До лока»/.test(st.log[0]), 'editor restore drops the lock and logs it: ' + JSON.stringify(st));
 
