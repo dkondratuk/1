@@ -786,6 +786,7 @@
     const chars = project.chars || {};
     const dictNames = Object.keys(chars);
     const bdBy = bdByScene(blocks, ep.tags);
+    let autoNum = null;
     const scenes = sceneSplit(blocks).map((s, k) => {
       let lines = 0;
       const speaking = new Set();
@@ -803,8 +804,15 @@
         }
       }
       const meta = (ep.sceneMeta || {})[s.id] || {};
-      // an omitted scene keeps its tags and extras in meta (restore brings them back) but contributes no cast, tags or shifts
-      const omitted = !!meta.omitted || OMIT_RE.test(s.heading || '');
+      // an omitted scene keeps its tags and extras in meta (restore brings them back) but contributes no cast, tags or shifts;
+      // a heading that ends with «СЦЕНА УДАЛЕНА» (the writer's own mark, as in a Word script) is a deleted scene too
+      const omitted = !!meta.omitted || OMIT_RE.test(s.heading || '') || OMIT_TAIL_RE.test(s.heading || '');
+      // the number: the scene's own (from the file or the lock), otherwise the numbering goes on from the last numbered
+      // scene before it («44-26» → «44-27», never a bare «27» after a prefixed run); before any numbered scene it is the position
+      let num;
+      if (meta.num) { num = String(meta.num); const q = numParts(num); autoNum = q ? { prefix: q.prefix, base: q.base } : null; }
+      else if (autoNum) { autoNum.base += 1; num = autoNum.prefix + autoNum.base; }
+      else num = String(k + 1);
       if (omitted) { speaking.clear(); mentioned.clear(); }
       else (meta.extras || []).forEach((n) => mentioned.add(charName(n)));
       const cast = new Set([...speaking, ...mentioned]);
@@ -825,7 +833,7 @@
         id: s.id, n: k + 1, from: s.from, to: s.to, heading: s.heading, h, pav, night: isNight(h),
         lines, share, pages: share * pages, min, sec: Math.round(min * 60), cast: [...cast], speaking: [...speaking],
         silent: [...cast].filter((n) => !speaking.has(n)), minors, tags, bd, bdTags, special, shifts, replicas, dialogueWords,
-        synopsis: meta.synopsis || '', day: meta.day || h.day || '', num: meta.num || String(k + 1), fileNum: !!meta.num,
+        synopsis: meta.synopsis || '', day: meta.day || h.day || '', num, fileNum: !!meta.num,
         line: meta.line || '', color: sceneColor(meta.color) ? meta.color : '', omitted, page: pageAt[s.from] || '1',
       };
     });
@@ -1200,6 +1208,8 @@
   // first one becomes A1, a deleted scene keeps its number as «УДАЛЕНА» (OMITTED). Numbers may carry an episode prefix «3-12».
   // no \b here: in JS it is an ASCII word boundary and never fires after a Cyrillic letter
   const OMIT_RE = /^\s*(УДАЛЕНА|ОПУЩЕНА|OMITTED)(?![A-Za-zА-Яа-яЁё0-9_])/i;
+  // the same mark at the end of a heading: «ИНТ. ДОМ. НОЧЬ 1 СЦЕНА УДАЛЕНА» — the text stays, the scene is not material
+  const OMIT_TAIL_RE = /(^|[^A-Za-zА-Яа-яЁё0-9_])(СЦЕНА\s+УДАЛЕНА|УДАЛЕНА|ОПУЩЕНА|OMITTED)\s*[.)]?\s*$/i;
   const NUM_PARTS = /^(\d+-)?([A-ZА-Я]*)(\d+)([A-ZА-Я]*)$/;
   const LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
   function numParts(num) {

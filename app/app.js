@@ -911,7 +911,7 @@
   function decorateEditor() {
     const els = [...ed.children];
     const breaks = S.st.lay.breaks, labels = S.st.lay.labels;
-    const sceneN = {}, sceneC = {}; S.st.scenes.forEach((s) => { sceneN[s.id] = s.num; sceneC[s.id] = s.color; });
+    const sceneN = {}, sceneC = {}, sceneO = {}; S.st.scenes.forEach((s) => { sceneN[s.id] = s.num; sceneC[s.id] = s.color; sceneO[s.id] = s.omitted; });
     const auto = S.st.lay.contd || new Set();
     els.forEach((el, i) => {
       const br = breaks[i];
@@ -924,7 +924,7 @@
       const col = el.dataset.t === 'scene' ? sceneC[el.dataset.id] || '' : '';
       if (col) { if (el.dataset.color !== col) { el.dataset.color = col; el.style.setProperty('--sc-color', C.sceneColor(col).hex); } }
       else if (el.dataset.color) { delete el.dataset.color; el.style.removeProperty('--sc-color'); if (!el.getAttribute('style')) el.removeAttribute('style'); }
-      const om = el.dataset.t === 'scene' && !!(S.ep.sceneMeta[el.dataset.id] || {}).omitted;
+      const om = el.dataset.t === 'scene' && !!sceneO[el.dataset.id];
       if (om !== el.classList.contains('omit')) el.classList.toggle('omit', om);
     });
     // a speech broken by a page (Final Draft (MORE) / CONT'D): room is made for «(ДАЛЬШЕ)» and «ИМЯ (ПРОД.)» before

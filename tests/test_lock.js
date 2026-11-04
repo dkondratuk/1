@@ -109,3 +109,22 @@ ok(pl.length === 2 && !pl.some((t) => /Актёр/.test(t)), 'pdfLines drops wat
   ok(ae.length === 3 && ae[0].id === 'u' && ae.some((x) => x.reason === 'старое' && x.type === 'unlock') && ae.some((x) => x.type === 'pageunlock' && x.epLabel === 'С1Е2'), 'auditEntries includes old lockLog/pageLockLog once');
 }
 console.log('test_lock: ' + n + ' checks passed');
+
+// 7. without a lock, scenes without a number of their own continue the numbering of the last numbered scene («44-26» → «44-27»)
+{
+  const p7 = C.demoProject(); const e7 = p7.episodes[0];
+  const ids = C.analyzeEpisode(e7, p7).scenes.map((s) => s.id);
+  e7.sceneMeta = {}; e7.sceneMeta[ids[0]] = { num: '44-1' }; e7.sceneMeta[ids[1]] = { num: '44-2' };
+  const nums = C.analyzeEpisode(e7, p7).scenes.map((s) => s.num);
+  assert.deepStrictEqual(nums.slice(0, 4), ['44-1', '44-2', '44-3', '44-4'], 'prefixed numbering continues: ' + nums.join(' '));
+  e7.sceneMeta = {}; e7.sceneMeta[ids[1]] = { num: '12A' };
+  const nums2 = C.analyzeEpisode(e7, p7).scenes.map((s) => s.num);
+  assert.deepStrictEqual(nums2.slice(0, 4), ['1', '12A', '13', '14'], 'after 12A comes 13: ' + nums2.join(' '));
+  e7.sceneMeta = {};
+  assert.deepStrictEqual(C.analyzeEpisode(e7, p7).scenes.map((s) => s.num).slice(0, 3), ['1', '2', '3'], 'plain positions without numbers');
+  // a heading that ends with «СЦЕНА УДАЛЕНА» is a deleted scene: no cast, no time, the number stays
+  e7.blocks[C.analyzeEpisode(e7, p7).scenes[1].from].x = 'ИНТ. ДОМ СПИЦЫНЫХ. КОМНАТА ЮЛИ. НОЧЬ 1 СЦЕНА УДАЛЕНА';
+  const s7 = C.analyzeEpisode(e7, p7).scenes[1];
+  ok(s7.omitted && s7.cast.length === 0 && s7.num === '2', 'trailing «СЦЕНА УДАЛЕНА» marks the scene deleted');
+  ok(!C.analyzeEpisode(e7, p7).scenes[0].omitted, 'a normal heading is not deleted');
+}
